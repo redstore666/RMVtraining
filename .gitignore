@@ -1,0 +1,28 @@
+# ===== 构建产物（随时可重新生成）=====
+build/
+cmake-build-*/
+*.o
+*.a
+*.so
+
+# ===== 标定/测试的可再生调试产物 =====
+# calib_debug 由标定工具对 calib_data 重新生成；calib_synth 由 gen_synth_calib.py 生成
+calib_debug/
+calib_synth/
+
+# ===== Python 运行时产物 =====
+__pycache__/
+*.py[cod]
+
+# ===== IDE / 编辑器 / 系统 =====
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# ===== 本地工具状态（ZCode 会话/搜索配置）=====
+.zcode/
+.zcodeignore
+
+# 注意：不要忽略 *.png / *.onnx —— calib_data、tests/data、models/ 是必须提交的材料
