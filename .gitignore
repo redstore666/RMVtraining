@@ -24,5 +24,6 @@ __pycache__/
 # ===== 本地工具状态（ZCode 会话/搜索配置）=====
 .zcode/
 .zcodeignore
+.tmp/
 
 # 注意：不要忽略 *.png / *.onnx —— calib_data、tests/data、models/ 是必须提交的材料
