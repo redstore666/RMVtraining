@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include <opencv2/calib3d.hpp> // solvePnP / projectPoints / Rodrigues
 #include <opencv2/imgproc.hpp>
 #include <opencv2/imgcodecs.hpp>
 
@@ -77,7 +78,7 @@ void close_camera(void *handle)
 //============ 主逻辑 ============
 bool get_pic(cv::Mat &pic)
 {
-    // TODO(student)：在这里完成相机的一次性初始化/打开/启动，随后获取一帧并转换为 BGR。
+    // tips：在这里完成相机的一次性初始化/打开/启动，随后获取一帧并转换为 BGR。
     // ============ 首次调用 → 初始化相机 ============
     if (!s_initialized)
     {
@@ -335,7 +336,7 @@ namespace
     std::vector<std::pair<std::size_t, std::size_t>> matchLightBars(
         const std::vector<LightBar> &bars)
     {
-        // TODO(student)
+        // tips
         std::vector<std::pair<std::size_t, std::size_t>> pairs;
         for (std::size_t i = 0; i < bars.size(); ++i)
         {
@@ -621,18 +622,139 @@ std::vector<ArmorDetection> armor_detect(const cv::Mat &pic, TeamColor enemy_col
     return detections;
 }
 
-std::vector<ArmorPose> armor_solve(const std::vector<ArmorDetection> &,
-                                   const CameraParameters &, const GimbalState &)
+// ==================== 任务 3：位姿解算 ====================
+// 输入任务 2 的检测结果，输出每个装甲板的位姿观测（ArmorPose）。
+// 数据流：物点建模（米）→ solvePnP → 重投影自检 → 门禁 → 外参变换到云台系。
+// 四个输出含义：position_camera/gimbal_m（在哪）、armor_yaw（什么朝向）、
+// reprojection_error（这次观测可信吗）——后面 EKF 全靠这四样。
+namespace
 {
-    // TODO(student)：按装甲板尺寸建立物点（毫米转换为米），调用 solvePnP，
-    // 拒绝深度或重投影误差异常的结果，再应用已标定的刚体变换。
-    return {};
+
+    // 物点建模：某尺寸装甲板的 4 个三维角点，单位米，顺序必须与
+    // ArmorDetection::corners 一致（TL, TR, BR, BL）。
+    // 装甲板坐标系：原点在板面中心，x 向右，y 向下，z 沿板面外法向。
+    // 尺寸来自 装甲板尺寸.txt：小 135x57、大 230x57（毫米→米，除以 1000！）。
+    // 记住"图像点与物点同源"原则：物点是外缘尺寸，corners 也是外缘角点。
+    std::vector<cv::Point3f> buildObjectPoints(ArmorSize size)
+    {
+        // tips：按 size 取半宽 half_w、半高 half_h（米），返回 4 个点：
+        //   TL(-half_w, -half_h, 0)  TR(+half_w, -half_h, 0)
+        //   BR(+half_w, +half_h, 0)  BL(-half_w, +half_h, 0)
+        double half_w = 0.0, half_h = 0.057f / 2;
+        if (size == ArmorSize::Small)
+            half_w = 0.135f / 2;
+        else
+            half_w = 0.230f / 2;
+        const cv::Point3f TL(-half_w, -half_h, 0.0F);
+        const cv::Point3f TR(+half_w, -half_h, 0.0F);
+        const cv::Point3f BR(+half_w, +half_h, 0.0F);
+        const cv::Point3f BL(-half_w, +half_h, 0.0F);
+        return {TL, TR, BR, BL};
+    }
+
+    // 门禁阈值（现场可调；任务书要求拒绝深度非法或误差异常的观测）
+    constexpr double kMaxReprojErrorPx = 3.0; // 重投影误差上限,阈值按数据分布定，实拍再调
+    constexpr double kMinDepthM = 0.05;       // 深度下限（近于 5cm 视为异常）
+    constexpr double kMaxDepthM = 20.0;       // 深度上限
+
+} // namespace
+
+std::vector<ArmorPose> armor_solve(const std::vector<ArmorDetection> &detections,
+                                   const CameraParameters &camera,
+                                   const GimbalState &gimbal)
+{
+    (void)gimbal; // 云台姿态补偿属于 EKF/预测阶段，此处不用
+    std::vector<ArmorPose> poses;
+
+    for (const ArmorDetection &det : detections)
+    {
+        const std::vector<cv::Point3f> object_points = buildObjectPoints(det.size);
+        if (object_points.empty())
+        {
+            continue; // 物点未建模（TODO 未完成）时静默跳过
+        }
+
+        // 图像点：corners 本身就是 TL,TR,BR,BL 顺序，直接搬进 vector
+        const std::vector<cv::Point2f> image_points(det.corners.begin(),
+                                                    det.corners.end());
+
+        // PnP：4 个共面点。SOLVEPNP_IPPE 是专为共面目标设计的解法，
+        // 自动在两组镜像解中取重投影更优者。
+        cv::Mat rvec, tvec;
+        const bool ok = cv::solvePnP(object_points, image_points,
+                                     camera.camera_matrix,
+                                     camera.distortion_coefficients, rvec, tvec,
+                                     false, cv::SOLVEPNP_IPPE);
+        if (!ok)
+        {
+            continue; // PnP 失败 → 空观测，交给 EKF 纯预测
+        }
+
+        // 重投影自检：用解出的位姿把物点投回图像，与实际角点比较
+        std::vector<cv::Point2f> projected;
+        cv::projectPoints(object_points, rvec, tvec, camera.camera_matrix,
+                          camera.distortion_coefficients, projected);
+        double err_sq = 0.0;
+        for (std::size_t k = 0; k < projected.size(); ++k)
+        {
+            const double e = cv::norm(projected[k] - image_points[k]);
+            err_sq += e * e;
+        }
+        const double reproj_error =
+            std::sqrt(err_sq / static_cast<double>(projected.size()));
+
+        // tips 门禁：以下任一不满足就 continue（拒绝该观测）——
+        //   1) reproj_error > kMaxReprojErrorPx
+        //   2) 深度 z = tvec.at<double>(2) 超出 [kMinDepthM, kMaxDepthM]
+        //   3) 数值非有限（std::isfinite 检查 x/y/z 与 reproj_error）
+        const bool all_finite = std::isfinite(reproj_error) &&
+                                std::isfinite(tvec.at<double>(0)) &&
+                                std::isfinite(tvec.at<double>(1)) &&
+                                std::isfinite(tvec.at<double>(2));
+        if (!all_finite)
+            continue;
+        if (reproj_error > kMaxReprojErrorPx ||
+            tvec.at<double>(2) < kMinDepthM || tvec.at<double>(2) > kMaxDepthM)
+            continue;
+
+        ArmorPose pose;
+        pose.detection = det;
+        pose.reprojection_error = reproj_error;
+        pose.position_camera_m = cv::Vec3d(tvec); // tvec 即板心在相机系坐标（米）
+
+        // 外参变换：p_gimbal = R * p_camera + t（单位外参时两者相同）
+        if (camera.rotation_camera_to_gimbal.empty())
+        {
+            pose.position_gimbal_m = pose.position_camera_m; // 未标定外参的防御分支
+        }
+        else
+        {
+            const cv::Mat p_cam_mat(pose.position_camera_m);
+            const cv::Mat p_gim_mat = camera.rotation_camera_to_gimbal * p_cam_mat +
+                                      camera.translation_camera_to_gimbal;
+            pose.position_gimbal_m = cv::Vec3d(p_gim_mat);
+        }
+
+        // armor_yaw：板面法向相对光轴的水平偏角（弧度）。
+        //   1) cv::Rodrigues(rvec, R_obj2cam) 把旋转向量变成 3x3 旋转矩阵
+        //   2) 板面法向在相机系：n = R_obj2cam * (0, 0, 1)
+        //   3) pose.armor_yaw = std::atan2(n.x, n.z)（合成图上应 ≈0；
+        //      符号约定用实拍/带 yaw 的场景实证校准，方法同 tilt_deg）
+        cv::Mat R_obj2cam;
+        cv::Rodrigues(rvec, R_obj2cam);                                          // 旋转向量 → 3x3 矩阵
+        const cv::Mat n = R_obj2cam * (cv::Mat_<double>(3, 1) << 0.0, 0.0, 1.0); // 板面法向转到相机系
+        // cv::Mat_<double>(3, 1) << 0.0, 0.0, 1.0是OpenCV 的逗号初始化语法,专门用来写小矩阵
+        pose.armor_yaw = std::atan2(n.at<double>(0), n.at<double>(2)); // n.x, n.z
+
+        poses.push_back(pose);
+    }
+    return poses;
 }
 
 PredictionResult ekf_predict(const std::vector<ArmorPose> &, const GimbalState &,
                              double)
 {
-    // TODO(student)：在未来状态预测前处理观测关联、初始化、角度归一化、离群点、
+    // tips：在未来状态预测前处理观测关联、初始化、角度归一化、离群点、
     // 装甲板切换、短时丢失以及超时重置。
     return {};
 }

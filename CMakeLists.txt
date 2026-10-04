@@ -114,6 +114,11 @@ add_executable(test_detect tests/test_detect.cpp)
 target_link_libraries(test_detect PRIVATE training_core ${OpenCV_LIBS})
 target_include_directories(test_detect PRIVATE ${OpenCV_INCLUDE_DIRS})
 
+# 位姿解算离线测试：armor_detect → armor_solve，打印位姿（单位外参开发配置）。
+add_executable(test_solve tests/test_solve.cpp)
+target_link_libraries(test_solve PRIVATE training_core ${OpenCV_LIBS})
+target_include_directories(test_solve PRIVATE ${OpenCV_INCLUDE_DIRS})
+
 # 分类器烟雾测试（ctest -R classifier 运行）。
 add_test(NAME classifier_sticker_1
     COMMAND test_classifier ${CMAKE_SOURCE_DIR}/tests/data/sticker_1.png
