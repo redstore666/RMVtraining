@@ -30,8 +30,8 @@
 
 namespace {
 
-constexpr int kPatternCols = 9;  // 内角点列数
-constexpr int kPatternRows = 6;  // 内角点行数
+constexpr int kPatternCols = 7;  // 内角点列数（8×5 方格 → 7×4 内角点）
+constexpr int kPatternRows = 4;  // 内角点行数
 constexpr double kCoverageTarget = 0.85;  // r_max 目标（与自查工具一致）
 
 struct Coverage {

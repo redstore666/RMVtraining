@@ -8,6 +8,7 @@
 #include <utility>
 
 #include <opencv2/imgproc.hpp>
+#include <opencv2/imgcodecs.hpp>
 
 //============ 初始化 ============
 static bool s_initialized = false; // 只初始化一次
@@ -161,7 +162,7 @@ bool get_pic(cv::Mat &pic)
 // ==================== 任务 2：装甲板识别 ====================
 // 传统视觉路线：颜色掩码 -> 灯条提取 -> 灯条配对 -> 角点 -> 数字分类。
 // 下面 6 个辅助函数是流水线的骨架（由 mentor 按已验证的方案搭好），
-// 内部逻辑需要你逐个实现；每个 TODO 上方注释给出了建议的过滤条件与依据。
+// 内部逻辑：每个 TODO 上方注释给出了过滤条件与依据。
 // 完成后用 ./build/test_detect 在 tests/data/ 的合成图上验证，
 // 再到相机实拍上调阈值。参考流程验证记录见 models/README.md。
 namespace
@@ -195,12 +196,31 @@ namespace
     cv::Mat buildEnemyMask(const cv::Mat &bgr, TeamColor enemy)
     {
         // TODO(student)
-        (void)bgr;
-        (void)enemy;
         cv::Mat hsv;
         cv::cvtColor(bgr, hsv, cv::COLOR_BGR2HSV);
-        cv::inRange(hsv, cv::Scalar(H低, S低, V低), cv::Scalar(H高, S高, V高), mask);
-        return {};
+        cv::Mat opened, closed;
+        cv::Mat kernelopen = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
+        cv::Mat kernelclose = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 5));
+        if (enemy == TeamColor::Red)
+        {
+            cv::Mat RMaskLow, RMaskHigh, RMask;
+            cv::inRange(hsv, cv::Scalar(0, 100, 80), cv::Scalar(10, 255, 255), RMaskLow);
+            cv::inRange(hsv, cv::Scalar(160, 100, 80), cv::Scalar(180, 255, 255), RMaskHigh);
+            cv::bitwise_or(RMaskLow, RMaskHigh, RMask);
+            cv::morphologyEx(RMask, opened, cv::MORPH_OPEN, kernelopen);
+            cv::morphologyEx(RMask, closed, cv::MORPH_CLOSE, kernelclose);
+            cv::imwrite("./tmp/mask_debug.png", RMask);
+            return closed;
+        }
+        else
+        {
+            cv::Mat BMask;
+            cv::inRange(hsv, cv::Scalar(100, 100, 80), cv::Scalar(130, 255, 255), BMask);
+            cv::morphologyEx(BMask, opened, cv::MORPH_OPEN, kernelopen);
+            cv::morphologyEx(BMask, closed, cv::MORPH_CLOSE, kernelclose);
+            cv::imwrite("./tmp/mask_debug.png", BMask);
+            return closed;
+        }
     }
 
     // 步骤 2：从掩码提取灯条。mask 为空时直接返回空。

@@ -22,7 +22,7 @@ import sys
 import cv2
 import numpy as np
 
-COLS, ROWS = 9, 6
+COLS, ROWS = 7, 4
 FLAGS = cv2.CALIB_CB_ADAPTIVE_THRESH | cv2.CALIB_CB_NORMALIZE_IMAGE
 
 

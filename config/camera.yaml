@@ -5,17 +5,17 @@
 calibrated: 0
 
 # 标定图像分辨率，单位为 pixel；0 为无效占位值。
-image_width: 0
-image_height: 0
+image_width: 1440
+image_height: 1080
 
 # 相机内参矩阵 K。以下全零数据仅用于保留 OpenCV YAML 矩阵格式，不能用于运行。
 camera_matrix: !!opencv-matrix
   rows: 3
   cols: 3
   dt: d
-  data: [ 0., 0., 0.,
-          0., 0., 0.,
-          0., 0., 0. ]
+  data: [ 1.8208962891367187e+03, 0., 7.3033252911042359e+02,
+          0., 1.8162702177869917e+03, 5.4688348777860267e+02,
+          0., 0., 1. ]
 
 # 畸变顺序必须与所选标定模型一致，并在报告中说明。
 # 默认模板按 OpenCV pinhole 模型保留 [k1, k2, p1, p2, k3] 五个位置。
@@ -23,7 +23,7 @@ distortion_coefficients: !!opencv-matrix
   rows: 1
   cols: 5
   dt: d
-  data: [ 0., 0., 0., 0., 0. ]
+  data: [ -5.8506278000346246e-02, 0., 0., 0., 0. ]
 
 # 从相机坐标系变换到云台坐标系的旋转矩阵 R_gimbal_camera。
 # 全零矩阵是无效占位值，禁止将其视为单位旋转。
@@ -44,4 +44,4 @@ translation_camera_to_gimbal: !!opencv-matrix
   data: [ 0., 0., 0. ]
 
 # 标定结果记录；负数为未填写占位值。
-mean_reprojection_error_px: -1.
+mean_reprojection_error_px: 2.4996468972283009e-01

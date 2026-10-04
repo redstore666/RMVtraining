@@ -28,11 +28,12 @@
 namespace
 {
 
-    constexpr int kPatternCols = 9; // 内角点列数（横向格子数 - 1）
-    constexpr int kPatternRows = 6; // 内角点行数（纵向格子数 - 1）
-    // 方格实测边长（mm）。打印件实测：校验线 95.0/100、横向 152.1/160、
-    // 纵向 115.1/120 —— 比例 0.950/0.951/0.959，取最长基线 0.9506 → 19.01mm。
-    constexpr double kSquareSizeMm = 19.01;
+    constexpr int kPatternCols = 7; // 内角点列数（8×5 方格 → 7×4 内角点）
+    constexpr int kPatternRows = 4; // 内角点行数（纵向格子数 - 1）
+    // 方格实测边长（mm）。新标定板：8×5 方格，边长 28.5mm。
+    // 注意：边长误差会 1:1 传递到位移尺度（深度），提交前用直尺量 4 格总宽复核
+    // （应 ≈114mm）。
+    constexpr double kSquareSizeMm = 28.5;
 
     // 收集目录下所有图像文件（按文件名排序）。
     std::vector<std::string> listImages(const std::filesystem::path &dir)
