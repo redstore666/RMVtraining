@@ -10,6 +10,9 @@
 // 超时或断开时返回 false；不要在此函数中终止进程。
 bool init_camera(void **handle);
 void close_camera(void *handle);
+
+// 画框的辅助函数：
+void drawDetections(cv::Mat &image, const std::vector<ArmorDetection> &detections);
 bool get_pic(cv::Mat &pic);
 
 // 任务 2：检测敌方装甲板并识别其编号。每个结果必须包含四个按顺时针排列的

@@ -29,8 +29,8 @@
 最小构建流程：
 
 ```bash
-cmake -S . -B build-rmvtraining
-cmake --build build-rmvtraining -j
+cmake -S . -B build
+cmake --build build -j
 ```
 
 构建成功只说明起始框架可编译，不代表相机、识别模型或标定参数已经配置完成。
@@ -59,3 +59,20 @@ Web Debug 默认监听本机地址，可在 `http://127.0.0.1:8080` 查看。`st
 - 神经网络路线所需的离线模型与来源说明；
 - 实验报告，说明坐标系、算法设计、关键参数、测试结果和已知问题；
 - 不提交构建目录、IDE 缓存或与运行无关的大文件。
+
+draft:
+伪代码：
+传入poses GimbalState(？) 
+init
+定义8 维状态：[x_c, y_c, vx_c, vy_c, yaw, vyaw, r, z]
+f：车体中心匀速 + yaw += vyaw·dt（不要在 f 里归一化 yaw）
+h：armor_pos = 中心 + r·(cos(yaw+offset), sin(yaw+offset)) + armor_yaw_obs = yaw + offset
+predict 
+match
+update/switch/outlier
+归一化 yaw
+超时检查
+ 输出
+slot 匹配：遍历 k 个槽位，找"预测位置 vs 观测位置"最小误差
+出
+prediction_bias_s 提前量：预测到 now + prediction_bias_s 时刻，再映射成 yaw/pitch(?)

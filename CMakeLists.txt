@@ -64,6 +64,7 @@ target_link_libraries(rmv_training
 
 set_target_properties(rmv_training PROPERTIES
     BUILD_RPATH "/opt/MVS/lib/64")
+
 # 与 test_camera 同理：让 dlopen 能按 RPATH 找到 libFormatConversion.so。
 target_link_options(rmv_training PRIVATE "-Wl,--disable-new-dtags")
 
@@ -81,6 +82,7 @@ if(BUILD_TESTING)
     # 独立相机取流测试：直接调用 get_pic()，不依赖串口。
     add_executable(test_camera tests/test_camera.cpp)
     target_link_libraries(test_camera PRIVATE training_core ${OpenCV_LIBS})
+
     # SDK 内部用 dlopen 加载 libFormatConversion.so：dlopen 只认老式 DT_RPATH，
     # 所以用 --disable-new-dtags 写入 RPATH 而非 RUNPATH。
     target_link_options(test_camera PRIVATE "-Wl,--disable-new-dtags")
@@ -119,13 +121,23 @@ add_executable(test_solve tests/test_solve.cpp)
 target_link_libraries(test_solve PRIVATE training_core ${OpenCV_LIBS})
 target_include_directories(test_solve PRIVATE ${OpenCV_INCLUDE_DIRS})
 
+# 实时相机取流 + 装甲板检测（相机必须已连接）。
+add_executable(test_camera_live tests/test_camera_live.cpp)
+target_link_libraries(test_camera_live PRIVATE training_core ${OpenCV_LIBS})
+target_include_directories(test_camera_live PRIVATE ${OpenCV_INCLUDE_DIRS})
+
+# 同 test_camera：让 dlopen 能按 RPATH 找到 libFormatConversion.so。
+target_link_options(test_camera_live PRIVATE "-Wl,--disable-new-dtags")
+set_target_properties(test_camera_live PROPERTIES
+    BUILD_RPATH "/opt/MVS/lib/64")
+
 # 分类器烟雾测试（ctest -R classifier 运行）。
 add_test(NAME classifier_sticker_1
     COMMAND test_classifier ${CMAKE_SOURCE_DIR}/tests/data/sticker_1.png
-            --onnx ${CMAKE_SOURCE_DIR}/models/armor_cls_64.onnx --expect 1)
+    --onnx ${CMAKE_SOURCE_DIR}/models/armor_cls_64.onnx --expect 1)
 add_test(NAME classifier_sticker_5
     COMMAND test_classifier ${CMAKE_SOURCE_DIR}/tests/data/sticker_5.png
-            --onnx ${CMAKE_SOURCE_DIR}/models/armor_cls_64.onnx --expect 5)
+    --onnx ${CMAKE_SOURCE_DIR}/models/armor_cls_64.onnx --expect 5)
 add_test(NAME classifier_sticker_9neg
     COMMAND test_classifier ${CMAKE_SOURCE_DIR}/tests/data/sticker_9neg.jpg
-            --onnx ${CMAKE_SOURCE_DIR}/models/armor_cls_64.onnx --expect 9neg)
+    --onnx ${CMAKE_SOURCE_DIR}/models/armor_cls_64.onnx --expect 9neg)

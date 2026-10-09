@@ -75,6 +75,25 @@ void close_camera(void *handle)
         MV_CC_DestroyHandle(handle);
     }
 }
+// 画框函数
+void drawDetections(cv::Mat &image, const std::vector<ArmorDetection> &detections)
+{
+    for (const ArmorDetection &det : detections)
+    {
+        std::vector<cv::Point> pts;
+        for (const cv::Point2f &p : det.corners)
+            pts.emplace_back(cvRound(p.x), cvRound(p.y));
+
+        cv::polylines(image, pts, true, cv::Scalar(0, 255, 0), 2);
+        cv::circle(image, pts[0], 5, cv::Scalar(0, 0, 255), -1); // 左上角红点
+
+        std::string label = "ID=" + std::to_string(det.target_id) + (det.size == ArmorSize::Small ? " S" : " L") + " " + cv::format("%.2f", det.confidence);
+        cv::putText(image, label,
+                    pts[0] + cv::Point(0, -8),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.6,
+                    cv::Scalar(0, 255, 0), 2);
+    }
+}
 //============ 主逻辑 ============
 bool get_pic(cv::Mat &pic)
 {
@@ -212,7 +231,7 @@ namespace
             cv::bitwise_or(RMaskLow, RMaskHigh, RMask);
             cv::morphologyEx(RMask, opened, cv::MORPH_OPEN, kernelopen);
             cv::morphologyEx(RMask, closed, cv::MORPH_CLOSE, kernelclose);
-            cv::imwrite("./tmp/mask_debug.png", RMask);
+            // cv::imwrite("./tmp/mask_debug.png", RMask);
             return closed;
         }
         else
