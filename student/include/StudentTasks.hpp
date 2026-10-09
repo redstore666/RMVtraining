@@ -10,7 +10,7 @@
 // 超时或断开时返回 false；不要在此函数中终止进程。
 bool init_camera(void **handle);
 void close_camera(void *handle);
-
+void release_camera(); // 释放相机资源（程序退出前调用）
 // 画框的辅助函数：
 void drawDetections(cv::Mat &image, const std::vector<ArmorDetection> &detections);
 bool get_pic(cv::Mat &pic);

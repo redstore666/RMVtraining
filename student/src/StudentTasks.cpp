@@ -18,9 +18,17 @@ static bool s_initialized = false; // 只初始化一次
 static bool s_ready = false;
 static void *s_handle = nullptr; // MV_CC handle
 static int s_lost_count = 0;
+static int s_init_attempt_count = 0;
 // ============ 辅助函数 ============
 bool init_camera(void **handle)
 {
+
+    if (*handle)
+    {
+        close_camera(*handle);
+        *handle = nullptr;
+    }
+
     MV_CC_DEVICE_INFO_LIST device_list;
     memset(&device_list, 0, sizeof(device_list));
     int ret = MV_CC_EnumDevices(MV_GIGE_DEVICE | MV_USB_DEVICE, &device_list);
@@ -47,19 +55,36 @@ bool init_camera(void **handle)
         return false;
     }
 
-    // 参数设置（可改成从config读取）
-    MV_CC_SetEnumValue(*handle, "TriggerMode", MV_TRIGGER_MODE_OFF);
-    MV_CC_SetEnumValue(*handle, "ExposureAuto", 0);
-    MV_CC_SetEnumValue(*handle, "GainAuto", 0);
-    MV_CC_SetFloatValue(*handle, "ExposureTime", 10000.0f);
-    MV_CC_SetFloatValue(*handle, "Gain", 10.0f);
-    MV_CC_SetFloatValue(*handle, "AcquisitionFrameRate", 30.0f);
-    MV_CC_SetEnumValue(*handle, "PixelFormat", PixelType_Gvsp_BayerRG8);
+    // 参数设置（可改成从config读取）-加入了对返回值的检查
+    auto warn = [](int r, const char *name)
+    {
+        if (r != MV_OK)
+            printf("警告：设置 %s 失败 0x%x\n", name, r);
+    };
+    warn(MV_CC_SetEnumValue(*handle, "TriggerMode", MV_TRIGGER_MODE_OFF), "TriggerMode");
+    warn(MV_CC_SetEnumValue(*handle, "ExposureAuto", 0), "ExposureAuto");
+    warn(MV_CC_SetEnumValue(*handle, "GainAuto", 0), "GainAuto");
+    warn(MV_CC_SetFloatValue(*handle, "ExposureTime", 2000.0f), "ExposureTime");
+    warn(MV_CC_SetFloatValue(*handle, "Gain", 10.0f), "Gain");
+    warn(MV_CC_SetFloatValue(*handle, "AcquisitionFrameRate", 30.0f), "AcquisitionFrameRate");
+
+    // PixelFormat 关键：失败就回滚整个 init
+    if (MV_CC_SetEnumValue(*handle, "PixelFormat", PixelType_Gvsp_BayerRG8) != MV_OK)
+    {
+        printf("像素格式设置失败，回滚\n");
+        MV_CC_CloseDevice(*handle);
+        MV_CC_DestroyHandle(*handle);
+        *handle = nullptr;
+        return false;
+    }
 
     ret = MV_CC_StartGrabbing(*handle);
     if (ret != MV_OK)
     {
         printf("开始取流失败 0x%x\n", ret);
+        MV_CC_CloseDevice(*handle);
+        MV_CC_DestroyHandle(*handle);
+        *handle = nullptr;
         return false;
     }
 
@@ -74,6 +99,18 @@ void close_camera(void *handle)
         MV_CC_CloseDevice(handle);
         MV_CC_DestroyHandle(handle);
     }
+}
+void release_camera()
+{
+    if (s_handle)
+    {
+        close_camera(s_handle);
+        s_handle = nullptr;
+    }
+    s_ready = false;
+    s_initialized = false;
+    s_lost_count = 0;
+    s_init_attempt_count = 0;
 }
 // 画框函数
 void drawDetections(cv::Mat &image, const std::vector<ArmorDetection> &detections)
@@ -101,15 +138,20 @@ bool get_pic(cv::Mat &pic)
     // ============ 首次调用 → 初始化相机 ============
     if (!s_initialized)
     {
-        s_initialized = true;
-        if (init_camera(&s_handle))
-        { // ← 复用ros2代码中原来的 init_camera()
-            s_ready = true;
-            printf("相机连接成功\n");
-        }
-        else
+        ++s_init_attempt_count;
+
+        if (s_init_attempt_count == 1)
         {
             printf("相机未连接，等待相机接入...\n");
+        }
+
+        // 每 30 帧才真正尝试一次（约 1 秒，避免每帧枚举设备）
+        if (s_init_attempt_count % 30 == 1 && init_camera(&s_handle))
+        {
+            s_initialized = true;
+            s_ready = true;
+            s_init_attempt_count = 0;
+            printf("相机连接成功\n");
         }
     }
     // ============ 相机未就绪 → 返回 false ============
@@ -143,6 +185,7 @@ bool get_pic(cv::Mat &pic)
             s_ready = false;
             // 下次调用 get_pic 时会走重新初始化
             s_initialized = false; // ← 触发重新 init_camera()
+            s_lost_count = 0;
         }
         pic.release();
         return false;
@@ -222,7 +265,7 @@ namespace
         cv::cvtColor(bgr, hsv, cv::COLOR_BGR2HSV);
         cv::Mat opened, closed;
         cv::Mat kernelopen = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
-        cv::Mat kernelclose = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 5));
+        cv::Mat kernelclose = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(13, 13));
         if (enemy == TeamColor::Red)
         {
             cv::Mat RMaskLow, RMaskHigh, RMask;
@@ -231,6 +274,14 @@ namespace
             cv::bitwise_or(RMaskLow, RMaskHigh, RMask);
             cv::morphologyEx(RMask, opened, cv::MORPH_OPEN, kernelopen);
             cv::morphologyEx(RMask, closed, cv::MORPH_CLOSE, kernelclose);
+
+            // ===== 新增：填孔洞 =====
+            cv::Mat holes;
+            cv::bitwise_not(closed, holes);
+            cv::floodFill(holes, cv::Point(0, 0), cv::Scalar(0));
+            cv::bitwise_or(closed, holes, closed);
+            // =======================
+
             // cv::imwrite("./tmp/mask_debug.png", RMask);
             return closed;
         }
@@ -240,6 +291,14 @@ namespace
             cv::inRange(hsv, cv::Scalar(100, 100, 80), cv::Scalar(130, 255, 255), BMask);
             cv::morphologyEx(BMask, opened, cv::MORPH_OPEN, kernelopen);
             cv::morphologyEx(BMask, closed, cv::MORPH_CLOSE, kernelclose);
+
+            // ===== 新增：填孔洞 =====
+            cv::Mat holes;
+            cv::bitwise_not(closed, holes);
+            cv::floodFill(holes, cv::Point(0, 0), cv::Scalar(0));
+            cv::bitwise_or(closed, holes, closed);
+            // =======================
+
             // cv::imwrite("./tmp/mask_debug.png", BMask);
             return closed;
         }
