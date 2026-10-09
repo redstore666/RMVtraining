@@ -304,89 +304,229 @@ namespace
         }
     }
 
-    // 步骤 2：从掩码提取灯条。mask 为空时直接返回空。
-    // 轮廓 -> minAreaRect -> 过滤条件（合成图验证过的起点值）：
-    //   * 轮廓面积 >= ~20 px
-    //   * 长边/短边 >= ~2.5          （灯条细长）
-    //   * 轮廓面积 / 外接矩形面积 >= ~0.45（近似实心，排除零散亮斑）
-    //   * 轴线与竖直方向夹角 <= ~30°
-    //   * 长边 >= ~20 px
-    // 把长短边统一为 height=长边，并算出 tilt_deg（注意 minAreaRect 的
-    // 角度约定：宽>高时 angle 加 90 才是"离竖直的夹角"）。
-    std::vector<LightBar> extractLightBars(const cv::Mat &mask)
+    // 把旋转矩形归一化并填入 LightBar：height=长边，tilt 折到 (-90, 90]。
+    // （minAreaRect 角度约定随 OpenCV 版本变过，补偿方向已由实验校准。）
+    void fillBarGeometry(LightBar &bar, const cv::RotatedRect &rect)
     {
-        // TODO
+        float width = rect.size.width;
+        float height = rect.size.height;
+        float angle = rect.angle;
+        if (width > height)
+        {
+            std::swap(width, height);
+            angle += 90.0F;
+        }
+        if (angle > 90.0F)
+        {
+            angle -= 180.0F;
+        }
+        else if (angle <= -90.0F)
+        {
+            angle += 180.0F;
+        }
+        bar.rect = rect;
+        cv::Point2f pts[4];
+        rect.points(pts);
+        for (int k = 0; k < 4; ++k)
+        {
+            bar.corners[k] = pts[k];
+        }
+        bar.width = width;
+        bar.height = height;
+        bar.tilt_deg = angle;
+    }
+
+    // 灯条过滤：细长、够长、近似实心、不太斜。
+    // 实拍调参：|tilt| 上限 30°→40°（实拍存在车体滚转约 40° 的大倾角场景）。
+    bool passesBarFilter(const LightBar &bar, float fill)
+    {
+        return bar.height >= 20.0F && bar.width > 1e-3F && bar.height / bar.width >= 2.5F &&
+               fill >= 0.45F && bar.tilt_deg <= 40.0F && bar.tilt_deg >= -40.0F;
+    }
+
+    // ===== 实拍调参（2026-10-09）：白芯辅助的灯条几何修复 =====
+    // 实拍中 LED 光晕会把彩块撑宽、拉斜（minAreaRect 严重失真，实测可达 -65°）；
+    // 过曝白芯（V 高、S 低）是发光条本体：窄、直、干净。对"不达标的彩块"用
+    // 白芯修复几何：宽度/方向取白芯 minAreaRect，长度/端点取彩块像素在白芯轴线
+    // 上的投影（两端各截尾 2%，裁掉光晕拖尾）。
+    // 白芯阈值自适应降档：近条 V>=230 就够，远条白芯暗，需降到 V>=200/185。
+    constexpr int kCoreLevels = 3;
+    constexpr int kCoreVTh[kCoreLevels] = {230, 200, 185};
+    constexpr int kCoreSTh[kCoreLevels] = {80, 110, 130};
+    constexpr double kCoreMinArea = 100.0;  // 白芯最小面积
+    constexpr float kCoreMinLong = 25.0F;   // 白芯长边最小值
+    constexpr float kCoreMinAspect = 2.0F;  // 白芯长/短比最小值
+    constexpr double kProjectTrim = 0.02;   // 投影截尾比例
+
+    // 白芯掩码：V >= vth 且 S <= scap，小核闭运算补断缝。
+    cv::Mat buildCoreMask(const cv::Mat &bgr, int vth, int scap)
+    {
+        cv::Mat hsv;
+        cv::cvtColor(bgr, hsv, cv::COLOR_BGR2HSV);
+        cv::Mat mask;
+        cv::inRange(hsv, cv::Scalar(0, 0, vth), cv::Scalar(180, scap, 255), mask);
+        const cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
+        cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, kernel);
+        return mask;
+    }
+
+    // 白芯是否"像一根灯条芯"：够大、够长、够细长。
+    bool usableCore(const std::vector<cv::Point> &core, float &long_side)
+    {
+        const cv::RotatedRect rect = cv::minAreaRect(core);
+        long_side = std::max(rect.size.width, rect.size.height);
+        const float short_side = std::min(rect.size.width, rect.size.height);
+        return cv::contourArea(core) >= kCoreMinArea && long_side >= kCoreMinLong &&
+               short_side > 1e-3F && long_side / short_side >= kCoreMinAspect;
+    }
+
+    // 用白芯修复彩块几何。color_contour：光晕彩块轮廓；core_contour：有效白芯轮廓。
+    bool refineBarWithCore(const std::vector<cv::Point> &color_contour,
+                           const std::vector<cv::Point> &core_contour, LightBar &bar)
+    {
+        const cv::RotatedRect core_rect = cv::minAreaRect(core_contour);
+        float core_w = std::min(core_rect.size.width, core_rect.size.height);
+        if (core_w < 1e-3F)
+        {
+            return false;
+        }
+        // 长边方向 = 矩形四条边中最长边的单位方向
+        cv::Point2f cpts[4];
+        core_rect.points(cpts);
+        cv::Point2f axis(0.0F, 1.0F);
+        cv::Point2f wvec(1.0F, 0.0F);
+        float best_len = -1.0F;
+        for (int k = 0; k < 4; ++k)
+        {
+            const cv::Point2f edge = cpts[(k + 1) % 4] - cpts[k];
+            const float len = cv::norm(edge);
+            if (len > best_len)
+            {
+                best_len = len;
+                axis = edge * (1.0F / std::max(len, 1e-6F));
+                wvec = cv::Point2f(-axis.y, axis.x);
+            }
+        }
+        // 彩块像素投影到轴线，2%~98% 截尾得到长度与端点
+        std::vector<float> t_values;
+        t_values.reserve(color_contour.size());
+        for (const cv::Point &p : color_contour)
+        {
+            t_values.push_back((cv::Point2f(p) - core_rect.center).dot(axis));
+        }
+        if (t_values.size() < 4)
+        {
+            return false;
+        }
+        std::sort(t_values.begin(), t_values.end());
+        const std::size_t n = t_values.size();
+        const std::size_t i0 = static_cast<std::size_t>(kProjectTrim * static_cast<double>(n));
+        const float t0 = t_values[i0];
+        const float t1 = t_values[n - 1 - i0];
+        const float half = std::max((t1 - t0) / 2.0F, 1.0F);
+        const cv::Point2f center = core_rect.center + axis * ((t0 + t1) / 2.0F);
+        const float half_w = core_w / 2.0F;
+        const std::array<cv::Point2f, 4> box = {
+            center + axis * half + wvec * half_w, center - axis * half + wvec * half_w,
+            center - axis * half - wvec * half_w, center + axis * half - wvec * half_w};
+        fillBarGeometry(bar, cv::minAreaRect(box)); // 用同一约定重算，保证角度符号一致
+        return true;
+    }
+
+    // 步骤 2：从掩码提取灯条。
+    // 轮廓 -> minAreaRect -> 过滤。实拍调参后的策略：
+    //   * 彩块本身达标（细长/实心/|tilt|<=40°）→ 直接采用彩块几何；
+    //   * 不达标（被光晕撑宽的胖块/被拖尾拉斜的块）→ 用白芯做几何修复（见上方说明），
+    //     修复结果仍不达标则丢弃。白芯缺失（如合成图纯色条）时自然走彩块路径。
+    std::vector<LightBar> extractLightBars(const cv::Mat &bgr, const cv::Mat &mask)
+    {
         std::vector<LightBar> bars;
         if (mask.empty() || mask.type() != CV_8UC1)
         {
             return bars;
         }
 
-        // 1. 外轮廓：mask 是二值图，每个白色连通域对应一条轮廓。
         std::vector<std::vector<cv::Point>> contours;
         cv::findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
 
+        // 白芯轮廓按档位懒加载（只有出现不达标彩块时才生成对应档位的掩码）
+        std::array<std::vector<std::vector<cv::Point>>, kCoreLevels> core_contours;
+        std::array<bool, kCoreLevels> core_ready{false, false, false};
+
         for (const std::vector<cv::Point> &contour : contours)
         {
-            // 2. 面积粗滤：去掉孤立噪点。
-            const double area = cv::contourArea(contour);
-            if (area < 20.0)
+            if (cv::contourArea(contour) < 20.0)
             {
                 continue;
             }
-
-            // 3. 旋转外接矩形。不能用 boundingRect（轴对齐）：灯条倾斜时轴对齐框
-            //    会变大变方，长宽比和角度全部失真。
-            cv::RotatedRect rect = cv::minAreaRect(contour);
-            float width = rect.size.width;
-            float height = rect.size.height;
-            float angle = rect.angle;
-
-            // 4. 归一化：约定 height 为长边，并把角度折到 (-90, 90]。
-            //    minAreaRect 的角度约定随 OpenCV 版本变过，论坛公式不可靠；
-            //    补偿方向由实验校准：竖直灯条 tilt 应 ≈0，画面滚转 12° 的
-            //    synth_tilted_2 应 ≈±12。若实测出现 90/180，调整补偿/折叠方向。
-            if (width > height)
-            {
-                std::swap(width, height);
-                angle += 90.0F;
-            }
-            if (angle > 90.0F)
-            {
-                angle -= 180.0F;
-            }
-            else if (angle <= -90.0F)
-            {
-                angle += 180.0F;
-            }
-            const float tilt_deg = angle;
-
-            // 5. 过滤：细长、实心、不太斜、够长（起点值，实拍时再调）。
-            const float fill = static_cast<float>(area) /
-                               (static_cast<float>(width) * static_cast<float>(height));
-            if (height < 20.0F || height / width < 2.5F || fill < 0.45F ||
-                tilt_deg > 30.0F || tilt_deg < -30.0F)
-            {
-                continue;
-            }
-
-            // 6. 填结构体。corners 为 4 个角点（顺序任意，配对与角点生成阶段
-            //    再按 y 排序）。
             LightBar bar;
-            bar.rect = rect;
-            cv::Point2f pts[4];
-            rect.points(pts);
-            for (int k = 0; k < 4; ++k)
+            fillBarGeometry(bar, cv::minAreaRect(contour));
+            const float fill = static_cast<float>(cv::contourArea(contour)) /
+                               (bar.width * bar.height);
+
+            // 达标不修：避免短噪白芯把本就良好的几何带偏（实测教训）
+            if (passesBarFilter(bar, fill))
             {
-                bar.corners[k] = pts[k];
+                bars.push_back(bar);
+                continue;
             }
-            bar.width = width;
-            bar.height = height;
-            bar.tilt_deg = tilt_deg;
+            if (bgr.empty())
+            {
+                continue;
+            }
 
-            // std::cout << "bar: w=" << width << " h=" << height << " tilt=" << tilt_deg << "\n";
-
-            bars.push_back(bar);
+            for (int level = 0; level < kCoreLevels; ++level)
+            {
+                if (!core_ready[level])
+                {
+                    cv::Mat core_mask = buildCoreMask(bgr, kCoreVTh[level], kCoreSTh[level]);
+                    cv::findContours(core_mask, core_contours[level], cv::RETR_EXTERNAL,
+                                     cv::CHAIN_APPROX_SIMPLE);
+                    core_ready[level] = true;
+                }
+                // 取与该彩块重叠的"有效白芯"中面积最大者
+                const std::vector<cv::Point> *best_core = nullptr;
+                double best_area = 0.0;
+                for (const std::vector<cv::Point> &core : core_contours[level])
+                {
+                    float long_side = 0.0F;
+                    if (!usableCore(core, long_side))
+                    {
+                        continue;
+                    }
+                    const cv::Point2f core_center = cv::minAreaRect(core).center;
+                    if (cv::pointPolygonTest(contour, core_center, false) < 0)
+                    {
+                        continue;
+                    }
+                    const double core_area = cv::contourArea(core);
+                    if (core_area > best_area)
+                    {
+                        best_area = core_area;
+                        best_core = &core;
+                    }
+                }
+                if (best_core != nullptr)
+                {
+                    LightBar refined;
+                    if (refineBarWithCore(contour, *best_core, refined))
+                    {
+                        // 修复后 fill 用白芯自身实心度（白芯近似实心柱）
+                        const cv::RotatedRect crect = cv::minAreaRect(*best_core);
+                        const float cw = std::min(crect.size.width, crect.size.height);
+                        const float ch = std::max(crect.size.width, crect.size.height);
+                        const float rfill =
+                            cw > 1e-3F && ch > 1e-3F
+                                ? static_cast<float>(best_area) / (cw * ch)
+                                : 0.0F;
+                        if (passesBarFilter(refined, std::min(rfill, 1.0F)))
+                        {
+                            bars.push_back(refined);
+                        }
+                    }
+                    break; // 只用最严档位里找到的有效白芯（与调参实验一致）
+                }
+            }
         }
         return bars;
     }
@@ -428,12 +568,12 @@ namespace
                 }
                 const LightBar &L = bars[li];
                 const LightBar &R = bars[ri];
-                // 条件1
-                if (std::min(L.height, R.height) / std::max(L.height, R.height) < 0.75)
+                // 条件1（实拍调参：高度比 0.75→0.65，近距离强透视下近杆可比远杆大 30%+）
+                if (std::min(L.height, R.height) / std::max(L.height, R.height) < 0.65)
                     continue;
-                // 条件2
+                // 条件2（实拍调参：倾角差 12°→16°，白芯截断会让两杆倾角估计出现偏差）
                 double tilt_diff = std::fabs(L.tilt_deg - R.tilt_deg);
-                if (tilt_diff > 12)
+                if (tilt_diff > 16)
                     continue;
                 // 排序角点（公共助手，见 cornersSortedByY）
                 const std::array<cv::Point2f, 4> lc = cornersSortedByY(L);
@@ -451,7 +591,7 @@ namespace
                 double d = std::fabs(angt - angb);
                 if (d > 180.0)
                     d = 360.0 - d; // 现在才是真正的"两向量夹角"
-                if (d > 10)
+                if (d > 15) // 实拍调参：平行阈值 10°→15°（与倾角差放宽配套）
                     continue;
                 double lt = cv::norm(vt);                               // 上端点连线的长度
                 double lb = cv::norm(vb);                               // 下端点连线的长度
@@ -569,10 +709,16 @@ namespace
         const int right_cut = static_cast<int>(270 * 0.85); // ≈229
         const cv::Mat center = rectified.colRange(left_cut, right_cut);
         // center：189 宽 × 114 高，正好是中央 ~70
-        // 3. 灰度 + Otsu：cv::cvtColor → cv::threshold(..., THRESH_BINARY | THRESH_OTSU)
-        cv::Mat gray, binary;
-        cv::cvtColor(center, gray, cv::COLOR_BGR2GRAY);
-        cv::threshold(gray, binary, 0, 255, cv::THRESH_BINARY | cv::THRESH_OTSU); // 有 OTSU 标志时这个 0 只是占位，函数会自己算真阈值
+        // 3. 灰度预处理。
+        // 实拍调参：彩色光晕会污染普通灰度（红/蓝光在加权灰度里仍偏亮，Otsu 会
+        // 割在光晕上导致数字残缺）；改用 min(B,G,R) 通道——任何饱和彩色（红/蓝
+        // 光晕）至少有一个低通道，在 min 通道里必然变暗；灰白数字 R≈G≈B 不受损。
+        cv::Mat channels[3];
+        cv::split(center, channels);
+        const cv::Mat channel_min = cv::min(channels[0], channels[1]);
+        const cv::Mat gray = cv::min(channel_min, channels[2]);
+        cv::Mat binary;
+        cv::threshold(gray, binary, 0, 255, cv::THRESH_BINARY | cv::THRESH_OTSU);
         //  4. 连通域：
         cv::Mat labels, stats, centroids;
         const int n = cv::connectedComponentsWithStats(binary, labels, stats, centroids);
@@ -619,10 +765,12 @@ namespace
         x1 += margin;
         y1 += margin;
 
-        // 8. 裁界并返回（& 求交集，防止外扩越界；center 的坐标系即 binary 的坐标系）
+        // 8. 裁界并返回（& 求交集，防止外扩越界；crop 的坐标系即 gray 的坐标系）。
+        // 实拍调参：返回 min 通道裁剪（单通道），分类器对 1/3 通道输入都兼容——
+        // 必须返回 min 通道本身，否则分类器内部又转回被光晕污染的灰度。
         const cv::Rect crop = cv::Rect(x0, y0, x1 - x0, y1 - y0) &
                               cv::Rect(0, 0, center.cols, center.rows);
-        return center(crop);
+        return gray(crop);
     }
 
 } // namespace
@@ -650,7 +798,7 @@ std::vector<ArmorDetection> armor_detect(const cv::Mat &pic, TeamColor enemy_col
     }
 
     const cv::Mat mask = buildEnemyMask(pic, enemy_color);
-    const std::vector<LightBar> bars = extractLightBars(mask);
+    const std::vector<LightBar> bars = extractLightBars(pic, mask);
     const std::vector<std::pair<std::size_t, std::size_t>> pairs = matchLightBars(bars);
 
     for (const std::pair<std::size_t, std::size_t> &pair : pairs)

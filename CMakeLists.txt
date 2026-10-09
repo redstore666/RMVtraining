@@ -121,6 +121,11 @@ add_executable(test_solve tests/test_solve.cpp)
 target_link_libraries(test_solve PRIVATE training_core ${OpenCV_LIBS})
 target_include_directories(test_solve PRIVATE ${OpenCV_INCLUDE_DIRS})
 
+# 实拍批量评估：对目录内所有图片跑检测并输出检出率（实拍调参/回归用）。
+add_executable(test_batch tests/test_batch.cpp)
+target_link_libraries(test_batch PRIVATE training_core ${OpenCV_LIBS})
+target_include_directories(test_batch PRIVATE ${OpenCV_INCLUDE_DIRS})
+
 # 实时相机取流 + 装甲板检测（相机必须已连接）。
 add_executable(test_camera_live tests/test_camera_live.cpp)
 target_link_libraries(test_camera_live PRIVATE training_core ${OpenCV_LIBS})
