@@ -20,7 +20,7 @@ static void *s_handle = nullptr; // MV_CC handle
 static int s_lost_count = 0;
 static int s_init_attempt_count = 0;
 // ============ 辅助函数 ============
-bool init_camera(void **handle)
+bool init_camera(void **handle, bool verbose = false)
 {
 
     if (*handle)
@@ -34,7 +34,8 @@ bool init_camera(void **handle)
     int ret = MV_CC_EnumDevices(MV_GIGE_DEVICE | MV_USB_DEVICE, &device_list);
     if (ret != MV_OK || device_list.nDeviceNum == 0)
     {
-        printf("未发现相机设备\n");
+        if (verbose)
+            printf("未发现相机设备\n");
         return false;
     }
 
@@ -42,14 +43,16 @@ bool init_camera(void **handle)
     ret = MV_CC_CreateHandle(handle, device_list.pDeviceInfo[0]);
     if (ret != MV_OK)
     {
-        printf("创建句柄失败 0x%x\n", ret);
+        if (verbose)
+            printf("创建句柄失败 0x%x\n", ret);
         return false;
     }
 
     ret = MV_CC_OpenDevice(*handle);
     if (ret != MV_OK)
     {
-        printf("打开设备失败 0x%x\n", ret);
+        if (verbose)
+            printf("打开设备失败 0x%x\n", ret);
         MV_CC_DestroyHandle(*handle);
         *handle = nullptr;
         return false;
@@ -71,7 +74,8 @@ bool init_camera(void **handle)
     // PixelFormat 关键：失败就回滚整个 init
     if (MV_CC_SetEnumValue(*handle, "PixelFormat", PixelType_Gvsp_BayerRG8) != MV_OK)
     {
-        printf("像素格式设置失败，回滚\n");
+        if (verbose)
+            printf("像素格式设置失败，回滚\n");
         MV_CC_CloseDevice(*handle);
         MV_CC_DestroyHandle(*handle);
         *handle = nullptr;
@@ -81,7 +85,8 @@ bool init_camera(void **handle)
     ret = MV_CC_StartGrabbing(*handle);
     if (ret != MV_OK)
     {
-        printf("开始取流失败 0x%x\n", ret);
+        if (verbose)
+            printf("开始取流失败 0x%x\n", ret);
         MV_CC_CloseDevice(*handle);
         MV_CC_DestroyHandle(*handle);
         *handle = nullptr;
@@ -139,14 +144,13 @@ bool get_pic(cv::Mat &pic)
     if (!s_initialized)
     {
         ++s_init_attempt_count;
-
-        if (s_init_attempt_count == 1)
-        {
+        // "第一次"才详细打印
+        const bool first_try = (s_init_attempt_count == 1);
+        if (first_try)
             printf("相机未连接，等待相机接入...\n");
-        }
 
         // 每 30 帧才真正尝试一次（约 1 秒，避免每帧枚举设备）
-        if (s_init_attempt_count % 30 == 1 && init_camera(&s_handle))
+        if (s_init_attempt_count % 30 == 1 && init_camera(&s_handle, first_try))
         {
             s_initialized = true;
             s_ready = true;
@@ -353,10 +357,10 @@ namespace
     constexpr int kCoreLevels = 3;
     constexpr int kCoreVTh[kCoreLevels] = {230, 200, 185};
     constexpr int kCoreSTh[kCoreLevels] = {80, 110, 130};
-    constexpr double kCoreMinArea = 100.0;  // 白芯最小面积
-    constexpr float kCoreMinLong = 25.0F;   // 白芯长边最小值
-    constexpr float kCoreMinAspect = 2.0F;  // 白芯长/短比最小值
-    constexpr double kProjectTrim = 0.02;   // 投影截尾比例
+    constexpr double kCoreMinArea = 100.0; // 白芯最小面积
+    constexpr float kCoreMinLong = 25.0F;  // 白芯长边最小值
+    constexpr float kCoreMinAspect = 2.0F; // 白芯长/短比最小值
+    constexpr double kProjectTrim = 0.02;  // 投影截尾比例
 
     // 白芯掩码：V >= vth 且 S <= scap，小核闭运算补断缝。
     cv::Mat buildCoreMask(const cv::Mat &bgr, int vth, int scap)
@@ -591,7 +595,7 @@ namespace
                 double d = std::fabs(angt - angb);
                 if (d > 180.0)
                     d = 360.0 - d; // 现在才是真正的"两向量夹角"
-                if (d > 15) // 实拍调参：平行阈值 10°→15°（与倾角差放宽配套）
+                if (d > 15)        // 实拍调参：平行阈值 10°→15°（与倾角差放宽配套）
                     continue;
                 double lt = cv::norm(vt);                               // 上端点连线的长度
                 double lb = cv::norm(vb);                               // 下端点连线的长度
