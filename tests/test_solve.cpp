@@ -26,18 +26,19 @@
 namespace {
 
 // 开发用相机参数：真内参 + 单位外参（仅离线测试！）
+// 内参来源：新相机（换机后）MATLAB Camera Calibrator 标定结果，
+// 与 config/camera.yaml 保持一致。
 CameraParameters makeDevCamera()
 {
     CameraParameters cam;
     cam.calibrated = true;
     cam.image_width = 1440;
     cam.image_height = 1080;
-    // 来源：tools/intrinsics_v2.yaml（硬板 21 视图，RMS=0.250px）
-    cam.camera_matrix = (cv::Mat_<double>(3, 3) << 1820.8962891367187, 0,
-                         730.3325291104236, 0, 1816.2702177869917,
-                         546.8834877786027, 0, 0, 1);
+    cam.camera_matrix = (cv::Mat_<double>(3, 3) << 1806.2, 0, 738.8,
+                         0, 1804.7, 526.3,
+                         0, 0, 1);
     cam.distortion_coefficients =
-        (cv::Mat_<double>(1, 5) << -0.05850627800034625, 0, 0, 0, 0);
+        (cv::Mat_<double>(1, 5) << -0.0761, 0.1522, 0, 0, 0);
     cam.rotation_camera_to_gimbal = cv::Mat::eye(3, 3, CV_64F);
     cam.translation_camera_to_gimbal = cv::Mat::zeros(3, 1, CV_64F);
     cam.mean_reprojection_error_px = 0.25;
