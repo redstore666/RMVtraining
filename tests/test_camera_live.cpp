@@ -89,8 +89,9 @@ int main(int argc, char **argv)
         }
 
         // ===== 每个 pose 画多行完整信息 =====
-        for (const auto &pose : poses)
+        for (std::size_t pi = 0; pi < poses.size(); ++pi)
         {
+            const auto &pose = poses[pi];
             const cv::Point2f tl = pose.detection.corners[0];
             const cv::Vec3d p = pose.position_camera_m;
 
@@ -121,8 +122,8 @@ int main(int argc, char **argv)
                           "posYaw=%+.1f  pitch=%+.1f  armYaw=%+.1f  [deg, cam frame]",
                           pos_yaw, pitch, armor_yaw);
 
-            const cv::Point base(static_cast<int>(tl.x) - 10,
-                                 static_cast<int>(tl.y) - 60);
+            // 固定锚点：左上角 (20, 80) 起，每个 pose 往下排 90 像素
+            const cv::Point base(20, 80 + static_cast<int>(pi) * 90);
             const cv::Scalar color(0, 255, 255); // 黄
             const double font = 0.55;
             const int thick = 1;

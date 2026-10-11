@@ -1,0 +1,1174 @@
+➜  RMVtraining git:(main) cmake -S . -B build
+cmake --build build -j
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /home/oliver/coding/learn/RMVtrainingHomework/RMVtraining/build
+Consolidate compiler generated dependencies of target serialPort
+Consolidate compiler generated dependencies of target algorithm_support
+Consolidate compiler generated dependencies of target web_debug
+Consolidate compiler generated dependencies of target calibrate_intrinsics
+[  6%] Built target serialPort
+[ 15%] Built target algorithm_support
+[ 21%] Built target calibrate_intrinsics
+[ 28%] Built target web_debug
+Consolidate compiler generated dependencies of target training_core
+[ 43%] Built target training_core
+Consolidate compiler generated dependencies of target test_scaffold
+Consolidate compiler generated dependencies of target test_classifier
+Consolidate compiler generated dependencies of target test_camera
+Consolidate compiler generated dependencies of target test_detect
+Consolidate compiler generated dependencies of target test_solve
+Consolidate compiler generated dependencies of target calib_capture
+Consolidate compiler generated dependencies of target rmv_training
+Consolidate compiler generated dependencies of target test_batch
+Consolidate compiler generated dependencies of target test_camera_live
+[ 59%] Built target test_camera
+[ 62%] Built target test_classifier
+[ 62%] Built target test_detect
+[ 84%] Built target test_scaffold
+[ 84%] Built target rmv_training
+[ 84%] Built target test_batch
+[ 87%] Built target test_solve
+[ 93%] Built target calib_capture
+[ 96%] Building CXX object CMakeFiles/test_camera_live.dir/tests/test_camera_live.cpp.o
+[100%] Linking CXX executable test_camera_live
+[100%] Built target test_camera_live
+➜  RMVtraining git:(main) ✗ ./build/test_camera_live --red
+ESC/q quit, s save frame
+[extr not calibrated] yaw/pitch are relative to camera optical axis
+相机未连接，等待相机接入...
+相机连接成功
+grab=1.9 detect=3.7 pnp=0.0 draw=3.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.9 detect=3.3 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=3.6 pnp=0.0 draw=2.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=3.7 detect=4.2 pnp=0.0 draw=2.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.9 detect=3.6 pnp=0.0 draw=2.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=3.9 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=6.7 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.9 detect=4.3 pnp=0.0 draw=3.3 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=3.7 detect=6.6 pnp=0.0 draw=4.1 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.9 detect=9.3 pnp=0.0 draw=7.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.0 detect=3.5 pnp=0.0 draw=2.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.0 detect=7.8 pnp=0.0 draw=8.3 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=3.7 pnp=0.0 draw=2.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=3.6 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.2 detect=3.4 pnp=0.0 draw=2.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=7.4 pnp=0.0 draw=3.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.2 detect=4.2 pnp=0.0 draw=6.3 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.8 detect=8.4 pnp=0.0 draw=6.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=5.6 detect=4.2 pnp=0.0 draw=3.3 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=4.1 pnp=0.0 draw=6.2 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=3.6 detect=3.8 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.2 detect=6.8 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.1 detect=4.1 pnp=0.0 draw=3.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=4.1 pnp=0.0 draw=3.1 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=3.5 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=6.4 pnp=0.0 draw=3.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=3.7 pnp=0.0 draw=5.5 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=4.3 pnp=0.0 draw=3.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=4.5 pnp=0.0 draw=6.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=4.6 pnp=0.0 draw=5.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.2 detect=8.7 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=12.6 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=9.5 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=10.3 pnp=0.0 draw=5.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=9.2 pnp=0.0 draw=2.6 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=6.4 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=9.2 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=5.7 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.2 detect=8.4 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=6.6 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=5.9 pnp=0.1 draw=2.8 ms | Det=1 Poses=0 | rejErr=23 rejDep=0 rejFin=0 pnpFail=0
+grab=2.1 detect=10.9 pnp=0.0 draw=2.5 ms | Det=1 Poses=0 | rejErr=25 rejDep=0 rejFin=0 pnpFail=0
+grab=2.1 detect=11.4 pnp=0.1 draw=2.6 ms | Det=1 Poses=0 | rejErr=11 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=7.7  P90=13.8  P95=16.7  P99=19.0  max=19.0  (n=93)
+grab=1.5 detect=11.9 pnp=0.1 draw=5.8 ms | Det=1 Poses=1 | rejErr=16 rejDep=0 rejFin=0 pnpFail=0
+grab=2.1 detect=9.6 pnp=0.0 draw=5.9 ms | Det=0 Poses=0 | rejErr=12 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=15.9 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=10 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=6.0  P90=8.5  P95=8.7  P99=9.5  max=9.5  (n=85)
+grab=1.4 detect=12.2 pnp=0.1 draw=5.8 ms | Det=1 Poses=1 | rejErr=11 rejDep=0 rejFin=0 pnpFail=0
+grab=3.4 detect=15.6 pnp=0.1 draw=3.0 ms | Det=1 Poses=0 | rejErr=7 rejDep=0 rejFin=0 pnpFail=0
+grab=1.2 detect=15.1 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=11 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=9.3 pnp=0.0 draw=3.2 ms | Det=0 Poses=0 | rejErr=6 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=4.4  P90=7.4  P95=7.7  P99=15.8  max=15.8  (n=100)
+grab=1.5 detect=5.7 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=9 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=5.6 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=5 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=5.5 pnp=0.1 draw=3.0 ms | Det=1 Poses=0 | rejErr=9 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=4.7  P90=8.2  P95=8.4  P99=9.3  max=9.3  (n=100)
+grab=1.8 detect=6.2 pnp=0.1 draw=3.1 ms | Det=1 Poses=1 | rejErr=6 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=8.5 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=12 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=8.6 pnp=0.0 draw=3.0 ms | Det=1 Poses=0 | rejErr=16 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=5.2  P90=8.8  P95=9.4  P99=9.7  max=9.7  (n=100)
+grab=1.2 detect=8.3 pnp=0.0 draw=2.9 ms | Det=1 Poses=0 | rejErr=22 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=8.8 pnp=0.0 draw=2.7 ms | Det=0 Poses=0 | rejErr=15 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=4.0 pnp=0.0 draw=5.9 ms | Det=0 Poses=0 | rejErr=15 rejDep=0 rejFin=0 pnpFail=0
+grab=1.9 detect=4.1 pnp=0.0 draw=5.6 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=7.7  P90=15.1  P95=20.5  P99=21.0  max=21.0  (n=55)
+grab=1.4 detect=6.2 pnp=0.0 draw=3.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=6.4 pnp=0.0 draw=3.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=6.7 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.2 detect=6.6 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=3.9 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=6.3 pnp=0.0 draw=3.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=6.4 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=6.9 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=4.2 pnp=0.0 draw=5.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=4.1 pnp=0.0 draw=5.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=6.7 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=4.1 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=6.4 pnp=0.0 draw=3.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=6.4 pnp=0.0 draw=2.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+➜  RMVtraining git:(main) ✗ ./build/rmv_training /dev/ttyACM0 115200 config/camera.yaml 8080
+camera parameters in config/camera.yaml are incomplete; fill the calibration template before running
+➜  RMVtraining git:(main) ✗ /build/rmv_training /dev/ttyACM0 115200 config/camera.yaml 8080
+zsh: no such file or directory: /build/rmv_training
+➜  RMVtraining git:(main) ✗ ./build/rmv_training /dev/ttyACM0 115200 config/camera.yaml 8080
+无法打开串口设备: /dev/ttyACM0
+➜  RMVtraining git:(main) ✗ ./build/test_camera_live --red
+ESC/q quit, s save frame
+[extr not calibrated] yaw/pitch are relative to camera optical axis
+相机未连接，等待相机接入...
+相机连接成功
+grab=1.4 detect=9.4 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=9.4 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=6.9 pnp=0.0 draw=3.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.0 detect=3.5 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.8 detect=3.8 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.9 detect=3.9 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=6.4 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.9 detect=3.8 pnp=0.0 draw=2.6 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=3.7 pnp=0.0 draw=3.1 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=4.3 pnp=0.0 draw=5.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.9 detect=3.9 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=3.8 pnp=0.0 draw=2.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=4.3 pnp=0.0 draw=5.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=9.8 pnp=0.0 draw=5.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=3.9 pnp=0.0 draw=3.1 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=6.1 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=6.0 pnp=0.0 draw=2.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=6.0 pnp=0.0 draw=2.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=3.3 pnp=0.0 draw=5.6 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=6.2 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=3.8 pnp=0.0 draw=3.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=4.0 pnp=0.0 draw=3.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.9 detect=3.9 pnp=0.0 draw=2.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.2 detect=3.5 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.0 detect=3.6 pnp=0.0 draw=2.5 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=5.9 pnp=0.0 draw=3.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.2 detect=6.1 pnp=0.0 draw=3.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=6.7 pnp=0.0 draw=2.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=6.4 pnp=0.0 draw=2.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=6.5 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=3.7 pnp=0.0 draw=2.6 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=4.0 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=3.8 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=3.8 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=3.7 pnp=0.0 draw=2.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=3.5 pnp=0.0 draw=5.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=6.0 pnp=0.0 draw=3.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=4.1 pnp=0.0 draw=3.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.8 detect=6.4 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.9 detect=4.5 pnp=0.0 draw=5.6 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=4.4 pnp=0.0 draw=5.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=4.0 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=4.1 pnp=0.0 draw=5.6 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.3 detect=4.2 pnp=0.0 draw=5.6 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=4.1 pnp=0.0 draw=5.4 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=4.0 pnp=0.0 draw=5.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=4.3 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.2 detect=6.6 pnp=0.0 draw=3.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.2 detect=6.3 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=3.2 pnp=0.0 draw=5.6 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=4.0 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=4.1 pnp=0.0 draw=3.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=3.9 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=4.2 pnp=0.0 draw=5.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=3.2 detect=6.6 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=3.8 pnp=0.0 draw=5.6 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=4.2 pnp=0.0 draw=6.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=4.6 pnp=0.0 draw=5.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.4 detect=3.9 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.3 detect=3.9 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=6.6 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=6.0 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.9 detect=4.0 pnp=0.0 draw=2.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=6.2 pnp=0.0 draw=2.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=4.1 pnp=0.0 draw=2.6 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=3.9 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.3 detect=4.1 pnp=0.0 draw=2.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=6.2 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.1 detect=3.2 pnp=0.0 draw=5.6 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=3.9 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.9 detect=4.0 pnp=0.0 draw=5.6 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=3.8 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=3.9 pnp=0.0 draw=5.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=3.9 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=3.9 pnp=0.0 draw=5.6 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.9 detect=4.0 pnp=0.0 draw=5.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.2 detect=6.4 pnp=0.0 draw=3.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=4.2 pnp=0.0 draw=6.1 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.0 detect=3.3 pnp=0.0 draw=5.4 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.3 detect=3.6 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.4 detect=4.1 pnp=0.0 draw=5.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=6.3 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=6.5 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.1 detect=4.0 pnp=0.0 draw=5.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=4.2 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.2 detect=4.0 pnp=0.0 draw=5.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=4.1 pnp=0.0 draw=2.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=3.6 detect=3.6 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=4.2 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=6.1 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+➜  RMVtraining git:(main) ✗ ./build/test_camera_live --blue 
+ESC/q quit, s save frame
+[extr not calibrated] yaw/pitch are relative to camera optical axis
+相机未连接，等待相机接入...
+相机连接成功
+grab=1.6 detect=2.5 pnp=0.0 draw=1.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=4.8 pnp=0.0 draw=2.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=2.8 pnp=0.0 draw=2.1 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=3.0 pnp=0.0 draw=2.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=2.8 pnp=0.0 draw=1.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=5.2 detect=2.8 pnp=0.0 draw=1.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=2.5 pnp=0.0 draw=1.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=2.8 pnp=0.0 draw=5.3 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.3 detect=2.8 pnp=0.0 draw=1.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=2.6 pnp=0.0 draw=1.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=3.5 detect=2.7 pnp=0.0 draw=2.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=2.5 pnp=0.0 draw=1.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.2 detect=2.8 pnp=0.0 draw=1.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.1 detect=2.6 pnp=0.0 draw=1.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.0 detect=2.8 pnp=0.0 draw=1.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.0 detect=2.2 pnp=0.0 draw=1.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.9  P90=1.1  P95=1.1  P99=1.1  max=1.1  (n=8)
+grab=4.1 detect=2.8 pnp=0.0 draw=2.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.0 detect=2.8 pnp=0.0 draw=1.5 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=3.0 pnp=0.0 draw=1.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.3 detect=7.7 pnp=0.0 draw=1.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.7  P90=4.5  P95=4.8  P99=4.8  max=4.8  (n=17)
+grab=1.5 detect=12.1 pnp=0.1 draw=4.9 ms | Det=2 Poses=2 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=14.5 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=14.9 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.9  P90=5.0  P95=5.1  P99=5.3  max=5.5  (n=113)
+grab=2.0 detect=15.1 pnp=0.1 draw=1.8 ms | Det=2 Poses=2 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=14.1 pnp=0.1 draw=1.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=12.0 pnp=0.1 draw=2.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.8  P90=1.1  P95=2.9  P99=3.8  max=4.5  (n=106)
+grab=2.5 detect=14.6 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.0 detect=15.4 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=14.2 pnp=0.1 draw=1.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.9 detect=12.9 pnp=0.1 draw=4.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.7  P90=1.0  P95=1.1  P99=3.2  max=3.3  (n=102)
+grab=2.0 detect=15.9 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=15.9 pnp=0.1 draw=1.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=14.1 pnp=0.1 draw=1.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.8  P90=1.0  P95=1.2  P99=3.6  max=3.8  (n=105)
+grab=1.6 detect=17.1 pnp=0.1 draw=1.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=11.9 pnp=0.1 draw=5.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=10.1 pnp=0.1 draw=1.6 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.7  P90=1.0  P95=1.0  P99=3.3  max=3.5  (n=103)
+grab=1.4 detect=10.4 pnp=0.1 draw=1.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=10.5 pnp=0.1 draw=2.2 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=10.6 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=10.4 pnp=0.1 draw=1.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.7  P90=1.0  P95=1.0  P99=1.2  max=1.2  (n=100)
+grab=1.4 detect=13.2 pnp=0.1 draw=1.6 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=7.5 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=13.6 pnp=0.1 draw=1.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.8  P90=1.0  P95=1.0  P99=1.1  max=1.1  (n=100)
+grab=1.4 detect=5.1 pnp=0.1 draw=2.3 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=10.1 pnp=0.1 draw=1.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=4.8 pnp=0.1 draw=1.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.7  P90=1.0  P95=1.0  P99=1.2  max=1.2  (n=100)
+grab=1.5 detect=7.3 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=7.2 pnp=0.1 draw=1.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=7.2 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=4.8 pnp=0.1 draw=2.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.8  P90=1.0  P95=1.0  P99=1.0  max=1.0  (n=100)
+grab=1.7 detect=4.6 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=4.6 pnp=0.1 draw=2.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.2 detect=7.2 pnp=0.1 draw=1.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.8  P90=0.9  P95=1.0  P99=1.1  max=1.1  (n=100)
+grab=1.1 detect=7.2 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=5.4 pnp=0.1 draw=2.4 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=5.1 pnp=0.1 draw=4.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.8  P90=1.0  P95=1.1  P99=1.2  max=1.2  (n=100)
+grab=2.1 detect=4.8 pnp=0.1 draw=2.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=4.5 pnp=0.1 draw=1.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=7.4 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=7.6 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.8  P90=1.0  P95=1.1  P99=1.2  max=1.2  (n=100)
+grab=1.8 detect=4.8 pnp=0.1 draw=1.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=7.5 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.2 detect=7.3 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.9  P90=1.4  P95=1.6  P99=1.9  max=1.9  (n=100)
+grab=1.7 detect=7.7 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=7.4 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=4.9 pnp=0.1 draw=4.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.7  P90=1.0  P95=1.5  P99=1.7  max=1.7  (n=100)
+grab=4.3 detect=10.0 pnp=0.1 draw=1.6 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.9 detect=7.8 pnp=0.1 draw=2.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.0 detect=5.0 pnp=0.1 draw=1.6 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=7.7 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.9  P90=1.4  P95=1.6  P99=1.9  max=1.9  (n=100)
+grab=1.3 detect=7.3 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=7.5 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.9 detect=4.9 pnp=2.9 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.6  P90=1.2  P95=1.4  P99=1.7  max=1.7  (n=100)
+grab=1.6 detect=7.2 pnp=0.1 draw=1.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.7 detect=7.5 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.2 detect=7.6 pnp=0.1 draw=2.2 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.8  P90=1.2  P95=1.2  P99=1.7  max=1.7  (n=100)
+grab=1.8 detect=7.2 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=10.8 pnp=0.1 draw=1.5 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=7.1 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=13.4 pnp=0.1 draw=2.3 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.8  P90=1.2  P95=1.2  P99=1.4  max=1.4  (n=100)
+grab=1.4 detect=5.4 pnp=0.1 draw=4.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.1 detect=7.6 pnp=0.1 draw=2.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=4.8 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.9  P90=1.3  P95=1.4  P99=2.0  max=2.0  (n=100)
+grab=1.5 detect=14.2 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=9.9 pnp=0.1 draw=1.6 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=4.8 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.9  P90=1.4  P95=1.5  P99=1.8  max=1.8  (n=100)
+grab=1.6 detect=14.0 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=4.4 pnp=0.1 draw=2.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=3.1 detect=4.6 pnp=0.1 draw=2.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.3 detect=3.7 pnp=0.0 draw=2.3 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.7  P90=1.5  P95=1.7  P99=1.8  max=1.8  (n=85)
+grab=1.6 detect=16.1 pnp=0.1 draw=2.2 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=17.5 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=12.1 pnp=0.1 draw=4.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.3  P90=1.6  P95=1.7  P99=1.9  max=1.9  (n=93)
+grab=1.5 detect=4.5 pnp=0.0 draw=4.6 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=2.9 pnp=0.0 draw=2.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=3.1 pnp=0.0 draw=2.1 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.7  P90=0.9  P95=1.1  P99=1.1  max=1.1  (n=12)
+grab=1.6 detect=2.6 pnp=0.0 draw=1.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=2.5 pnp=0.0 draw=1.6 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=2.5 pnp=0.0 draw=1.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.2 detect=7.1 pnp=0.0 draw=1.8 ms | Det=0 Poses=0 | rejErr=1 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=6.5  P90=6.5  P95=6.5  P99=6.5  max=6.5  (n=1)
+grab=1.2 detect=8.8 pnp=0.1 draw=2.1 ms | Det=1 Poses=1 | rejErr=1 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=9.0 pnp=0.1 draw=1.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=9.7 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.3  P90=2.3  P95=2.8  P99=5.9  max=6.0  (n=105)
+grab=1.6 detect=8.8 pnp=0.1 draw=1.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=2.8 pnp=0.0 draw=2.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=9.1 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.7  P90=2.0  P95=2.9  P99=5.8  max=5.8  (n=79)
+grab=1.4 detect=10.5 pnp=0.1 draw=2.2 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=11.0 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=7.4 pnp=0.1 draw=2.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=3.6 detect=6.0 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.2  P90=1.7  P95=1.8  P99=2.3  max=2.3  (n=100)
+grab=1.4 detect=3.0 pnp=0.0 draw=2.1 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=3.1 pnp=0.0 draw=1.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=10.7 pnp=0.0 draw=1.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.5  P90=4.9  P95=5.8  P99=5.8  max=5.8  (n=16)
+grab=1.4 detect=7.6 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=9.3 pnp=0.3 draw=1.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=10.6 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.7  P90=1.6  P95=1.8  P99=2.3  max=2.3  (n=100)
+grab=1.6 detect=9.2 pnp=0.1 draw=1.6 ms | Det=1 Poses=1 | rejErr=1 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=10.3 pnp=0.1 draw=1.7 ms | Det=1 Poses=1 | rejErr=3 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=10.7 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=6 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=7.7 pnp=0.1 draw=2.2 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.3  P90=2.3  P95=6.5  P99=6.6  max=6.7  (n=110)
+grab=1.7 detect=7.9 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.3 detect=7.9 pnp=0.1 draw=2.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.2 detect=7.7 pnp=0.1 draw=1.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.5  P90=2.1  P95=2.2  P99=2.3  max=2.3  (n=100)
+grab=1.6 detect=7.9 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=7.8 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.9 detect=8.4 pnp=0.1 draw=2.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.2  P90=2.0  P95=2.0  P99=2.1  max=2.1  (n=100)
+grab=1.3 detect=10.0 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=10.1 pnp=0.1 draw=2.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=5.7 detect=7.5 pnp=0.1 draw=1.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.2 detect=11.0 pnp=0.1 draw=2.2 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.9  P90=1.4  P95=1.4  P99=2.0  max=2.0  (n=100)
+grab=1.1 detect=7.7 pnp=0.1 draw=1.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=7.8 pnp=0.1 draw=2.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=7.8 pnp=0.1 draw=1.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.9  P90=1.3  P95=1.3  P99=1.4  max=1.4  (n=100)
+grab=5.8 detect=7.6 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.1 detect=10.3 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=5.0 detect=7.5 pnp=0.1 draw=2.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.8  P90=1.5  P95=1.9  P99=2.0  max=2.0  (n=100)
+grab=4.3 detect=13.0 pnp=0.1 draw=1.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=3.0 detect=13.1 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=7.5 pnp=0.1 draw=2.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=7.4 pnp=0.1 draw=2.3 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.2  P90=2.0  P95=2.1  P99=2.3  max=2.3  (n=100)
+grab=1.5 detect=7.5 pnp=0.1 draw=2.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=10.1 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=17.9 pnp=0.1 draw=2.2 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.0  P90=1.7  P95=2.1  P99=2.1  max=2.1  (n=100)
+grab=3.8 detect=15.8 pnp=0.1 draw=1.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=17.0 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=17.4 pnp=0.1 draw=2.2 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.5  P90=2.2  P95=2.3  P99=2.4  max=2.4  (n=100)
+grab=1.8 detect=13.5 pnp=0.1 draw=1.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=16.0 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=17.2 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=16.7 pnp=0.1 draw=1.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.9  P90=2.0  P95=2.1  P99=2.2  max=2.2  (n=100)
+grab=2.0 detect=11.6 pnp=0.1 draw=1.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=16.7 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.0 detect=16.9 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.2  P90=2.2  P95=2.4  P99=2.5  max=2.5  (n=100)
+grab=2.1 detect=16.6 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=13.1 pnp=3.0 draw=2.2 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=17.7 pnp=0.1 draw=1.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.9  P90=1.5  P95=1.6  P99=2.1  max=2.1  (n=100)
+grab=2.2 detect=16.9 pnp=0.1 draw=1.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=16.8 pnp=0.1 draw=2.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=16.9 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=10.5 pnp=0.1 draw=2.2 ms | Det=1 Poses=1 | rejErr=2 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.1  P90=1.7  P95=1.9  P99=6.2  max=6.2  (n=100)
+grab=2.0 detect=9.0 pnp=0.1 draw=1.6 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=10.5 pnp=0.1 draw=1.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=17.7 pnp=0.1 draw=2.2 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.7  P90=1.7  P95=1.8  P99=2.1  max=2.1  (n=100)
+grab=1.8 detect=6.8 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=7.7 pnp=0.1 draw=2.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=3.7 detect=7.8 pnp=0.1 draw=6.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.7  P90=1.2  P95=1.7  P99=1.8  max=1.8  (n=100)
+grab=4.3 detect=7.5 pnp=0.1 draw=2.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.3 detect=6.5 pnp=0.1 draw=1.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=5.0 detect=7.6 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=5.0 detect=7.5 pnp=0.1 draw=2.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.4  P90=1.8  P95=1.8  P99=2.0  max=2.0  (n=100)
+grab=5.0 detect=8.0 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=7.9 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=5.0 detect=7.6 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.7  P90=1.9  P95=1.9  P99=2.0  max=2.0  (n=100)
+grab=4.7 detect=7.7 pnp=0.1 draw=1.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=10.3 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.9 detect=7.3 pnp=0.1 draw=1.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.7  P90=1.8  P95=1.8  P99=1.9  max=1.9  (n=100)
+grab=1.3 detect=6.5 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=6.4 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=8.3 pnp=0.1 draw=2.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=17.1 pnp=0.1 draw=2.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.2  P90=2.2  P95=2.3  P99=2.3  max=2.3  (n=100)
+grab=1.5 detect=16.7 pnp=0.1 draw=2.3 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=17.4 pnp=0.1 draw=2.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.6 detect=6.6 pnp=0.1 draw=1.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.0  P90=1.8  P95=2.0  P99=2.3  max=2.3  (n=100)
+grab=1.5 detect=17.8 pnp=0.1 draw=1.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=12.4 pnp=0.1 draw=4.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=10.4 pnp=0.1 draw=1.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.6  P90=1.3  P95=1.4  P99=1.9  max=1.9  (n=100)
+grab=1.5 detect=6.5 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=12.6 pnp=0.1 draw=1.6 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.4 detect=7.7 pnp=0.1 draw=2.4 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=7.7 pnp=0.1 draw=2.2 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.9  P90=1.5  P95=1.6  P99=2.1  max=5.9  (n=101)
+grab=1.8 detect=8.1 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=1 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=6.5 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=6.7 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.4  P90=1.5  P95=1.6  P99=1.7  max=6.3  (n=101)
+grab=1.4 detect=6.6 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=7.9 pnp=0.1 draw=2.2 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=7.8 pnp=0.1 draw=2.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.6  P90=1.1  P95=1.2  P99=1.5  max=1.5  (n=100)
+grab=1.4 detect=8.2 pnp=0.1 draw=2.3 ms | Det=1 Poses=1 | rejErr=1 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=7.8 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.9 detect=7.9 pnp=0.1 draw=1.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=7.5 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.8  P90=1.9  P95=1.9  P99=2.0  max=6.1  (n=101)
+grab=1.8 detect=7.7 pnp=0.1 draw=1.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.0 detect=7.6 pnp=0.1 draw=1.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.2 detect=8.1 pnp=0.1 draw=2.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.0  P90=1.8  P95=1.9  P99=2.0  max=2.0  (n=100)
+grab=1.3 detect=10.3 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.2 detect=10.3 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=9.9 pnp=0.1 draw=1.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.7  P90=1.0  P95=1.3  P99=1.5  max=1.5  (n=100)
+grab=1.4 detect=10.2 pnp=0.1 draw=2.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=10.8 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=9.2 pnp=0.1 draw=1.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=10.7 pnp=0.1 draw=1.6 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.9  P90=1.7  P95=1.8  P99=2.2  max=2.2  (n=100)
+grab=4.3 detect=7.8 pnp=0.1 draw=1.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.9 detect=7.5 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=10.5 pnp=0.1 draw=1.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.9  P90=2.0  P95=2.1  P99=2.2  max=2.2  (n=100)
+grab=1.3 detect=10.4 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=10.7 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=1 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=10.8 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.9  P90=1.7  P95=1.8  P99=1.9  max=6.5  (n=101)
+grab=1.5 detect=9.1 pnp=0.1 draw=1.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.7 detect=7.4 pnp=0.1 draw=1.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=7.6 pnp=0.1 draw=1.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=8.1 pnp=0.1 draw=2.1 ms | Det=1 Poses=1 | rejErr=2 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.0  P90=2.0  P95=2.0  P99=6.4  max=6.5  (n=102)
+grab=1.6 detect=7.2 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=2 rejDep=0 rejFin=0 pnpFail=0
+grab=4.5 detect=7.5 pnp=0.1 draw=1.8 ms | Det=1 Poses=1 | rejErr=5 rejDep=0 rejFin=0 pnpFail=0
+grab=4.7 detect=7.5 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=4 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.7  P90=6.3  P95=6.5  P99=6.9  max=7.2  (n=107)
+grab=1.9 detect=7.8 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=2 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=7.6 pnp=0.1 draw=2.1 ms | Det=1 Poses=1 | rejErr=3 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=6.3 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=1 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.7  P90=2.5  P95=6.0  P99=6.8  max=7.0  (n=106)
+grab=1.3 detect=7.7 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=1 rejDep=0 rejFin=0 pnpFail=0
+grab=2.0 detect=7.8 pnp=0.1 draw=2.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=7.8 pnp=0.1 draw=2.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=7.9 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=3 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.2  P90=1.9  P95=2.3  P99=6.9  max=6.9  (n=98)
+grab=1.3 detect=7.8 pnp=0.1 draw=1.7 ms | Det=1 Poses=1 | rejErr=5 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=7.9 pnp=0.1 draw=1.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.5 detect=7.8 pnp=0.1 draw=1.8 ms | Det=1 Poses=1 | rejErr=7 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.8  P90=6.5  P95=7.0  P99=7.1  max=7.2  (n=110)
+grab=1.3 detect=7.8 pnp=0.1 draw=2.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.1 detect=8.1 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=10.6 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.9  P90=1.7  P95=1.9  P99=2.0  max=2.0  (n=100)
+grab=1.8 detect=10.4 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=10.6 pnp=0.1 draw=2.1 ms | Det=1 Poses=1 | rejErr=1 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=10.3 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=1 rejDep=0 rejFin=0 pnpFail=0
+grab=1.9 detect=10.3 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.6  P90=2.2  P95=2.3  P99=6.2  max=6.3  (n=102)
+grab=1.2 detect=10.1 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.2 detect=10.5 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=1 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=4.9 pnp=0.0 draw=1.7 ms | Det=0 Poses=0 | rejErr=3 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.4  P90=2.3  P95=6.5  P99=7.3  max=7.3  (n=100)
+grab=1.3 detect=6.3 pnp=0.1 draw=1.7 ms | Det=1 Poses=1 | rejErr=2 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=7.5 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=3 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=7.5 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.4  P90=2.3  P95=2.4  P99=6.6  max=6.6  (n=104)
+grab=1.2 detect=11.1 pnp=0.0 draw=1.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=7.9 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=4 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=7.6 pnp=0.1 draw=1.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=7.7 pnp=0.1 draw=2.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.3  P90=3.9  P95=6.0  P99=7.5  max=7.5  (n=86)
+grab=1.3 detect=2.7 pnp=0.0 draw=1.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.7 detect=2.9 pnp=0.0 draw=1.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=3.2 pnp=0.0 draw=1.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.4  P90=2.0  P95=2.2  P99=2.2  max=2.2  (n=12)
+grab=1.7 detect=2.9 pnp=0.0 draw=1.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+➜  RMVtraining git:(main) ✗ ./build/test_camera_live --red 
+ESC/q quit, s save frame
+[extr not calibrated] yaw/pitch are relative to camera optical axis
+相机未连接，等待相机接入...
+相机连接成功
+grab=1.9 detect=4.1 pnp=0.0 draw=5.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.1 detect=3.4 pnp=0.0 draw=5.4 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=4.0 pnp=0.0 draw=3.3 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=3.9 pnp=0.0 draw=3.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=7.6 pnp=0.0 draw=6.3 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=4.1 pnp=0.0 draw=2.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=4.3 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=4.0 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=4.1 pnp=0.0 draw=3.2 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=6.6 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=3.6 pnp=0.0 draw=5.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=3.3 detect=3.9 pnp=0.0 draw=5.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.2 detect=3.7 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=6.4 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=4.1 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.1 detect=6.4 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.2 detect=10.1 pnp=0.0 draw=5.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=7.5 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=7.5 pnp=0.1 draw=2.6 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=7.3 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.7  P90=1.9  P95=2.0  P99=2.2  max=2.2  (n=78)
+grab=4.3 detect=7.2 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=8.7 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=7.4 pnp=0.1 draw=3.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.9  P90=5.2  P95=5.3  P99=5.5  max=5.6  (n=115)
+grab=1.7 detect=6.8 pnp=0.1 draw=6.1 ms | Det=2 Poses=2 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.7 detect=8.7 pnp=0.1 draw=2.9 ms | Det=2 Poses=2 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.1 detect=7.4 pnp=0.1 draw=3.0 ms | Det=2 Poses=2 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=2.0  P90=5.6  P95=5.6  P99=5.9  max=5.9  (n=140)
+grab=1.6 detect=7.3 pnp=0.1 draw=2.8 ms | Det=2 Poses=2 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=10.1 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=8.7 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=9.4 pnp=0.1 draw=5.8 ms | Det=2 Poses=2 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=2.0  P90=5.6  P95=5.7  P99=5.9  max=5.9  (n=124)
+grab=1.7 detect=7.2 pnp=0.1 draw=2.8 ms | Det=2 Poses=2 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=11.3 pnp=0.1 draw=5.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=9.5 pnp=0.0 draw=5.5 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=2.2  P90=5.4  P95=5.4  P99=5.5  max=5.5  (n=65)
+grab=2.7 detect=8.1 pnp=0.1 draw=2.7 ms | Det=2 Poses=2 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.2 detect=8.4 pnp=0.1 draw=2.7 ms | Det=2 Poses=2 | rejErr=1 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=4.2 pnp=0.0 draw=3.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=2.1  P90=5.9  P95=6.0  P99=6.2  max=6.2  (n=56)
+grab=1.7 detect=3.9 pnp=0.0 draw=2.6 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=6.3 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=4.0 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.7 detect=3.5 pnp=0.0 draw=2.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=4.1 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.0 detect=3.8 pnp=0.0 draw=3.2 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=8.8 pnp=0.1 draw=2.6 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=2.1  P90=3.2  P95=4.0  P99=4.0  max=4.0  (n=17)
+grab=2.2 detect=8.3 pnp=0.1 draw=5.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=9.5 pnp=0.0 draw=5.4 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=5.7 detect=10.6 pnp=0.1 draw=2.8 ms | Det=1 Poses=0 | rejErr=1 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=2.1  P90=6.0  P95=8.0  P99=8.0  max=8.0  (n=60)
+grab=1.5 detect=9.2 pnp=0.1 draw=3.2 ms | Det=2 Poses=1 | rejErr=14 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=7.1 pnp=0.1 draw=3.1 ms | Det=1 Poses=1 | rejErr=21 rejDep=0 rejFin=0 pnpFail=0
+grab=4.3 detect=14.6 pnp=0.1 draw=2.8 ms | Det=2 Poses=1 | rejErr=24 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=8.6 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=23 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=2.1  P90=8.1  P95=8.1  P99=8.3  max=8.4  (n=178)
+grab=5.0 detect=8.3 pnp=0.1 draw=2.9 ms | Det=2 Poses=1 | rejErr=18 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=7.5 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=16 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=8.7 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=14 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=2.0  P90=8.0  P95=8.1  P99=8.1  max=8.2  (n=149)
+grab=1.6 detect=8.9 pnp=0.1 draw=6.0 ms | Det=1 Poses=1 | rejErr=5 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=8.4 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=4 rejDep=0 rejFin=0 pnpFail=0
+grab=1.2 detect=8.7 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=4 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=2.0  P90=7.6  P95=7.9  P99=8.1  max=8.1  (n=112)
+grab=1.3 detect=8.6 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=16.1 pnp=0.1 draw=3.2 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=8.6 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.2 detect=8.7 pnp=0.1 draw=5.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=2.0  P90=2.3  P95=2.4  P99=2.7  max=2.7  (n=100)
+grab=1.2 detect=8.8 pnp=0.0 draw=2.6 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.2 detect=7.2 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.3 detect=8.8 pnp=0.1 draw=5.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=2.1  P90=2.4  P95=5.6  P99=6.2  max=6.2  (n=95)
+grab=1.4 detect=8.9 pnp=0.1 draw=2.8 ms | Det=2 Poses=1 | rejErr=14 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=8.6 pnp=0.1 draw=3.0 ms | Det=2 Poses=1 | rejErr=17 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=7.6 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=14 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=2.0  P90=6.3  P95=6.4  P99=6.4  max=6.5  (n=161)
+grab=1.3 detect=9.9 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=15 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=9.3 pnp=0.1 draw=2.9 ms | Det=2 Poses=1 | rejErr=24 rejDep=0 rejFin=0 pnpFail=0
+grab=4.2 detect=7.1 pnp=0.1 draw=3.2 ms | Det=1 Poses=1 | rejErr=12 rejDep=0 rejFin=0 pnpFail=0
+grab=1.2 detect=7.1 pnp=0.1 draw=3.5 ms | Det=1 Poses=1 | rejErr=7 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=2.0  P90=6.2  P95=6.3  P99=6.4  max=6.4  (n=159)
+grab=1.5 detect=8.5 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.7 detect=7.9 pnp=0.1 draw=5.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=6.9 pnp=0.1 draw=2.5 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.8  P90=2.1  P95=2.2  P99=5.9  max=6.0  (n=103)
+grab=1.8 detect=8.8 pnp=0.1 draw=5.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=8.5 pnp=0.1 draw=6.2 ms | Det=2 Poses=1 | rejErr=8 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=7.5 pnp=0.1 draw=2.6 ms | Det=1 Poses=1 | rejErr=11 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.9  P90=6.4  P95=6.5  P99=6.7  max=7.6  (n=135)
+grab=1.9 detect=10.4 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=16 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=7.2 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=11 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=9.2 pnp=0.1 draw=6.2 ms | Det=2 Poses=2 | rejErr=6 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=7.7 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=9 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.9  P90=6.2  P95=6.2  P99=6.5  max=6.6  (n=144)
+grab=1.4 detect=7.1 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=8 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=7.0 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=11 rejDep=0 rejFin=0 pnpFail=0
+grab=2.4 detect=7.3 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=8 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.9  P90=6.2  P95=6.2  P99=6.3  max=6.6  (n=144)
+grab=1.2 detect=7.3 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=5 rejDep=0 rejFin=0 pnpFail=0
+grab=2.0 detect=8.7 pnp=0.1 draw=6.1 ms | Det=2 Poses=1 | rejErr=8 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=7.8 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=10 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.9  P90=6.2  P95=6.3  P99=6.5  max=6.5  (n=145)
+grab=1.3 detect=7.6 pnp=0.1 draw=2.8 ms | Det=2 Poses=2 | rejErr=13 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=8.9 pnp=0.1 draw=6.0 ms | Det=2 Poses=2 | rejErr=7 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=8.2 pnp=0.1 draw=2.9 ms | Det=2 Poses=2 | rejErr=9 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=7.4 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=9 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.9  P90=6.2  P95=6.3  P99=6.4  max=6.5  (n=157)
+grab=2.0 detect=10.2 pnp=0.1 draw=3.1 ms | Det=1 Poses=1 | rejErr=11 rejDep=0 rejFin=0 pnpFail=0
+grab=1.9 detect=8.8 pnp=0.1 draw=5.8 ms | Det=2 Poses=1 | rejErr=20 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=8.5 pnp=0.1 draw=3.0 ms | Det=2 Poses=2 | rejErr=3 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=2.3  P90=6.2  P95=6.3  P99=6.5  max=6.5  (n=180)
+grab=1.6 detect=8.6 pnp=0.1 draw=2.8 ms | Det=2 Poses=2 | rejErr=3 rejDep=0 rejFin=0 pnpFail=0
+grab=1.9 detect=8.9 pnp=0.1 draw=6.2 ms | Det=2 Poses=2 | rejErr=4 rejDep=0 rejFin=0 pnpFail=0
+grab=1.2 detect=11.7 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=4 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=2.2  P90=6.0  P95=6.0  P99=6.1  max=6.2  (n=187)
+grab=1.2 detect=10.9 pnp=0.1 draw=2.8 ms | Det=2 Poses=2 | rejErr=1 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=9.0 pnp=0.1 draw=6.1 ms | Det=2 Poses=2 | rejErr=2 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=10.4 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=7.2 pnp=0.1 draw=3.1 ms | Det=1 Poses=1 | rejErr=3 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=2.2  P90=5.8  P95=6.0  P99=6.0  max=6.2  (n=194)
+grab=2.9 detect=9.0 pnp=0.1 draw=6.0 ms | Det=2 Poses=2 | rejErr=1 rejDep=0 rejFin=0 pnpFail=0
+grab=2.2 detect=7.3 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=3 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=9.0 pnp=0.1 draw=3.2 ms | Det=2 Poses=2 | rejErr=2 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=2.2  P90=5.8  P95=5.9  P99=6.1  max=6.1  (n=184)
+grab=5.8 detect=8.3 pnp=0.1 draw=3.1 ms | Det=2 Poses=2 | rejErr=1 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=8.4 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=8.5 pnp=0.1 draw=2.9 ms | Det=2 Poses=2 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=2.3  P90=5.8  P95=5.9  P99=6.0  max=6.0  (n=174)
+grab=1.5 detect=8.5 pnp=0.1 draw=3.4 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=12.3 pnp=0.1 draw=3.2 ms | Det=2 Poses=2 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=3.9 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.2 detect=7.2 pnp=0.0 draw=3.1 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=2.2  P90=5.7  P95=5.8  P99=5.9  max=5.9  (n=93)
+grab=1.3 detect=6.4 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=6.3 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=7.1 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=6.2 pnp=0.0 draw=3.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+➜  RMVtraining git:(main) ✗ cmake -S . -B build           
+cmake --build build -j
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /home/oliver/coding/learn/RMVtrainingHomework/RMVtraining/build
+Consolidate compiler generated dependencies of target serialPort
+Consolidate compiler generated dependencies of target calibrate_intrinsics
+Consolidate compiler generated dependencies of target web_debug
+Consolidate compiler generated dependencies of target algorithm_support
+[ 12%] Built target web_debug
+[ 15%] Built target serialPort
+[ 18%] Built target calibrate_intrinsics
+[ 28%] Built target algorithm_support
+Consolidate compiler generated dependencies of target training_core
+[ 31%] Building CXX object CMakeFiles/training_core.dir/student/src/StudentTasks.cpp.o
+[ 34%] Linking CXX static library libtraining_core.a
+[ 43%] Built target training_core
+Consolidate compiler generated dependencies of target test_camera
+Consolidate compiler generated dependencies of target test_scaffold
+Consolidate compiler generated dependencies of target rmv_training
+Consolidate compiler generated dependencies of target test_classifier
+Consolidate compiler generated dependencies of target calib_capture
+Consolidate compiler generated dependencies of target test_detect
+Consolidate compiler generated dependencies of target test_solve
+Consolidate compiler generated dependencies of target test_camera_live
+Consolidate compiler generated dependencies of target test_batch
+[ 50%] Linking CXX executable test_camera
+[ 50%] Linking CXX executable test_scaffold
+[ 53%] Linking CXX executable rmv_training
+[ 56%] Linking CXX executable test_detect
+[ 59%] Linking CXX executable test_classifier
+[ 62%] Linking CXX executable calib_capture
+[ 65%] Linking CXX executable test_solve
+[ 68%] Linking CXX executable test_camera_live
+[ 71%] Linking CXX executable test_batch
+[ 75%] Built target test_scaffold
+[ 78%] Built target rmv_training
+[ 81%] Built target test_classifier
+[ 84%] Built target test_detect
+[ 87%] Built target test_solve
+[ 90%] Built target test_batch
+[ 93%] Built target test_camera_live
+[ 96%] Built target test_camera
+[100%] Built target calib_capture
+➜  RMVtraining git:(main) ✗ ./build/test_camera_live --red
+ESC/q quit, s save frame
+[extr not calibrated] yaw/pitch are relative to camera optical axis
+相机未连接，等待相机接入...
+相机连接成功
+grab=2.0 detect=4.2 pnp=0.0 draw=5.6 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=4.8 pnp=0.0 draw=6.2 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=6.5 pnp=0.0 draw=2.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=6.3 pnp=0.0 draw=2.6 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.1 detect=6.7 pnp=0.0 draw=3.1 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.1 detect=4.2 pnp=0.0 draw=3.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=3.5 pnp=0.0 draw=5.5 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.0 detect=3.6 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=4.0 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.7 detect=7.2 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=0.9  P90=1.4  P95=1.4  P99=1.4  max=1.4  (n=19)
+grab=1.3 detect=8.1 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=8.4 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=10.1 pnp=0.1 draw=2.6 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.2  P90=1.5  P95=1.6  P99=1.7  max=1.7  (n=100)
+grab=1.4 detect=11.0 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=7.3 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.0 detect=10.1 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.3  P90=1.6  P95=1.8  P99=4.7  max=4.9  (n=101)
+grab=1.7 detect=8.5 pnp=0.1 draw=6.5 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=5.8 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.2 detect=10.0 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=12.0 pnp=0.0 draw=2.5 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.5  P90=1.8  P95=1.8  P99=1.8  max=1.8  (n=65)
+grab=4.4 detect=7.2 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=5.1 detect=5.4 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=7.1 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.5  P90=1.8  P95=1.9  P99=3.9  max=3.9  (n=82)
+grab=4.5 detect=7.0 pnp=0.1 draw=3.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.2 detect=9.4 pnp=0.1 draw=2.6 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.7 detect=7.2 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.4  P90=1.8  P95=1.9  P99=4.6  max=4.6  (n=95)
+grab=4.4 detect=6.9 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=6.9 pnp=0.1 draw=2.6 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=7.5 pnp=0.1 draw=3.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=7.2 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.3  P90=1.6  P95=1.7  P99=1.8  max=1.8  (n=100)
+grab=1.5 detect=3.9 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.6 detect=7.0 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=7.4 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.5  P90=1.8  P95=2.0  P99=5.5  max=5.5  (n=75)
+grab=1.5 detect=7.3 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=15.9 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=15.4 pnp=0.1 draw=3.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.4  P90=1.6  P95=1.7  P99=2.0  max=3.9  (n=101)
+grab=1.7 detect=9.0 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=8.7 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=10.9 pnp=0.1 draw=6.3 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.6 detect=7.3 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.4  P90=1.8  P95=2.1  P99=4.3  max=4.3  (n=102)
+grab=4.8 detect=7.4 pnp=0.1 draw=3.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=5.6 detect=7.3 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=5.5 detect=9.7 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.5  P90=1.9  P95=3.3  P99=3.8  max=4.3  (n=106)
+grab=4.7 detect=7.5 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=5.3 detect=7.0 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=5.4 detect=9.9 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.4  P90=1.8  P95=3.5  P99=4.1  max=4.2  (n=105)
+grab=1.7 detect=8.6 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=5.1 detect=7.1 pnp=0.1 draw=2.6 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=7.3 pnp=0.1 draw=2.6 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=8.7 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.4  P90=1.7  P95=1.7  P99=1.9  max=3.8  (n=101)
+grab=1.2 detect=9.0 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=8.7 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.2 detect=8.5 pnp=0.1 draw=3.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.4  P90=1.8  P95=3.8  P99=4.0  max=4.1  (n=108)
+grab=1.5 detect=8.5 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.4 detect=7.3 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.2 detect=7.1 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.4  P90=1.7  P95=2.0  P99=3.7  max=3.7  (n=101)
+grab=2.5 detect=7.1 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=7.4 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=4.0 pnp=0.0 draw=2.6 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=4.0 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.4  P90=1.7  P95=1.9  P99=2.4  max=2.4  (n=63)
+grab=1.3 detect=9.7 pnp=0.1 draw=2.6 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=9.8 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=9.3 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.5  P90=1.7  P95=1.8  P99=1.9  max=1.9  (n=76)
+grab=4.4 detect=7.1 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.1 detect=7.2 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.3 detect=7.5 pnp=0.1 draw=3.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.4  P90=1.6  P95=1.6  P99=1.7  max=1.8  (n=101)
+grab=1.8 detect=7.6 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.6 detect=7.5 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.6 detect=7.4 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.5 detect=7.3 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.5  P90=1.7  P95=1.8  P99=2.2  max=2.2  (n=100)
+grab=1.3 detect=7.2 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.8 detect=7.2 pnp=0.1 draw=3.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.2 detect=10.1 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.6  P90=2.1  P95=2.7  P99=5.0  max=5.0  (n=88)
+grab=1.5 detect=7.8 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=10.4 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.2 detect=7.1 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.4  P90=1.6  P95=1.7  P99=1.9  max=1.9  (n=100)
+grab=1.4 detect=7.2 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=11.9 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.2 detect=8.3 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=7.3 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.2  P90=1.7  P95=3.9  P99=4.2  max=4.4  (n=105)
+grab=2.0 detect=7.3 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.2 detect=7.8 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=7.4 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.3  P90=1.6  P95=1.6  P99=4.3  max=4.9  (n=102)
+grab=1.4 detect=8.7 pnp=0.1 draw=2.7 ms | Det=2 Poses=2 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.9 detect=7.2 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.9 detect=7.4 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.4  P90=1.7  P95=1.9  P99=3.8  max=4.3  (n=101)
+grab=4.6 detect=7.0 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=7.2 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=7.4 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.7 detect=6.9 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.4  P90=1.7  P95=1.8  P99=2.2  max=2.2  (n=92)
+grab=1.4 detect=8.7 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.1 detect=10.0 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.8 detect=7.5 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.3  P90=1.5  P95=1.6  P99=1.8  max=4.6  (n=101)
+grab=5.5 detect=7.0 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=7.6 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.2 detect=8.3 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.4  P90=1.5  P95=1.7  P99=2.0  max=2.0  (n=100)
+grab=4.4 detect=6.8 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=7.0 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.2 detect=7.3 pnp=0.1 draw=2.6 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.9 detect=7.5 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.4  P90=1.6  P95=1.7  P99=1.9  max=1.9  (n=100)
+grab=2.0 detect=6.0 pnp=0.1 draw=5.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.0 detect=8.3 pnp=0.1 draw=3.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.2 detect=7.2 pnp=0.1 draw=2.6 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.5  P90=1.8  P95=1.8  P99=2.1  max=2.1  (n=100)
+grab=2.0 detect=7.0 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=11.0 pnp=0.1 draw=5.6 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=7.2 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.3  P90=4.7  P95=4.8  P99=5.1  max=5.5  (n=123)
+grab=1.5 detect=9.9 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=9.9 pnp=0.1 draw=3.2 ms | Det=2 Poses=2 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.1 detect=9.8 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.6 detect=7.1 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.4  P90=2.2  P95=4.6  P99=4.9  max=5.0  (n=107)
+grab=1.5 detect=7.4 pnp=0.1 draw=3.1 ms | Det=2 Poses=2 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=10.0 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.1 detect=11.1 pnp=0.1 draw=3.4 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.5  P90=2.0  P95=2.1  P99=4.6  max=4.6  (n=100)
+grab=1.4 detect=8.5 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=8.5 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=1 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=11.0 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.7  P90=1.9  P95=2.0  P99=6.5  max=6.5  (n=96)
+grab=4.7 detect=8.7 pnp=0.1 draw=2.9 ms | Det=2 Poses=2 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=7.6 pnp=0.1 draw=2.6 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.2 detect=14.8 pnp=0.0 draw=2.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.9 detect=7.2 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.4  P90=1.9  P95=2.1  P99=4.0  max=4.0  (n=96)
+grab=1.5 detect=15.1 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=11.9 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=11.2 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.6  P90=1.9  P95=2.0  P99=4.7  max=4.7  (n=95)
+grab=4.8 detect=7.1 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=11.1 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=7.3 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.6  P90=1.8  P95=1.9  P99=2.1  max=2.1  (n=99)
+grab=4.7 detect=14.3 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=9.1 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=7.5 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.7 detect=6.0 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.7  P90=2.0  P95=4.2  P99=4.8  max=4.8  (n=107)
+grab=1.6 detect=7.3 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=8.7 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=8.6 pnp=0.1 draw=3.2 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.5  P90=1.7  P95=1.9  P99=4.9  max=4.9  (n=97)
+grab=1.6 detect=7.6 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=10.3 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=9.2 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.5  P90=1.7  P95=1.8  P99=2.0  max=2.0  (n=97)
+grab=4.6 detect=7.2 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=9.4 pnp=0.1 draw=3.2 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=6.1 pnp=0.0 draw=2.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=8.4 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.6  P90=1.8  P95=1.9  P99=2.2  max=2.2  (n=67)
+grab=1.7 detect=5.7 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=5.9 pnp=0.1 draw=3.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=5.8 pnp=0.1 draw=3.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.8  P90=2.0  P95=2.1  P99=2.4  max=2.4  (n=100)
+grab=1.5 detect=6.1 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=8.6 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=7.3 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.7  P90=1.9  P95=2.0  P99=2.2  max=2.2  (n=100)
+grab=1.2 detect=8.3 pnp=0.1 draw=2.6 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.8 detect=7.6 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=10.6 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=11.2 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.6  P90=1.8  P95=1.8  P99=2.0  max=2.0  (n=88)
+grab=1.4 detect=8.5 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=7.2 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=8.9 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.6  P90=1.8  P95=1.9  P99=2.0  max=2.0  (n=100)
+grab=1.6 detect=7.1 pnp=0.1 draw=2.6 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.5 detect=7.4 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.3 detect=7.3 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.4  P90=1.7  P95=1.8  P99=2.0  max=2.2  (n=101)
+grab=2.1 detect=7.4 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=8.9 pnp=0.1 draw=3.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=8.4 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.7 detect=8.5 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.4  P90=1.6  P95=1.7  P99=1.7  max=1.7  (n=98)
+grab=4.8 detect=6.8 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.1 detect=7.1 pnp=0.1 draw=2.5 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.2 detect=7.0 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.5  P90=1.7  P95=1.7  P99=1.7  max=1.7  (n=100)
+grab=1.8 detect=10.2 pnp=0.1 draw=2.6 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=5.0 detect=7.1 pnp=0.1 draw=3.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=10.1 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.5  P90=1.8  P95=1.8  P99=1.8  max=1.8  (n=100)
+grab=4.8 detect=6.9 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=7.3 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=7.2 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=5.8 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.5  P90=1.7  P95=1.9  P99=4.6  max=4.6  (n=100)
+grab=4.4 detect=7.0 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.6 detect=7.1 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.2 detect=10.3 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.6  P90=1.8  P95=2.0  P99=2.2  max=2.2  (n=79)
+grab=4.2 detect=7.5 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=8.7 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.9 detect=8.5 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.6  P90=1.9  P95=1.9  P99=2.1  max=2.1  (n=97)
+grab=4.4 detect=7.3 pnp=0.1 draw=2.5 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.0 detect=7.3 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=9.2 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.7 detect=7.6 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.5  P90=1.8  P95=1.9  P99=2.2  max=2.2  (n=100)
+grab=1.7 detect=7.4 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=7.6 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.8 detect=7.3 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.7  P90=1.9  P95=2.0  P99=2.2  max=2.2  (n=98)
+grab=4.6 detect=7.2 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=3.0 detect=7.4 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=5.8 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.7  P90=1.9  P95=1.9  P99=2.1  max=2.1  (n=97)
+grab=5.0 detect=7.2 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.6 detect=7.0 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=9.9 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=9.9 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.7  P90=2.0  P95=2.1  P99=2.1  max=2.1  (n=80)
+grab=1.4 detect=9.1 pnp=0.1 draw=3.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.7 detect=7.3 pnp=0.1 draw=3.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=11.3 pnp=0.0 draw=2.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.5  P90=1.7  P95=1.8  P99=2.0  max=2.0  (n=95)
+grab=4.4 detect=7.6 pnp=0.1 draw=6.3 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=10.0 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=7.9 pnp=0.1 draw=2.6 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.5  P90=1.7  P95=1.7  P99=1.9  max=1.9  (n=91)
+grab=4.5 detect=12.1 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.5 detect=7.4 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=7.7 pnp=0.1 draw=3.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=11.4 pnp=0.0 draw=5.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.4  P90=1.5  P95=1.6  P99=1.6  max=1.6  (n=89)
+grab=4.6 detect=10.9 pnp=0.0 draw=2.6 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.6 detect=14.1 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=10.3 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.5  P90=1.8  P95=1.9  P99=2.0  max=2.0  (n=79)
+grab=1.7 detect=11.6 pnp=0.0 draw=5.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.4 detect=11.2 pnp=0.0 draw=2.6 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=7.3 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.7  P90=1.9  P95=2.0  P99=2.1  max=2.1  (n=78)
+grab=1.3 detect=10.1 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=7.4 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.4 detect=7.2 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=7.4 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.4  P90=1.6  P95=1.7  P99=1.7  max=1.7  (n=87)
+grab=2.0 detect=14.5 pnp=0.1 draw=2.6 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.6 detect=11.4 pnp=0.0 draw=2.6 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.7 detect=7.3 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.4  P90=1.6  P95=1.7  P99=1.8  max=1.8  (n=79)
+grab=1.1 detect=11.5 pnp=0.0 draw=2.4 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=8.4 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=7.2 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.4  P90=1.6  P95=1.7  P99=1.8  max=1.8  (n=76)
+grab=1.5 detect=11.3 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.1 detect=10.0 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=7.4 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.3 detect=7.3 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.4  P90=1.6  P95=1.6  P99=1.8  max=1.8  (n=88)
+grab=4.5 detect=7.4 pnp=0.1 draw=3.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=7.5 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.4 detect=7.1 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.4  P90=1.6  P95=1.7  P99=1.9  max=1.9  (n=97)
+grab=1.6 detect=7.6 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.3 detect=8.5 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=7.5 pnp=0.1 draw=2.5 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.5  P90=1.7  P95=1.7  P99=1.8  max=1.8  (n=98)
+grab=4.3 detect=7.1 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=9.3 pnp=0.0 draw=5.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=7.3 pnp=0.1 draw=2.6 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=3.1 detect=7.3 pnp=0.1 draw=6.4 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.5  P90=1.8  P95=1.8  P99=1.9  max=1.9  (n=81)
+grab=3.4 detect=14.8 pnp=0.1 draw=3.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=10.9 pnp=0.0 draw=5.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.3 detect=7.1 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.5  P90=1.7  P95=1.9  P99=2.1  max=2.1  (n=91)
+grab=1.5 detect=10.2 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=7.1 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=7.2 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.5  P90=1.7  P95=1.7  P99=1.9  max=1.9  (n=91)
+grab=1.7 detect=7.2 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.8 detect=8.7 pnp=0.1 draw=6.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=7.7 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=9.1 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.5  P90=1.7  P95=1.8  P99=1.8  max=1.8  (n=77)
+grab=1.4 detect=7.6 pnp=0.1 draw=3.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=11.8 pnp=0.0 draw=5.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.5 detect=9.8 pnp=0.0 draw=5.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.5  P90=1.7  P95=1.8  P99=1.8  max=1.8  (n=86)
+grab=4.4 detect=7.2 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=7.1 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.9 detect=7.0 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.5  P90=1.8  P95=1.8  P99=1.9  max=1.9  (n=82)
+grab=1.3 detect=6.7 pnp=0.1 draw=5.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.6 detect=8.1 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.2 detect=7.1 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.3 detect=7.3 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.5  P90=1.7  P95=1.8  P99=2.0  max=2.0  (n=75)
+grab=1.7 detect=8.6 pnp=0.1 draw=3.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.3 detect=7.1 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.4 detect=7.6 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.5  P90=1.8  P95=1.8  P99=1.9  max=1.9  (n=80)
+grab=1.6 detect=11.9 pnp=0.0 draw=5.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=7.5 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=7.9 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.5  P90=1.7  P95=1.8  P99=1.8  max=1.8  (n=95)
+grab=1.5 detect=7.3 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=7.4 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=5.2 detect=12.1 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.3 detect=12.1 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.5  P90=1.8  P95=1.9  P99=2.0  max=2.0  (n=83)
+grab=4.4 detect=7.0 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=7.1 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.2 detect=9.9 pnp=0.1 draw=3.2 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.5  P90=1.7  P95=1.8  P99=2.1  max=2.1  (n=84)
+grab=1.6 detect=7.6 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=9.9 pnp=0.1 draw=3.4 ms | Det=2 Poses=2 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=5.6 detect=11.3 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.4  P90=1.6  P95=1.7  P99=1.7  max=1.7  (n=80)
+grab=1.3 detect=9.9 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=10.2 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.4 detect=7.2 pnp=0.1 draw=2.5 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=10.0 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.3  P90=1.4  P95=1.5  P99=1.5  max=1.5  (n=72)
+grab=1.7 detect=7.2 pnp=0.1 draw=3.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.7 detect=7.3 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.6 detect=7.2 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.4  P90=1.5  P95=1.6  P99=1.7  max=1.7  (n=91)
+grab=4.1 detect=7.4 pnp=0.1 draw=2.6 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=7.6 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=10.4 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.3  P90=1.5  P95=1.6  P99=1.6  max=1.7  (n=102)
+grab=3.7 detect=13.6 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=14.7 pnp=0.0 draw=2.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=7.0 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=4.2 detect=7.3 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.6  P90=2.0  P95=2.1  P99=2.2  max=2.2  (n=91)
+grab=1.3 detect=8.7 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.2 detect=8.5 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=8.8 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.7  P90=2.0  P95=2.1  P99=2.2  max=2.2  (n=100)
+grab=1.6 detect=9.9 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=7.5 pnp=0.1 draw=2.8 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=8.1 pnp=0.1 draw=3.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.6  P90=1.9  P95=1.9  P99=2.3  max=2.3  (n=99)
+grab=2.0 detect=8.4 pnp=0.1 draw=3.1 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.7 detect=8.3 pnp=0.1 draw=3.6 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=7.5 pnp=0.1 draw=2.7 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=9.5 pnp=0.1 draw=3.2 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.5  P90=1.8  P95=1.8  P99=2.1  max=2.1  (n=95)
+grab=4.2 detect=7.1 pnp=0.1 draw=2.6 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=7.4 pnp=0.1 draw=2.9 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=7.4 pnp=0.1 draw=3.0 ms | Det=1 Poses=1 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.3  P90=1.7  P95=1.8  P99=2.0  max=2.0  (n=96)
+grab=1.4 detect=4.2 pnp=0.0 draw=2.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=4.2 pnp=0.0 draw=3.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=3.8 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+err分布: P50=1.8  P90=2.2  P95=2.5  P99=2.5  max=2.5  (n=17)
+grab=1.4 detect=3.6 pnp=0.0 draw=3.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.9 detect=4.1 pnp=0.0 draw=3.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=4.0 pnp=0.0 draw=2.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.2 detect=3.6 pnp=0.0 draw=3.1 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=4.3 pnp=0.0 draw=2.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.9 detect=4.1 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.3 detect=3.5 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=4.2 pnp=0.0 draw=2.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=6.1 pnp=0.0 draw=2.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=4.1 pnp=0.0 draw=5.6 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=5.0 pnp=0.0 draw=5.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=4.3 pnp=0.0 draw=5.6 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=4.3 pnp=0.0 draw=2.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=3.7 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=4.0 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.3 detect=4.4 pnp=0.0 draw=5.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=7.1 pnp=0.0 draw=3.4 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=6.9 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=3.7 pnp=0.0 draw=6.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=6.5 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.9 detect=4.3 pnp=0.0 draw=3.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=4.4 pnp=0.0 draw=5.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=4.8 pnp=0.0 draw=5.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.0 detect=3.9 pnp=0.0 draw=6.1 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=4.3 pnp=0.0 draw=5.6 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.0 detect=6.6 pnp=0.0 draw=3.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=6.5 pnp=0.0 draw=3.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=6.6 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.4 detect=4.2 pnp=0.0 draw=3.1 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=4.2 pnp=0.0 draw=3.1 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.8 detect=3.9 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.8 detect=12.3 pnp=0.0 draw=3.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.7 detect=3.7 pnp=0.0 draw=5.6 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=4.7 pnp=0.0 draw=5.7 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=4.0 pnp=0.0 draw=5.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=3.8 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.1 detect=3.6 pnp=0.0 draw=5.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.0 detect=4.1 pnp=0.0 draw=3.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.3 detect=3.9 pnp=0.0 draw=3.1 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.5 detect=6.3 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.9 detect=6.2 pnp=0.0 draw=2.9 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=2.0 detect=6.3 pnp=0.0 draw=2.8 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+grab=1.6 detect=4.2 pnp=0.0 draw=3.0 ms | Det=0 Poses=0 | rejErr=0 rejDep=0 rejFin=0 pnpFail=0
+➜  RMVtraining git:(main) ✗ 

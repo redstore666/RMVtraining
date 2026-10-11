@@ -34,9 +34,9 @@ rotation_camera_to_gimbal: !!opencv-matrix
   rows: 3
   cols: 3
   dt: d
-  data: [ 0., 0., 0.,
-          0., 0., 0.,
-          0., 0., 0. ]
+  data: [ 1., 0., 0.,
+          0., 1., 0.,
+          0., 0., 1. ]
 
 # 相机原点在云台坐标系中的位置 t_gimbal_camera，
 # 即从云台原点指向相机原点的平移向量，单位为 m。

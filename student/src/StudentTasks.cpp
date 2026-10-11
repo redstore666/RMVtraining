@@ -77,7 +77,7 @@ bool init_camera(void **handle, bool verbose)
     warn(MV_CC_SetEnumValue(*handle, "TriggerMode", MV_TRIGGER_MODE_OFF), "TriggerMode");
     warn(MV_CC_SetEnumValue(*handle, "ExposureAuto", 0), "ExposureAuto");
     warn(MV_CC_SetEnumValue(*handle, "GainAuto", 0), "GainAuto");
-    warn(MV_CC_SetFloatValue(*handle, "ExposureTime", 2000.0f), "ExposureTime");
+    warn(MV_CC_SetFloatValue(*handle, "ExposureTime", 3000.0f), "ExposureTime");
     warn(MV_CC_SetFloatValue(*handle, "Gain", 10.0f), "Gain");
     warn(MV_CC_SetFloatValue(*handle, "AcquisitionFrameRate", 30.0f), "AcquisitionFrameRate");
 
@@ -248,7 +248,7 @@ namespace
 {
 
     constexpr char kModelPath[] = "models/armor_cls_64.onnx";
-    constexpr float kMinConfidence = 0.7F; // 现场按误检/漏检权衡调整
+    constexpr float kMinConfidence = 0.9F; // 现场按误检/漏检权衡调整
 
     struct LightBar
     {
@@ -893,7 +893,7 @@ namespace
     }
 
     // 门禁阈值（现场可调；任务书要求拒绝深度非法或误差异常的观测）
-    constexpr double kMaxReprojErrorPx = 6.0; // 重投影误差上限,阈值按数据分布定(0.6最合适)
+    constexpr double kMaxReprojErrorPx = 6.0; // 重投影误差上限,阈值按数据分布定(6最合适)
     constexpr double kMinDepthM = 0.05;       // 深度下限（近于 5cm 视为异常）
     constexpr double kMaxDepthM = 20.0;       // 深度上限
 
