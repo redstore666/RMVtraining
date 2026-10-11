@@ -1,7 +1,10 @@
 #include "StudentTasks.hpp"
 #include <iostream>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
+#include <vector>
+#include <opencv2/calib3d.hpp> // solvePnP / Rodrigues / drawFrameAxes（坐标系显示用）
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/imgcodecs.hpp>
@@ -24,7 +27,21 @@ q / ESC：退出
 空格：暂停/继续
 ← →：后退/前进 1 帧（自动暂停）
 s：保存当前帧 + mask（保存到 ./tmp/）
+m：打印当前帧各观测 PnP 的 R / t 矩阵（全精度；左上角面板常显 %.3f 版本）
+画面：检测框 + 装甲板中心 xyz 坐标系（x红 y绿 z蓝）+ 左上角面板（坐标轴/矩阵/帧号）
 */
+
+namespace {
+// 工具内自建物点（与 StudentTasks.cpp 的 buildObjectPoints 相同模型），
+// 仅用于在画面上绘制装甲板坐标系：重解一次 PnP 拿 rvec/tvec，不影响 armor_solve。
+std::vector<cv::Point3f> makeObjectPoints(ArmorSize size)
+{
+    const float half_w = (size == ArmorSize::Small ? 0.135F : 0.230F) / 2.0F;
+    const float half_h = 0.057F / 2.0F;
+    return {{-half_w, -half_h, 0.0F}, {half_w, -half_h, 0.0F},
+            {half_w, half_h, 0.0F}, {-half_w, half_h, 0.0F}};
+}
+} // namespace
 int main(int argc, char **argv)
 {
     std::string video_path;
@@ -97,15 +114,30 @@ int main(int argc, char **argv)
     bool exit_flag = false;
     bool need_new_frame = true;
 
-    // 方向键码——不同平台/后端不一样，全都认一下
+    // 方向键码——不同平台/后端不一样，全都认一下；还认不出来时按 ←/→ 看终端
+    // 打印的 "key = ..." 键码，把值补进下面的列表（或补进低位兜底分支）。
     auto is_left_arrow = [](int k)
     {
-        return k == 65361 || k == 16777234 || k == 2424832;
+        return k == 65361 || k == 16777234 || k == 2424832 ||
+               ((k & 0xFF) == 0x51 && k != 0x51) ||        // GTK 高位变体
+               ((k & 0xFF) == 0x12 && k > 0x10000);        // Qt 0x1000012 低位兜底
     };
     auto is_right_arrow = [](int k)
     {
-        return k == 65363 || k == 16777236 || k == 2555904;
+        return k == 65363 || k == 16777236 || k == 2555904 ||
+               ((k & 0xFF) == 0x53 && k != 0x53) ||        // GTK 高位变体
+               ((k & 0xFF) == 0x14 && k > 0x10000);        // Qt 0x1000014 低位兜底
     };
+
+    // 当前帧的 PnP 位姿缓存（供 m 键打印矩阵用）
+    std::vector<cv::Mat> dbg_rvecs, dbg_tvecs;
+    std::vector<int> dbg_ids;
+
+    // 每帧的检测结果缓存（只在读入新帧时刷新一次）
+    std::vector<ArmorDetection> dets;
+    std::vector<ArmorPose> poses;
+    cv::Mat mask_dbg;
+    bool need_recompute = true;
 
     while (true)
     {
@@ -127,16 +159,47 @@ int main(int argc, char **argv)
             }
             ++frame_no;
             need_new_frame = false;
+            need_recompute = true;
         }
 
-        // ===== 检测 + PnP =====
-        // 注意：paused 且只有按键不 seek 时，会重复检测同一帧——
-        // 对调试影响不大；如果嫌慢，可以用缓存优化。
-        const auto dets = armor_detect(frame, enemy);
-        const auto poses = armor_solve(dets, camera, gimbal);
+        // ===== 检测 + PnP + 掩码：只在新帧时计算一次 =====
+        // 重要（修复"回放误识别"）：绘制只发生在克隆图上（display_canvas），
+        // 绝不回写原始 frame——否则暂停/逐帧时，下一轮循环会把上一轮画上去的
+        // 检测框、角点、坐标轴、PAUSED 字样当成图像内容重新检测，
+        // 产生大量假灯条/假 ID/跨条配对（历史 bug：屏幕上"全是误识别"）。
+        if (need_recompute)
+        {
+            dets = armor_detect(frame, enemy);
+            poses = armor_solve(dets, camera, gimbal);
+            mask_dbg = enemyMaskForDebug(frame, enemy);
 
-        // ===== 画框 + 角点标签 =====
-        drawDetections(frame, dets);
+            // PnP 位姿（供坐标轴绘制与 m 键矩阵打印）
+            dbg_rvecs.clear();
+            dbg_tvecs.clear();
+            dbg_ids.clear();
+            for (const auto &pose : poses)
+            {
+                const std::vector<cv::Point3f> obj = makeObjectPoints(pose.detection.size);
+                const std::vector<cv::Point2f> img(pose.detection.corners.begin(),
+                                                   pose.detection.corners.end());
+                cv::Mat rvec, tvec;
+                if (cv::solvePnP(obj, img, camera.camera_matrix,
+                                 camera.distortion_coefficients, rvec, tvec, false,
+                                 cv::SOLVEPNP_IPPE))
+                {
+                    dbg_rvecs.push_back(rvec.clone());
+                    dbg_tvecs.push_back(tvec.clone());
+                    dbg_ids.push_back(pose.detection.target_id);
+                }
+            }
+            need_recompute = false;
+        }
+
+        // ===== 绘制（全部画在克隆图上，frame 保持原始像素）=====
+        cv::Mat display_canvas = frame.clone();
+
+        // 检测框 + 角点标签
+        drawDetections(display_canvas, dets);
         for (const auto &det : dets)
         {
             const char *labels[4] = {"TL", "TR", "BR", "BL"};
@@ -150,15 +213,15 @@ int main(int argc, char **argv)
             {
                 const cv::Point pt(cvRound(det.corners[k].x),
                                    cvRound(det.corners[k].y));
-                cv::circle(frame, pt, 4, colors[k], -1);
-                cv::putText(frame, labels[k],
+                cv::circle(display_canvas, pt, 4, colors[k], -1);
+                cv::putText(display_canvas, labels[k],
                             pt + cv::Point(6, -6),
                             cv::FONT_HERSHEY_SIMPLEX, 0.5,
                             colors[k], 1);
             }
         }
 
-        // ===== PnP 信息（固定左上角）=====
+        // PnP 信息（固定左上角）
         for (std::size_t pi = 0; pi < poses.size(); ++pi)
         {
             const auto &pose = poses[pi];
@@ -182,15 +245,47 @@ int main(int argc, char **argv)
                           "posYaw=%+.1f  pitch=%+.1f  armYaw=%+.1f  [deg, cam frame]",
                           pos_yaw, pitch, armor_yaw);
 
-            const cv::Point base(20, 80 + static_cast<int>(pi) * 90);
+            const cv::Point base(20, 80 + static_cast<int>(pi) * 150);
             const cv::Scalar color(0, 255, 255);
-            cv::putText(frame, line1, base, cv::FONT_HERSHEY_SIMPLEX, 0.55, color, 1);
-            cv::putText(frame, line2, base + cv::Point(0, 22), cv::FONT_HERSHEY_SIMPLEX, 0.55, color, 1);
-            cv::putText(frame, line3, base + cv::Point(0, 44), cv::FONT_HERSHEY_SIMPLEX, 0.55, color, 1);
+            cv::putText(display_canvas, line1, base, cv::FONT_HERSHEY_SIMPLEX, 0.55, color, 1);
+            cv::putText(display_canvas, line2, base + cv::Point(0, 22), cv::FONT_HERSHEY_SIMPLEX, 0.55, color, 1);
+            cv::putText(display_canvas, line3, base + cv::Point(0, 44), cv::FONT_HERSHEY_SIMPLEX, 0.55, color, 1);
+
+            // ===== 左上角面板：PnP 的 R/t 矩阵（rvec/tvec 为同一帧的缓存解算结果）=====
+            if (pi < dbg_rvecs.size())
+            {
+                cv::Mat R;
+                cv::Rodrigues(dbg_rvecs[pi], R);
+                const cv::Mat &tvec = dbg_tvecs[pi];
+                cv::putText(display_canvas,
+                            cv::format("R= [%+.3f %+.3f %+.3f]", R.at<double>(0, 0),
+                                       R.at<double>(0, 1), R.at<double>(0, 2)),
+                            base + cv::Point(0, 64), cv::FONT_HERSHEY_SIMPLEX, 0.5, color, 1);
+                cv::putText(display_canvas,
+                            cv::format("    [%+.3f %+.3f %+.3f]", R.at<double>(1, 0),
+                                       R.at<double>(1, 1), R.at<double>(1, 2)),
+                            base + cv::Point(0, 82), cv::FONT_HERSHEY_SIMPLEX, 0.5, color, 1);
+                cv::putText(display_canvas,
+                            cv::format("    [%+.3f %+.3f %+.3f]", R.at<double>(2, 0),
+                                       R.at<double>(2, 1), R.at<double>(2, 2)),
+                            base + cv::Point(0, 100), cv::FONT_HERSHEY_SIMPLEX, 0.5, color, 1);
+                cv::putText(display_canvas,
+                            cv::format("t= [%+.3f %+.3f %+.3f] m", tvec.at<double>(0),
+                                       tvec.at<double>(1), tvec.at<double>(2)),
+                            base + cv::Point(0, 120), cv::FONT_HERSHEY_SIMPLEX, 0.5, color, 1);
+            }
         }
 
-        // ===== 状态栏 =====
-        cv::putText(frame,
+        // 装甲板坐标系（板中心为原点，学长要求）：x 红 / y 绿 / z 蓝
+        for (std::size_t di = 0; di < dbg_tvecs.size(); ++di)
+        {
+            cv::drawFrameAxes(display_canvas, camera.camera_matrix,
+                              camera.distortion_coefficients,
+                              dbg_rvecs[di], dbg_tvecs[di], 0.08F, 2);
+        }
+
+        // 状态栏
+        cv::putText(display_canvas,
                     cv::format("Frame=%d/%d  Det=%zu  Poses=%zu  save=%d  [extr=ID]",
                                frame_no,
                                static_cast<int>(cap.get(cv::CAP_PROP_FRAME_COUNT)),
@@ -199,26 +294,12 @@ int main(int argc, char **argv)
                     cv::FONT_HERSHEY_SIMPLEX, 0.8,
                     cv::Scalar(0, 255, 255), 2);
 
-        // ===== mask 调试 =====
-        cv::Mat hsv_dbg, mask_low, mask_high, mask_dbg;
-        cv::cvtColor(frame, hsv_dbg, cv::COLOR_BGR2HSV);
-        if (enemy == TeamColor::Red)
-        {
-            cv::inRange(hsv_dbg, cv::Scalar(0, 100, 80), cv::Scalar(10, 255, 255), mask_low);
-            cv::inRange(hsv_dbg, cv::Scalar(160, 100, 80), cv::Scalar(180, 255, 255), mask_high);
-            cv::bitwise_or(mask_low, mask_high, mask_dbg);
-        }
-        else
-        {
-            cv::inRange(hsv_dbg, cv::Scalar(100, 100, 80), cv::Scalar(130, 255, 255), mask_dbg);
-        }
-
         // ===== 显示 =====
         cv::Mat display;
-        if (frame.cols > 1920)
-            cv::resize(frame, display, cv::Size(), 0.5, 0.5);
+        if (display_canvas.cols > 1920)
+            cv::resize(display_canvas, display, cv::Size(), 0.5, 0.5);
         else
-            display = frame;
+            display = display_canvas;
         if (paused)
         {
             cv::putText(display, "PAUSED",
@@ -259,14 +340,32 @@ int main(int argc, char **argv)
         {
             paused = !paused;
         }
+        else if (key == 'm')
+        {
+            // 打印当前帧各观测的 PnP 位姿矩阵（R: 3x3 旋转矩阵，t: 3x1 平移，单位 m）
+            std::cout << "===== Frame " << frame_no << "  PnP 位姿（"
+                      << dbg_tvecs.size() << " 个观测）=====\n";
+            for (std::size_t di = 0; di < dbg_tvecs.size(); ++di)
+            {
+                cv::Mat R;
+                cv::Rodrigues(dbg_rvecs[di], R);
+                std::cout << "观测 " << di << "（ID=" << dbg_ids[di] << "）:\nR =\n"
+                          << R << "\nt =\n" << dbg_tvecs[di].t() << "   (单位: m)\n";
+            }
+        }
         else if (key == 's')
         {
             const std::string fname = cv::format("./tmp/playback_%03d.png", save_idx);
             const std::string mask_fname = cv::format("./tmp/playback_mask_%03d.png", save_idx);
-            cv::imwrite(fname, frame);
+            cv::imwrite(fname, display_canvas); // 保存带标注的克隆图（原始帧不含标注）
             cv::imwrite(mask_fname, mask_dbg);
             std::cout << "已保存: " << fname << " 和 " << mask_fname << "\n";
             ++save_idx;
+        }
+        else if (raw_key > 0 && raw_key != -1 && raw_key != 255)
+        {
+            // 未识别的键码打印出来（帮助补全方向键列表）
+            printf("key = %d (0x%x)\n", raw_key, raw_key);
         }
 
         // ③ 决定下一轮是否读新帧

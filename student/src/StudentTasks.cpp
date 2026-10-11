@@ -132,9 +132,19 @@ void drawDetections(cv::Mat &image, const std::vector<ArmorDetection> &detection
 {
     for (const ArmorDetection &det : detections)
     {
+        // 画框内缩（学长要求"识别框放中间"）：左右边从灯条外缘收到灯条中线附近。
+        // 内缩比例 ≈ 半条宽 / 外缘宽：小装甲板 ~4%、大装甲板 ~2%。
+        // 注意：只影响显示；检测角点、PnP、数字裁剪仍使用外缘角点
+        // （与物点模型 135/230mm 外缘尺寸一致，见 makeArmorCorners 注释）。
+        const float inset = (det.size == ArmorSize::Small) ? 0.04F : 0.02F;
         std::vector<cv::Point> pts;
-        for (const cv::Point2f &p : det.corners)
+        for (int k = 0; k < 4; ++k)
+        {
+            const cv::Point2f a = det.corners[k];
+            const int neighbor = (k % 2 == 0) ? k + 1 : k - 1; // TL↔TR、BR↔BL
+            const cv::Point2f p = a + (det.corners[neighbor] - a) * inset;
             pts.emplace_back(cvRound(p.x), cvRound(p.y));
+        }
 
         cv::polylines(image, pts, true, cv::Scalar(0, 255, 0), 2);
         cv::circle(image, pts[0], 5, cv::Scalar(0, 0, 255), -1); // 左上角红点
@@ -274,48 +284,62 @@ namespace
     // 颜色掩码天然排除了白色的数字区域，因此数字不会被当成灯条。
     cv::Mat buildEnemyMask(const cv::Mat &bgr, TeamColor enemy)
     {
-        // TODO
         cv::Mat hsv;
         cv::cvtColor(bgr, hsv, cv::COLOR_BGR2HSV);
-        cv::Mat opened, closed;
         cv::Mat kernelopen = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
         cv::Mat kernelclose = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(13, 13));
+
+        // ---- HSV 彩色掩码 ----
+        cv::Mat closed;
         if (enemy == TeamColor::Red)
         {
-            cv::Mat RMaskLow, RMaskHigh, RMask;
+            cv::Mat RMaskLow, RMaskHigh;
             cv::inRange(hsv, cv::Scalar(0, 100, 80), cv::Scalar(10, 255, 255), RMaskLow);
             cv::inRange(hsv, cv::Scalar(160, 100, 80), cv::Scalar(180, 255, 255), RMaskHigh);
-            cv::bitwise_or(RMaskLow, RMaskHigh, RMask);
-            // cv::morphologyEx(RMask, opened, cv::MORPH_OPEN, kernelopen);
-            cv::morphologyEx(RMask, closed, cv::MORPH_CLOSE, kernelclose);
-
-            // ===== 新增：填孔洞 =====
-            cv::Mat holes;
-            cv::bitwise_not(closed, holes);
-            cv::floodFill(holes, cv::Point(0, 0), cv::Scalar(0));
-            cv::bitwise_or(closed, holes, closed);
-            // =======================
-
-            // cv::imwrite("./tmp/mask_debug.png", RMask);
-            return closed;
+            cv::bitwise_or(RMaskLow, RMaskHigh, closed);
         }
         else
         {
-            cv::Mat BMask;
-            cv::inRange(hsv, cv::Scalar(100, 100, 80), cv::Scalar(130, 255, 255), BMask);
-            // cv::morphologyEx(BMask, opened, cv::MORPH_OPEN, kernelopen);
-            cv::morphologyEx(BMask, closed, cv::MORPH_CLOSE, kernelclose);
+            cv::inRange(hsv, cv::Scalar(100, 100, 80), cv::Scalar(130, 255, 255), closed);
+        }
+        // 注意（实测结论）：HSV 掩码上不做 3x3 开运算——开运算会抹掉白芯细段，
+        // 导致白芯几何修复失效（曾实验引入过，识别变差后回滚）。
+        cv::morphologyEx(closed, closed, cv::MORPH_CLOSE, kernelclose);
 
-            // ===== 新增：填孔洞 =====
+        // ===== 实拍调参：RGB 通道相减补充暗灯条 =====
+        // 视频回放证据：暗灯条 V 值低于 HSV 下界，被滤掉大半，mask 中断成细线。
+        // R-G（红）/B-G（蓝）反映"颜色程度"，与绝对亮度无关——暗灯条依然高响应，
+        // 而灰白背景/数字响应低。
+        // 注意：不要降 HSV 的 V 下界（会引入暗红背景，且灯条与背景连通后
+        // floodFill 会填掉整条灯条，实测更差）。
+        std::vector<cv::Mat> channels;
+        cv::split(bgr, channels); // [0]=B [1]=G [2]=R
+        cv::Mat diff;
+        if (enemy == TeamColor::Red)
+        {
+            cv::subtract(channels[2], channels[1], diff); // R - G
+        }
+        else
+        {
+            cv::subtract(channels[0], channels[1], diff); // B - G
+        }
+        cv::Mat rgb_mask;
+        cv::threshold(diff, rgb_mask, 40, 255, cv::THRESH_BINARY);
+        cv::Mat rgb_opened, rgb_closed;
+        cv::morphologyEx(rgb_mask, rgb_opened, cv::MORPH_OPEN, kernelopen);
+        cv::morphologyEx(rgb_opened, rgb_closed, cv::MORPH_CLOSE, kernelclose);
+        cv::bitwise_or(closed, rgb_closed, closed);
+
+        // ---- 填孔洞（过曝白芯在掩码里是"空心环"）----
+        // 放在 RGB 补充之后：暗灯条的环状空洞也一并填充。
+        {
             cv::Mat holes;
             cv::bitwise_not(closed, holes);
             cv::floodFill(holes, cv::Point(0, 0), cv::Scalar(0));
             cv::bitwise_or(closed, holes, closed);
-            // =======================
-
-            // cv::imwrite("./tmp/mask_debug.png", BMask);
-            return closed;
         }
+
+        return closed;
     }
 
     // 把旋转矩形归一化并填入 LightBar：height=长边，tilt 折到 (-90, 90]。
@@ -565,11 +589,19 @@ namespace
     //      也顺便排除了两根竖直灯条却上下错位很远的跨目标误配）
     //   * 两灯条之间没有其它灯条
     //   * 外缘间距 / 平均灯条高 在 [~1.5, ~5.5]（粗过滤异常间距）
-    std::vector<std::pair<std::size_t, std::size_t>> matchLightBars(
+    // 候选配对（ratio 供"一灯一配"贪心筛选排序用）
+    struct CandidatePair
+    {
+        std::size_t left{0};
+        std::size_t right{0};
+        double ratio{0.0};
+    };
+
+    std::vector<CandidatePair> matchLightBars(
         const std::vector<LightBar> &bars)
     {
         // tips
-        std::vector<std::pair<std::size_t, std::size_t>> pairs;
+        std::vector<CandidatePair> candidates;
         for (std::size_t i = 0; i < bars.size(); ++i)
         {
             for (std::size_t j = i + 1; j < bars.size(); ++j)
@@ -607,6 +639,16 @@ namespace
                     d = 360.0 - d; // 现在才是真正的"两向量夹角"
                 if (d > 15)        // 实拍调参：平行阈值 10°→15°（与倾角差放宽配套）
                     continue;
+                // 条件⑥（视频回放修复）：上下连线应近似垂直于灯条轴线（真实装甲板
+                // 接近矩形）。条件③只保证"上下连线彼此平行"，无法排除"斜切平行四边形"
+                // ——frame 118 的两块斜向碎片（机器人边缘反光）拼出的假装甲就是：
+                // 两杆平行、连线平行，但连线偏离垂直达 35°。
+                // 抗滚转写法：连线相对水平的角度 |angt| 应与灯条离竖直的倾角 |tilt| 接近。
+                const double bar_tilt_avg = std::fabs((L.tilt_deg + R.tilt_deg) / 2.0);
+                if (std::fabs(std::fabs(angt) - bar_tilt_avg) > 25.0)
+                {
+                    continue;
+                }
                 double lt = cv::norm(vt);                               // 上端点连线的长度
                 double lb = cv::norm(vb);                               // 下端点连线的长度
                 double len_ratio = std::min(lt, lb) / std::max(lt, lb); // 恒在 (0, 1]
@@ -639,19 +681,23 @@ namespace
                 const double outer_w = (lt + lb) / 2.0 + (L.width + R.width) / 2.0;
                 const double h_avg = (L.height + R.height) / 2.0;
                 const double dist_ratio = outer_w / h_avg;
+                // 保留粗过滤区间 [1.5, 5.5]。
+                // 实拍证据（f00104 等假框帧）：真对 ratio=2.84、假对 ratio=3.32——在
+                // 该测试机器人上二者重叠，"按标准尺寸收紧区间"会连真对一起杀掉
+                // （实测收紧后视频检出率 78.8%→28.9%）。假对的排除依靠下方"一灯一配"。
                 if (dist_ratio < 1.5 || dist_ratio > 5.5)
                 {
                     continue;
                 }
 
-                // 验证通过
-                // std::cout << "pair " << li << "-" << ri
-                //<< " ratio=" << dist_ratio << "\n";
-                pairs.emplace_back(li, ri);
+                // ===== 通过几何检查：全部收集为候选 =====
+                // "一灯一配"的冲突消解放在 armor_detect 的分类之后做（见那里注释）：
+                // 伪候选（反光/灯条边缘凑出的对）大多会死在分类器，不该在几何阶段抢灯条。
+                candidates.push_back(CandidatePair{li, ri, dist_ratio});
             }
         }
 
-        return pairs;
+        return candidates;
     }
 
     // 步骤 4：由一对灯条生成装甲板四角点，顺序：左上、右上、右下、左下（顺时针，与
@@ -779,15 +825,60 @@ namespace
         x1 += margin;
         y1 += margin;
 
-        // 8. 裁界并返回（& 求交集，防止外扩越界；crop 的坐标系即 gray 的坐标系）。
-        // 实拍调参：返回 min 通道裁剪（单通道），分类器对 1/3 通道输入都兼容——
-        // 必须返回 min 通道本身，否则分类器内部又转回被光晕污染的灰度。
+        // 8. 裁界（& 求交集，防止外扩越界；crop 的坐标系即 gray 的坐标系）。
         const cv::Rect crop = cv::Rect(x0, y0, x1 - x0, y1 - y0) &
                               cv::Rect(0, 0, center.cols, center.rows);
+
+        // ===== 实拍调参：极小裁剪拒绝 =====
+        // 视频回放证据（f00456/f00477/f00742/f00743）：12~35px 的碎片裁剪被放大到
+        // 64x64 后会"伪装成数字"——分类器在 22x12 的图上给出 "4"0.996、"8"0.955、
+        // "2"0.994 的荒谬高置信度。真数字区域在实测有效距离内最小约 42x80（面积
+        // 3360），假碎片则 ≤33x35（面积 1155）；按 面积>=1200 且 边长>=16 拒绝。
+        if (crop.width < 16 || crop.height < 16 || crop.width * crop.height < 1200)
+        {
+            return {};
+        }
+
+        // ===== 实拍调参：数字区域形状检查 =====
+        // 视频回放证据：假装甲板的中间可能是灯条边缘/背景纹理，裁出来后"确实像
+        // 数字"，分类器会以高置信度（0.93~1.00）输出错误 ID。真数字的形状特征：
+        // 白像素占比适中、外接框接近方形；灯条边缘是细长斜条——按形状拒掉。
+        const double white_ratio =
+            static_cast<double>(cv::countNonZero(binary(crop))) /
+            static_cast<double>(crop.width * crop.height);
+        if (white_ratio < 0.05 || white_ratio > 0.5)
+        {
+            return {};
+        }
+        {
+            cv::Mat white_mask;
+            cv::compare(binary(crop), 255, white_mask, cv::CMP_EQ);
+            std::vector<cv::Point> white_pts;
+            cv::findNonZero(white_mask, white_pts);
+            if (!white_pts.empty())
+            {
+                const cv::Rect bbox = cv::boundingRect(white_pts);
+                const double aspect =
+                    static_cast<double>(bbox.width) / std::max(bbox.height, 1);
+                if (aspect < 0.25 || aspect > 3.0)
+                {
+                    return {};
+                }
+            }
+        }
+
+        // 9. 返回 min 通道裁剪（单通道），分类器对 1/3 通道输入都兼容——
+        // 必须返回 min 通道本身，否则分类器内部又转回被光晕污染的灰度。
         return gray(crop);
     }
 
 } // namespace
+
+// 调试辅助：暴露内部掩码（逻辑与 armor_detect 完全一致，只供测试工具显示用）
+cv::Mat enemyMaskForDebug(const cv::Mat &bgr, TeamColor enemy_color)
+{
+    return buildEnemyMask(bgr, enemy_color);
+}
 
 std::vector<ArmorDetection> armor_detect(const cv::Mat &pic, TeamColor enemy_color)
 {
@@ -813,12 +904,22 @@ std::vector<ArmorDetection> armor_detect(const cv::Mat &pic, TeamColor enemy_col
 
     const cv::Mat mask = buildEnemyMask(pic, enemy_color);
     const std::vector<LightBar> bars = extractLightBars(pic, mask);
-    const std::vector<std::pair<std::size_t, std::size_t>> pairs = matchLightBars(bars);
+    const std::vector<CandidatePair> candidates = matchLightBars(bars);
 
-    for (const std::pair<std::size_t, std::size_t> &pair : pairs)
+    // 逐候选裁剪 + 分类；只有通过分类的候选进入随后的冲突消解。
+    struct ScoredDetection
     {
-        const LightBar &left = bars[pair.first];
-        const LightBar &right = bars[pair.second];
+        ArmorDetection detection;
+        double score{0.0}; // 与标准尺寸的偏差（越小越可信）
+        std::size_t left{0};
+        std::size_t right{0};
+    };
+    std::vector<ScoredDetection> validated;
+
+    for (const CandidatePair &candidate : candidates)
+    {
+        const LightBar &left = bars[candidate.left];
+        const LightBar &right = bars[candidate.right];
         const std::array<cv::Point2f, 4> corners = makeArmorCorners(left, right);
 
         // 拒绝超出图像范围的角点。
@@ -850,12 +951,46 @@ std::vector<ArmorDetection> armor_detect(const cv::Mat &pic, TeamColor enemy_col
             continue;
         }
 
-        ArmorDetection detection;
-        detection.corners = corners;
-        detection.size = classifyArmorSize(left, right);
-        detection.target_id = classified.target_id;
-        detection.confidence = classified.confidence;
-        detections.push_back(detection);
+        ScoredDetection scored;
+        scored.detection.corners = corners;
+        scored.detection.size = classifyArmorSize(left, right);
+        scored.detection.target_id = classified.target_id;
+        scored.detection.confidence = classified.confidence;
+        scored.score = std::min(std::fabs(candidate.ratio - 2.37),
+                                std::fabs(candidate.ratio - 4.04));
+        scored.left = candidate.left;
+        scored.right = candidate.right;
+        validated.push_back(scored);
+    }
+
+    // ===== 一灯一配（实拍调参，视频回放证据）=====
+    // 同一根灯条被两个装甲板共享会产生"假装甲板"（实测 f00104：真板 7 与假板 2
+    // 共享中间灯条、两者都能过分类器）。冲突消解放在分类之后：
+    //   * 伪候选（反光/灯条边缘凑出的对）大多在分类环节就被拒，不再来抢灯条；
+    //   * 真冲突按【分类置信度】降序择优（实测 f00456/f00477/f00742/f00743：
+    //     假碎片裁剪只有 12~35px、被放大后伪装成数字（"2"0.99/"4"0.996/"8"0.955），
+    //     但它们与真"7"共享灯条时，真"7"的置信度总是更高（≈1.0）。
+    //     ——切勿按 ratio 偏差排序：假配对的外缘/高之比常更接近标称值，
+    //     曾导致"真框被丢、假框留下"。ratio 仅作置信度打平时的次序键。
+    std::sort(validated.begin(), validated.end(),
+              [](const ScoredDetection &a, const ScoredDetection &b)
+              {
+                  if (std::fabs(a.detection.confidence - b.detection.confidence) > 1e-4F)
+                  {
+                      return a.detection.confidence > b.detection.confidence;
+                  }
+                  return a.score < b.score;
+              });
+    std::vector<bool> used(bars.size(), false);
+    for (const ScoredDetection &scored : validated)
+    {
+        if (used[scored.left] || used[scored.right])
+        {
+            continue; // 灯条已被更优的候选占用
+        }
+        used[scored.left] = true;
+        used[scored.right] = true;
+        detections.push_back(scored.detection);
     }
 
     // 可选：按置信度从高到低排序、限制返回数量。

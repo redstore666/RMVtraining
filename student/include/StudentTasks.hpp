@@ -20,6 +20,9 @@ void close_camera(void *handle);
 void release_camera(); // 释放相机资源（程序退出前调用）
 // 画框的辅助函数：
 void drawDetections(cv::Mat &image, const std::vector<ArmorDetection> &detections);
+// 调试辅助：返回与 armor_detect 内部完全相同的敌方掩码（仅供测试工具可视化，
+// 不参与主流程；实现为内部 buildEnemyMask 的薄包装）。
+cv::Mat enemyMaskForDebug(const cv::Mat &bgr, TeamColor enemy_color);
 bool get_pic(cv::Mat &pic);
 
 // 任务 2：检测敌方装甲板并识别其编号。每个结果必须包含四个按顺时针排列的
