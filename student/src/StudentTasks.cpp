@@ -8,10 +8,14 @@
 #include <utility>
 #include <algorithm>
 #include <cmath>
+#include <vector> //test
 
 #include <opencv2/calib3d.hpp> // solvePnP / projectPoints / Rodrigues
 #include <opencv2/imgproc.hpp>
 #include <opencv2/imgcodecs.hpp>
+
+// test the average err
+std::vector<double> g_reproj_errors;
 
 //============ 初始化 ============
 static bool s_initialized = false; // 只初始化一次
@@ -19,8 +23,14 @@ static bool s_ready = false;
 static void *s_handle = nullptr; // MV_CC handle
 static int s_lost_count = 0;
 static int s_init_attempt_count = 0;
+
+// ===== test计数器（供 test_camera_live 打印）=====
+int g_rej_reproj = 0;
+int g_rej_depth = 0;
+int g_rej_finite = 0;
+int g_pnp_fail = 0;
 // ============ 辅助函数 ============
-bool init_camera(void **handle, bool verbose = false)
+bool init_camera(void **handle, bool verbose)
 {
 
     if (*handle)
@@ -276,7 +286,7 @@ namespace
             cv::inRange(hsv, cv::Scalar(0, 100, 80), cv::Scalar(10, 255, 255), RMaskLow);
             cv::inRange(hsv, cv::Scalar(160, 100, 80), cv::Scalar(180, 255, 255), RMaskHigh);
             cv::bitwise_or(RMaskLow, RMaskHigh, RMask);
-            cv::morphologyEx(RMask, opened, cv::MORPH_OPEN, kernelopen);
+            // cv::morphologyEx(RMask, opened, cv::MORPH_OPEN, kernelopen);
             cv::morphologyEx(RMask, closed, cv::MORPH_CLOSE, kernelclose);
 
             // ===== 新增：填孔洞 =====
@@ -293,7 +303,7 @@ namespace
         {
             cv::Mat BMask;
             cv::inRange(hsv, cv::Scalar(100, 100, 80), cv::Scalar(130, 255, 255), BMask);
-            cv::morphologyEx(BMask, opened, cv::MORPH_OPEN, kernelopen);
+            // cv::morphologyEx(BMask, opened, cv::MORPH_OPEN, kernelopen);
             cv::morphologyEx(BMask, closed, cv::MORPH_CLOSE, kernelclose);
 
             // ===== 新增：填孔洞 =====
@@ -883,7 +893,7 @@ namespace
     }
 
     // 门禁阈值（现场可调；任务书要求拒绝深度非法或误差异常的观测）
-    constexpr double kMaxReprojErrorPx = 3.0; // 重投影误差上限,阈值按数据分布定，实拍再调
+    constexpr double kMaxReprojErrorPx = 6.0; // 重投影误差上限,阈值按数据分布定(0.6最合适)
     constexpr double kMinDepthM = 0.05;       // 深度下限（近于 5cm 视为异常）
     constexpr double kMaxDepthM = 20.0;       // 深度上限
 
@@ -917,7 +927,8 @@ std::vector<ArmorPose> armor_solve(const std::vector<ArmorDetection> &detections
                                      false, cv::SOLVEPNP_IPPE);
         if (!ok)
         {
-            continue; // PnP 失败 → 空观测，交给 EKF 纯预测
+            ++g_pnp_fail; // test
+            continue;     // PnP 失败 → 空观测，交给 EKF 纯预测
         }
 
         // 重投影自检：用解出的位姿把物点投回图像，与实际角点比较
@@ -932,6 +943,7 @@ std::vector<ArmorPose> armor_solve(const std::vector<ArmorDetection> &detections
         }
         const double reproj_error =
             std::sqrt(err_sq / static_cast<double>(projected.size()));
+        g_reproj_errors.push_back(reproj_error); // test the average err
 
         // tips 门禁：以下任一不满足就 continue（拒绝该观测）——
         //   1) reproj_error > kMaxReprojErrorPx
@@ -942,10 +954,20 @@ std::vector<ArmorPose> armor_solve(const std::vector<ArmorDetection> &detections
                                 std::isfinite(tvec.at<double>(1)) &&
                                 std::isfinite(tvec.at<double>(2));
         if (!all_finite)
+        {
+            ++g_rej_finite; // ← test
             continue;
-        if (reproj_error > kMaxReprojErrorPx ||
-            tvec.at<double>(2) < kMinDepthM || tvec.at<double>(2) > kMaxDepthM)
+        }
+        if (tvec.at<double>(2) < kMinDepthM || tvec.at<double>(2) > kMaxDepthM)
+        {
+            ++g_rej_depth; // ← test
             continue;
+        }
+        if (reproj_error > kMaxReprojErrorPx)
+        {
+            ++g_rej_reproj; // ← test
+            continue;
+        }
 
         ArmorPose pose;
         pose.detection = det;

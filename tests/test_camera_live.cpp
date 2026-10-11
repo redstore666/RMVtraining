@@ -4,6 +4,8 @@
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/imgcodecs.hpp>
+#include <chrono>    // test
+#include <algorithm> //test
 
 int main(int argc, char **argv)
 {
@@ -46,16 +48,45 @@ int main(int argc, char **argv)
 
     cv::Mat frame;
     int save_idx = 0;
-
+    int stat_cnt = 0;                        // test the average err
+    using Clock = std::chrono::steady_clock; // test the average err
+    auto ms = [](auto a, auto b)             // test the average err
+    {
+        return std::chrono::duration<double, std::milli>(b - a).count();
+    };
     while (true)
     {
+        auto t0 = Clock::now(); // test
         if (!get_pic(frame))
             continue;
-
+        auto t1 = Clock::now(); // test
         // ===== 检测 + PnP =====
         const auto dets = armor_detect(frame, enemy);
+        auto t2 = Clock::now(); // test
         const auto poses = armor_solve(dets, camera, gimbal);
+        auto t3 = Clock::now(); // test
         drawDetections(frame, dets);
+        // test 每个检测画 4 个带标签的角点
+        for (const auto &det : dets)
+        {
+            const char *labels[4] = {"TL", "TR", "BR", "BL"};
+            const cv::Scalar colors[4] = {
+                cv::Scalar(255, 0, 0),  // 蓝 = TL
+                cv::Scalar(0, 255, 0),  // 绿 = TR
+                cv::Scalar(0, 0, 255),  // 红 = BR
+                cv::Scalar(0, 255, 255) // 黄 = BL
+            };
+            for (int k = 0; k < 4; ++k)
+            {
+                const cv::Point pt(cvRound(det.corners[k].x),
+                                   cvRound(det.corners[k].y));
+                cv::circle(frame, pt, 4, colors[k], -1);
+                cv::putText(frame, labels[k],
+                            pt + cv::Point(6, -6),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.5,
+                            colors[k], 1);
+            }
+        }
 
         // ===== 每个 pose 画多行完整信息 =====
         for (const auto &pose : poses)
@@ -132,6 +163,36 @@ int main(int argc, char **argv)
 
         cv::imshow("camera_live", display);
         cv::imshow("mask", mask_dbg);
+        auto t4 = Clock::now(); // test
+
+        // 每 30 帧打印一次，避免刷屏
+        static int cnt = 0;  // test
+        if (++cnt % 30 == 0) // test
+        {
+            printf("grab=%.1f detect=%.1f pnp=%.1f draw=%.1f ms | Det=%zu Poses=%zu | "
+                   "rejErr=%d rejDep=%d rejFin=%d pnpFail=%d\n",
+                   ms(t0, t1), ms(t1, t2), ms(t2, t3), ms(t3, t4),
+                   dets.size(), poses.size(),
+                   g_rej_reproj, g_rej_depth, g_rej_finite, g_pnp_fail);
+
+            g_rej_reproj = g_rej_depth = g_rej_finite = g_pnp_fail = 0;
+        }
+        if (++stat_cnt % 100 == 0 && !g_reproj_errors.empty()) // test
+        {
+            std::vector<double> tmp = g_reproj_errors;
+            std::sort(tmp.begin(), tmp.end());
+            auto pct = [&](double p)
+            {
+                std::size_t i = static_cast<std::size_t>(p * tmp.size());
+                if (i >= tmp.size())
+                    i = tmp.size() - 1;
+                return tmp[i];
+            };
+
+            printf("err分布: P50=%.1f  P90=%.1f  P95=%.1f  P99=%.1f  max=%.1f  (n=%zu)\n",
+                   pct(0.50), pct(0.90), pct(0.95), pct(0.99), tmp.back(), tmp.size());
+            g_reproj_errors.clear();
+        }
 
         // ===== 按键 =====
         const int key = cv::waitKey(1) & 0xFF;

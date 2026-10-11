@@ -6,9 +6,16 @@
 
 #include <opencv2/core.hpp>
 
+extern std::vector<double> g_reproj_errors; // test
+// ===== test计数器（armor_solve 的拒绝原因统计）=====
+extern int g_rej_reproj;
+extern int g_rej_depth;
+extern int g_rej_finite;
+extern int g_pnp_fail;
+
 // 任务 1：管理相机 SDK，返回一张非空的 CV_8UC3 BGR 图像。
 // 超时或断开时返回 false；不要在此函数中终止进程。
-bool init_camera(void **handle);
+bool init_camera(void **handle, bool verbose = false);
 void close_camera(void *handle);
 void release_camera(); // 释放相机资源（程序退出前调用）
 // 画框的辅助函数：
