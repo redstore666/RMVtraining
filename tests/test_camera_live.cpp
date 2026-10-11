@@ -175,9 +175,8 @@ int main(int argc, char **argv)
             const std::vector<cv::Point2f> img(pose.detection.corners.begin(),
                                                pose.detection.corners.end());
             cv::Mat rvec, tvec;
-            if (cv::solvePnP(obj, img, camera.camera_matrix,
-                             camera.distortion_coefficients, rvec, tvec, false,
-                             cv::SOLVEPNP_IPPE))
+            if (solveArmorPoseDisambiguated(obj, img, camera.camera_matrix,
+                                            camera.distortion_coefficients, rvec, tvec))
             {
                 cv::drawFrameAxes(frame, camera.camera_matrix,
                                   camera.distortion_coefficients, rvec, tvec, 0.08F, 2);

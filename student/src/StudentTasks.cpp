@@ -880,6 +880,67 @@ cv::Mat enemyMaskForDebug(const cv::Mat &bgr, TeamColor enemy_color)
     return buildEnemyMask(bgr, enemy_color);
 }
 
+// 显示用位姿解算（含平面目标孪生解消歧），详见头文件注释。
+// 实测数据（视频 frame 20/565 等 7 帧）：孪生两解重投影差 0.15~2.3px、位置差 ≤8.5mm、
+// 装甲板 yaw 差 5~50°（典型 10~30°）——逐帧选"误差小者"会让坐标轴与 yaw 来回翻。
+bool solveArmorPoseDisambiguated(const std::vector<cv::Point3f> &object_points,
+                                 const std::vector<cv::Point2f> &image_points,
+                                 const cv::Mat &camera_matrix,
+                                 const cv::Mat &distortion_coefficients,
+                                 cv::Mat &rvec, cv::Mat &tvec)
+{
+    static cv::Vec3d prev_n(0.0, 0.0, 0.0); // 上一帧所选解的法向
+    static bool has_prev = false;
+    std::vector<cv::Mat> rvecs, tvecs;
+    const int n = cv::solvePnPGeneric(object_points, image_points, camera_matrix,
+                                      distortion_coefficients, rvecs, tvecs, false,
+                                      cv::SOLVEPNP_IPPE);
+    if (n <= 0)
+    {
+        return false;
+    }
+    int pick = 0;
+    if (n >= 2)
+    {
+        double err[2] = {0.0, 0.0};                  // 各解的重投影平均误差
+        cv::Vec3d n_vec[2] = {cv::Vec3d(0, 0, 1),     // 各解法向 n = R·(0,0,1)
+                              cv::Vec3d(0, 0, 1)};
+        for (int i = 0; i < 2; ++i)
+        {
+            std::vector<cv::Point2f> proj;
+            cv::projectPoints(object_points, rvecs[i], tvecs[i], camera_matrix,
+                              distortion_coefficients, proj);
+            double sum = 0.0;
+            for (std::size_t k = 0; k < proj.size(); ++k)
+            {
+                sum += cv::norm(proj[k] - image_points[k]);
+            }
+            err[i] = sum / static_cast<double>(proj.size());
+            cv::Mat R;
+            cv::Rodrigues(rvecs[i], R);
+            n_vec[i] = cv::Vec3d(R.at<double>(0, 2), R.at<double>(1, 2), R.at<double>(2, 2));
+        }
+        if (std::fabs(err[0] - err[1]) > 3.0)
+        {
+            pick = (err[0] <= err[1]) ? 0 : 1; // 误差差距明显：以误差为准
+        }
+        else if (has_prev)
+        {
+            // 时域一致：取法向与上一帧最接近的解（连续帧间真实姿态变化远小于孪生差）
+            pick = (n_vec[0].dot(prev_n) >= n_vec[1].dot(prev_n)) ? 0 : 1;
+        }
+        else
+        {
+            pick = (std::fabs(n_vec[0][1]) <= std::fabs(n_vec[1][1])) ? 0 : 1; // 首帧：更接近竖直
+        }
+        prev_n = n_vec[pick];
+        has_prev = true;
+    }
+    rvec = rvecs[pick].clone();
+    tvec = tvecs[pick].clone();
+    return true;
+}
+
 std::vector<ArmorDetection> armor_detect(const cv::Mat &pic, TeamColor enemy_color)
 {
     std::vector<ArmorDetection> detections;

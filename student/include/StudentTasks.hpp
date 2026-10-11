@@ -23,6 +23,16 @@ void drawDetections(cv::Mat &image, const std::vector<ArmorDetection> &detection
 // 调试辅助：返回与 armor_detect 内部完全相同的敌方掩码（仅供测试工具可视化，
 // 不参与主流程；实现为内部 buildEnemyMask 的薄包装）。
 cv::Mat enemyMaskForDebug(const cv::Mat &bgr, TeamColor enemy_color);
+// 显示用位姿解算（含平面目标孪生解消歧）：平面装甲板的 IPPE 存在"孪生对"
+// （互为镜像倾角/朝向、重投影差常 <0.5px），逐帧独立选择会让坐标轴与 yaw 来回翻。
+// 实测（7 帧）：孪生两解位置差 ≤8.5mm、装甲板 yaw 差 5~50°（典型 10~30°）。
+// 消歧规则：误差差 >3px 以误差为准；否则取法向与上一帧最接近的解（时域一致）；
+// 首帧取更接近竖直者。armor_solve 未使用本函数（其 yaw 观测在 EKF 阶段处理）。
+bool solveArmorPoseDisambiguated(const std::vector<cv::Point3f> &object_points,
+                                 const std::vector<cv::Point2f> &image_points,
+                                 const cv::Mat &camera_matrix,
+                                 const cv::Mat &distortion_coefficients,
+                                 cv::Mat &rvec, cv::Mat &tvec);
 bool get_pic(cv::Mat &pic);
 
 // 任务 2：检测敌方装甲板并识别其编号。每个结果必须包含四个按顺时针排列的
