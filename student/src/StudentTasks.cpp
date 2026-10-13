@@ -7,7 +7,10 @@
 #include <iostream>
 #include <utility>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <limits>
+#include <map>
 #include <vector> //test
 
 #include <opencv2/calib3d.hpp> // solvePnP / projectPoints / Rodrigues
@@ -1006,6 +1009,10 @@ std::vector<ArmorDetection> armor_detect(const cv::Mat &pic, TeamColor enemy_col
 
         // 数字分类；负类（9neg）或置信度不足则丢弃。
         const cv::Mat number = cropNumberRegion(pic, corners);
+        if (number.empty())
+        {
+            continue; // 裁剪阶段明确拒绝的候选不应继续送入分类器
+        }
         const ArmorClassifier::Result classified = classifier.infer(number);
         if (classified.target_id == 0 || classified.confidence < kMinConfidence)
         {
@@ -1088,6 +1095,98 @@ namespace
         return {TL, TR, BR, BL};
     }
 
+    // 按目标编号和尺寸分别保存平面 PnP 的历史法向，避免不同观测互相污染。
+    // 这只用于消解 IPPE 的双解跳变；连续帧的测量噪声仍应交给后续滤波器处理。
+    struct TrackedPoseHistory
+    {
+        cv::Vec3d normal{0.0, 0.0, 1.0};
+        cv::Point2f image_center{};
+        bool has_normal{false};
+        bool has_center{false};
+        std::chrono::steady_clock::time_point last_seen{};
+        bool has_last_seen{false};
+    };
+
+    bool solvePoseForTrack(const std::vector<cv::Point3f> &object_points,
+                           const std::vector<cv::Point2f> &image_points,
+                           const cv::Mat &camera_matrix,
+                           const cv::Mat &distortion_coefficients,
+                           int target_id, ArmorSize size,
+                           cv::Mat &rvec, cv::Mat &tvec)
+    {
+        using TrackKey = std::pair<int, int>;
+        static std::map<TrackKey, TrackedPoseHistory> history_by_track;
+        TrackedPoseHistory &history = history_by_track[
+            TrackKey{target_id, static_cast<int>(size)}];
+        const auto now = std::chrono::steady_clock::now();
+
+        cv::Point2f center(0.0F, 0.0F);
+        for (const cv::Point2f &point : image_points)
+            center += point * (1.0F / static_cast<float>(image_points.size()));
+        // 同 ID/尺寸的观测若突然跳到画面另一处，避免沿用旧目标的朝向历史。
+        if ((history.has_last_seen &&
+             now - history.last_seen > std::chrono::milliseconds(250)) ||
+            (history.has_center && cv::norm(center - history.image_center) > 120.0))
+            history.has_normal = false;
+
+        std::vector<cv::Mat> rvecs, tvecs;
+        const int count = cv::solvePnPGeneric(object_points, image_points,
+                                               camera_matrix, distortion_coefficients,
+                                               rvecs, tvecs, false, cv::SOLVEPNP_IPPE);
+        if (count <= 0)
+            return false;
+
+        const double inf = std::numeric_limits<double>::infinity();
+        std::vector<double> errors(static_cast<std::size_t>(count), inf);
+        std::vector<cv::Vec3d> normals(static_cast<std::size_t>(count), cv::Vec3d(0, 0, 1));
+        int best_error_index = -1;
+        for (int i = 0; i < count; ++i)
+        {
+            if (tvecs[i].at<double>(2) <= 0.0)
+                continue;
+            std::vector<cv::Point2f> projected;
+            cv::projectPoints(object_points, rvecs[i], tvecs[i], camera_matrix,
+                              distortion_coefficients, projected);
+            double sum = 0.0;
+            for (std::size_t k = 0; k < projected.size(); ++k)
+                sum += cv::norm(projected[k] - image_points[k]);
+            errors[static_cast<std::size_t>(i)] =
+                sum / std::max<std::size_t>(projected.size(), 1);
+
+            cv::Mat rotation;
+            cv::Rodrigues(rvecs[i], rotation);
+            normals[static_cast<std::size_t>(i)] = cv::Vec3d(
+                rotation.at<double>(0, 2), rotation.at<double>(1, 2), rotation.at<double>(2, 2));
+            if (best_error_index < 0 || errors[static_cast<std::size_t>(i)] <
+                                          errors[static_cast<std::size_t>(best_error_index)])
+                best_error_index = i;
+        }
+        if (best_error_index < 0)
+            return false;
+
+        int pick = best_error_index;
+        if (count >= 2 && std::isfinite(errors[0]) && std::isfinite(errors[1]) &&
+            std::fabs(errors[0] - errors[1]) <= 3.0)
+        {
+            if (history.has_normal)
+                pick = normals[0].dot(history.normal) >= normals[1].dot(history.normal) ? 0 : 1;
+            else
+                pick = std::fabs(normals[0][1]) <= std::fabs(normals[1][1]) ? 0 : 1;
+            if (!std::isfinite(errors[static_cast<std::size_t>(pick)]))
+                pick = best_error_index;
+        }
+
+        rvec = rvecs[static_cast<std::size_t>(pick)].clone();
+        tvec = tvecs[static_cast<std::size_t>(pick)].clone();
+        history.normal = normals[static_cast<std::size_t>(pick)];
+        history.has_normal = true;
+        history.image_center = center;
+        history.has_center = true;
+        history.last_seen = now;
+        history.has_last_seen = true;
+        return true;
+    }
+
     // 门禁阈值（现场可调；任务书要求拒绝深度非法或误差异常的观测）
     constexpr double kMaxReprojErrorPx = 6.0; // 重投影误差上限,阈值按数据分布定(6最合适)
     constexpr double kMinDepthM = 0.05;       // 深度下限（近于 5cm 视为异常）
@@ -1114,13 +1213,13 @@ std::vector<ArmorPose> armor_solve(const std::vector<ArmorDetection> &detections
         const std::vector<cv::Point2f> image_points(det.corners.begin(),
                                                     det.corners.end());
 
-        // PnP：4 个共面点。SOLVEPNP_IPPE 是专为共面目标设计的解法，
-        // 自动在两组镜像解中取重投影更优者。
+        // PnP：4 个共面点。IPPE 可能返回两个相近重投影误差的姿态解；
+        // 按目标编号/尺寸维护历史法向，避免逐帧在两个解之间跳变。
         cv::Mat rvec, tvec;
-        const bool ok = cv::solvePnP(object_points, image_points,
-                                     camera.camera_matrix,
-                                     camera.distortion_coefficients, rvec, tvec,
-                                     false, cv::SOLVEPNP_IPPE);
+        const bool ok = solvePoseForTrack(object_points, image_points,
+                                          camera.camera_matrix,
+                                          camera.distortion_coefficients,
+                                          det.target_id, det.size, rvec, tvec);
         if (!ok)
         {
             ++g_pnp_fail; // test
@@ -1139,7 +1238,11 @@ std::vector<ArmorPose> armor_solve(const std::vector<ArmorDetection> &detections
         }
         const double reproj_error =
             std::sqrt(err_sq / static_cast<double>(projected.size()));
-        g_reproj_errors.push_back(reproj_error); // test the average err
+        // 统计中排除 NaN/Inf，否则后续 std::sort 的比较关系不再满足严格弱序。
+        if (std::isfinite(reproj_error))
+        {
+            g_reproj_errors.push_back(reproj_error);
+        }
 
         // tips 门禁：以下任一不满足就 continue（拒绝该观测）——
         //   1) reproj_error > kMaxReprojErrorPx

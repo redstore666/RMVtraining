@@ -40,7 +40,7 @@ cmake --build build -j
 完成标定后，将模板复制为自己的配置文件并填入实测数据。程序参数依次为串口设备、波特率、相机配置和可选的 Web 端口：
 
 ```bash
-./build-rmvtraining/rmv_training /dev/ttyACM0 115200 config/camera.yaml 8080
+./build/rmv_training /dev/ttyACM0 115200 config/camera.yaml 8080
 ```
 
 Web Debug 默认监听本机地址，可在 `http://127.0.0.1:8080` 查看。`student/src/StudentTasks.cpp` 中的四个函数初始为安全空实现；未完成取流和算法前，程序不会产生有效目标或允许开火。
