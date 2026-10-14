@@ -162,3 +162,8 @@ target_include_directories(test_camera_playback PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_link_options(test_camera_playback PRIVATE "-Wl,--disable-new-dtags")
 set_target_properties(test_camera_playback PROPERTIES
     BUILD_RPATH "/opt/MVS/lib/64")
+
+# 灯条约束拟合（fitBarConstrained）离线验证：合成真值对照 / 视频 A/B / 位姿统计。
+add_executable(test_bar_fit tests/test_bar_fit.cpp)
+target_link_libraries(test_bar_fit PRIVATE training_core ${OpenCV_LIBS})
+target_include_directories(test_bar_fit PRIVATE ${OpenCV_INCLUDE_DIRS})

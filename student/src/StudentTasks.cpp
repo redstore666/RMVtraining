@@ -4,6 +4,8 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <utility>
 #include <algorithm>
@@ -32,6 +34,41 @@ int g_rej_reproj = 0;
 int g_rej_depth = 0;
 int g_rej_finite = 0;
 int g_pnp_fail = 0;
+
+// ===== test钩子（需求③：灯条约束拟合；说明见 StudentTasks.hpp）=====
+// 0=基线 minAreaRect；1=矩形拟合 v1；2=四边独立求交 v2；3=四边约束求交 v3（默认）。
+// RMV_BAR_FIT=0/off、1/v1、2/v2 可切换（供离线 A/B）。
+int g_bar_fit_mode = [] {
+    const char *env = std::getenv("RMV_BAR_FIT");
+    if (env == nullptr)
+    {
+        return 3;
+    }
+    if (std::strcmp(env, "0") == 0 || std::strcmp(env, "off") == 0)
+    {
+        return 0;
+    }
+    if (std::strcmp(env, "1") == 0 || std::strcmp(env, "v1") == 0)
+    {
+        return 1;
+    }
+    if (std::strcmp(env, "2") == 0 || std::strcmp(env, "v2") == 0)
+    {
+        return 2;
+    }
+    return 3;
+}();
+int g_bar_fit_total = 0;
+int g_bar_fit_accept = 0;
+int g_bar_fit_rej_pts = 0;
+int g_bar_fit_rej_size = 0;
+int g_bar_fit_rej_g1 = 0;
+int g_bar_fit_rej_g2 = 0;
+int g_bar_fit_rej_g3 = 0;
+int g_bar_fit_rej_edges = 0;
+int g_bar_fit_rej_par = 0;
+int g_bar_fit_rej_width = 0;
+double g_bar_fit_ms_total = 0.0;
 // ============ 辅助函数 ============
 bool init_camera(void **handle, bool verbose)
 {
@@ -274,11 +311,13 @@ namespace
 
     // 步骤 1：敌方颜色掩码（HSV 路线）。
     // 流程：cv::cvtColor(pic, hsv, cv::COLOR_BGR2HSV) → 对敌方颜色做
-    //   cv::inRange(hsv, 下界Scalar, 上界Scalar, mask) → 形态学清理（开 3x3 去噪、闭 5x5 补断缝）。
+    //   cv::inRange(hsv, 下界Scalar, 上界Scalar, mask) → 形态学清理（闭 13x13 补断缝）
+    //   → RGB 通道差补充暗灯条 → floodFill 填孔 → 3x3 多数投票。
     // 关键点（HSV 经典坑，答辩可讲）：
     //   * OpenCV 的 H 范围是 0~179（不是 0~360）。红色横跨色相环两端：
-    //     需要 [0,10] 与 [160,180) 两段 inRange 再 bitwise_or；蓝只需一段 ≈[100,130]。
-    //     （实测合成图同一根红条上 H 同时出现 0 和 179。）
+    //     需要 [0,40] 与 [160,180) 两段 inRange 再 bitwise_or；蓝只需一段 [80,130]。
+    //     （实测合成图同一根红条上 H 同时出现 0 和 179；新曝光下过曝核心呈黄橙/青白，
+    //      窗宽按实测覆盖核心，见下方"色相窗重调"说明。）
     //   * S 下界绝不能填 0：灰白像素 S≈0 且 H 记为 0，正好落进红色第一段区间。
     //     白光/数字区/灰背景全靠 S 下界排除（白色 R≈G≈B → S≈0）。
     //   * V 下界排除暗背景。
@@ -293,17 +332,27 @@ namespace
         cv::Mat kernelclose = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(13, 13));
 
         // ---- HSV 彩色掩码 ----
+        // 色相窗按新曝光素材（2500μs）实测重调（2026-10-14 恢复此前验证过的修正）：
+        // 该曝光下灯条核心大面积过曝且**有色**——红条横跨 H 0~39（核心 R≈G≈254 呈
+        // 黄橙 H 20~39，占条像素 ~29%）、蓝条横跨 H 80~119（核心 B≈G≈255 呈青白
+        // H 80~99，占 ~57%）。核心若落在色相窗外：掩码空心/边界毛糙（floodFill 只能
+        // 补闭合空洞），蓝条尤其严重——实测这些像素占条内 37%（≈1762px/帧）→ 条细/
+        // 断 → 检出率低；扩窗后（历史数据）蓝色检出 78.6%→99.9%、红色 100% 保持、
+        // 掩码宽度抖动 P90 3.50→0.21px（详见实验报告相关章节）。
         cv::Mat closed;
         if (enemy == TeamColor::Red)
         {
             cv::Mat RMaskLow, RMaskHigh;
-            cv::inRange(hsv, cv::Scalar(0, 100, 80), cv::Scalar(10, 255, 255), RMaskLow);
+            cv::inRange(hsv, cv::Scalar(0, 100, 80), cv::Scalar(40, 255, 255), RMaskLow);
             cv::inRange(hsv, cv::Scalar(160, 100, 80), cv::Scalar(180, 255, 255), RMaskHigh);
             cv::bitwise_or(RMaskLow, RMaskHigh, closed);
         }
         else
         {
-            cv::inRange(hsv, cv::Scalar(100, 100, 80), cv::Scalar(130, 255, 255), closed);
+            // 蓝色 V 下限 80→60、并在 RGB 补充里用 B−G>50：旧判据边界落在光晕
+            // "平坡"（梯度 ~2 计数/px）上，压缩/噪声让边界游走 ±5px（闪烁）；
+            // 移入陡坡后高频闪烁降 3~4 倍、检出提升（历史数据）。
+            cv::inRange(hsv, cv::Scalar(80, 100, 60), cv::Scalar(130, 255, 255), closed);
         }
         // 注意（实测结论）：HSV 掩码上不做 3x3 开运算——开运算会抹掉白芯细段，
         // 导致白芯几何修复失效（曾实验引入过，识别变差后回滚）。
@@ -327,7 +376,8 @@ namespace
             cv::subtract(channels[0], channels[1], diff); // B - G
         }
         cv::Mat rgb_mask;
-        cv::threshold(diff, rgb_mask, 40, 255, cv::THRESH_BINARY);
+        // 蓝色判据 40→50（阈值落在边缘陡坡处，轮廓更平滑；红色保持 40）
+        cv::threshold(diff, rgb_mask, enemy == TeamColor::Red ? 40 : 50, 255, cv::THRESH_BINARY);
         cv::Mat rgb_opened, rgb_closed;
         cv::morphologyEx(rgb_mask, rgb_opened, cv::MORPH_OPEN, kernelopen);
         cv::morphologyEx(rgb_opened, rgb_closed, cv::MORPH_CLOSE, kernelclose);
@@ -335,6 +385,8 @@ namespace
 
         // ---- 填孔洞（过曝白芯在掩码里是"空心环"）----
         // 放在 RGB 补充之后：暗灯条的环状空洞也一并填充。
+        // 注意：floodFill 只能补"被前景完全包围"的洞——核心丢在边界上时留下的
+        // 开口空洞补不了，须靠上面的色相窗覆盖（见 buildEnemyMask 顶部说明）。
         {
             cv::Mat holes;
             cv::bitwise_not(closed, holes);
@@ -342,7 +394,11 @@ namespace
             cv::bitwise_or(closed, holes, closed);
         }
 
-        return closed;
+        // 边界正则化（3x3 多数投票）：抹掉 1px 级毛刺/凹口，让二值图边缘更平直
+        // （逐行质心锯齿 1.00→0.50 px/行；对检出为净正贡献，历史实测）。
+        cv::Mat smoothed;
+        cv::medianBlur(closed, smoothed, 3);
+        return smoothed;
     }
 
     // 把旋转矩形归一化并填入 LightBar：height=长边，tilt 折到 (-90, 90]。
@@ -375,6 +431,768 @@ namespace
         bar.width = width;
         bar.height = height;
         bar.tilt_deg = angle;
+    }
+
+    // ===== 需求③：灯条约束矩形拟合（fitBarConstrained）=====
+    // 动机：minAreaRect 由掩码边界的少数极值点决定——边界 ±1px 噪声、末端拖尾
+    // （光晕）或局部凸起都会整体平移/旋转/撑大矩形。本拟合改用"全部边界点"的
+    // 统计量，抑制这类极值敏感：
+    //   * 主轴：边界点集的 2x2 协方差主特征向量（闭式解），噪声按 ~1/sqrt(N) 平均；
+    //   * 尺寸/端点：投影到局部坐标 (u=长向, v=宽向) 后取分位数定边——u 截 2%/98%
+    //     去掉端点拖尾，v 截 10%/90% 去掉长边缺口/毛刺；分位用线性插值
+    //     （与 numpy.percentile 默认口径一致）。
+    // 输入必须是完整边界点集（CHAIN_APPROX_NONE）：SIMPLE 会把长直边压缩成两点，
+    // 投影分布/协方差都会失真。
+    // 质量门（任一触发即回退 minAreaRect，不改变检出；判据标定见设计报告 §7.3）：
+    //   G2 轴偏差 |angle(e1) - angle(minAreaRect 主轴)| > 5° → 形状远离矩形；
+    //   G3 面积比 (u98-u02)*(v90-v10) / minAreaRect 面积 ∉ [0.75, 1.15]；
+    //   G1 支撑率 (u98-u02)/(u_max-u_min) < 0.85 → 端点严重拖尾。
+    // 接受门（§3.4，与 passesBarFilter 的几何部分同语义）：L >= 20 且 half_l/half_w >= 2.5。
+    // 尺度：分位数取自真实像素坐标，输出天然是像素尺度，无需归一化/反归一化。
+
+    // 分位数（线性插值）：pos = q*(n-1)，lo/hi 两侧加权。sorted 必须已升序且非空。
+    double quantileLinear(const std::vector<double> &sorted, double q)
+    {
+        const double pos = q * static_cast<double>(sorted.size() - 1);
+        const std::size_t lo = static_cast<std::size_t>(std::floor(pos));
+        const std::size_t hi = std::min(lo + 1, sorted.size() - 1);
+        const double frac = pos - static_cast<double>(lo);
+        return sorted[lo] * (1.0 - frac) + sorted[hi] * frac;
+    }
+
+    // 角度差按 180° 周期折算到 [0, 90°]（长轴方向模 180° 唯一）
+    double angleDiff180(double a, double b)
+    {
+        double d = std::fmod(std::fabs(a - b), 180.0);
+        if (d > 90.0)
+        {
+            d = 180.0 - d;
+        }
+        return d;
+    }
+
+    // 旋转矩形最长边的单位方向（长轴方向）
+    cv::Point2f rectLongAxis(const cv::RotatedRect &rect)
+    {
+        cv::Point2f pts[4];
+        rect.points(pts);
+        cv::Point2f axis(0.0F, 1.0F);
+        float best = -1.0F;
+        for (int k = 0; k < 4; ++k)
+        {
+            const cv::Point2f e = pts[(k + 1) % 4] - pts[k];
+            const float len = cv::norm(e);
+            if (len > best)
+            {
+                best = len;
+                axis = e * (1.0F / std::max(len, 1e-6F));
+            }
+        }
+        return axis;
+    }
+
+    // 约束矩形拟合 v1（PCA 主轴 + 分位定边）。返回 true=采纳拟合几何（rect_out 为拟合结果）；
+    // false=回退（rect_out 保持 rough，即原 minAreaRect 结果）。
+    bool fitBarConstrainedRect(const std::vector<cv::Point> &contour_full,
+                               const cv::RotatedRect &rough, double mask_area,
+                               cv::RotatedRect &rect_out)
+    {
+        rect_out = rough;
+        const std::size_t n = contour_full.size();
+        if (n < 8) // 分位数需要足够样本
+        {
+            ++g_bar_fit_rej_pts;
+            return false;
+        }
+
+        // ---- 1) 主轴：边界点集的 2x2 协方差主特征向量（闭式解）----
+        double sx = 0.0, sy = 0.0, sxx = 0.0, syy = 0.0, sxy = 0.0;
+        for (const cv::Point &p : contour_full)
+        {
+            const double x = p.x, y = p.y;
+            sx += x;
+            sy += y;
+            sxx += x * x;
+            syy += y * y;
+            sxy += x * y;
+        }
+        const double inv_n = 1.0 / static_cast<double>(n);
+        const double mx = sx * inv_n, my = sy * inv_n;
+        const double cxx = sxx * inv_n - mx * mx; // Σ(x-mu)²/n
+        const double cyy = syy * inv_n - my * my; // Σ(y-mu)²/n
+        const double cxy = sxy * inv_n - mx * my; // Σ(x-mu)(y-mu)/n
+        const double disc = std::sqrt((cxx - cyy) * (cxx - cyy) + 4.0 * cxy * cxy);
+        const double lam1 = 0.5 * (cxx + cyy + disc); // 主特征值
+        if (lam1 <= 1e-9)
+        {
+            ++g_bar_fit_rej_pts; // 退化（各向同性）：主轴不可定义
+            return false;
+        }
+        double e1x = 0.0, e1y = 0.0;
+        if (std::fabs(cxy) > 1e-12)
+        {
+            e1x = cxy;
+            e1y = lam1 - cxx; // 主特征向量 ∝ (cxy, λ1-cxx)
+        }
+        else if (cxx >= cyy)
+        {
+            e1x = 1.0;
+        }
+        else
+        {
+            e1y = 1.0;
+        }
+        const double enorm = std::sqrt(e1x * e1x + e1y * e1y);
+        if (enorm < 1e-12)
+        {
+            ++g_bar_fit_rej_pts;
+            return false;
+        }
+        e1x /= enorm;
+        e1y /= enorm;
+        const double pvx = -e1y, pvy = e1x; // 宽向（垂直）
+
+        // ---- 2) 全部点投影到局部坐标 ----
+        std::vector<double> us(n), vs(n);
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            const double dx = contour_full[i].x - mx;
+            const double dy = contour_full[i].y - my;
+            us[i] = dx * e1x + dy * e1y;
+            vs[i] = dx * pvx + dy * pvy;
+        }
+
+        // ---- 3) 分位定边（离群处理：用分位替代 min/max 极值）----
+        std::vector<double> u_sorted = us, v_sorted = vs;
+        std::sort(u_sorted.begin(), u_sorted.end());
+        std::sort(v_sorted.begin(), v_sorted.end());
+        const double u_lo = quantileLinear(u_sorted, 0.02);
+        const double u_hi = quantileLinear(u_sorted, 0.98);
+        const double v_lo = quantileLinear(v_sorted, 0.10);
+        const double v_hi = quantileLinear(v_sorted, 0.90);
+        const double L = u_hi - u_lo;
+        const double W = v_hi - v_lo;
+        const double half_l = 0.5 * L;
+        const double half_w = 0.5 * W;
+
+        // ---- 4) 接受门（与 passesBarFilter 的几何部分同语义）----
+        if (L < 20.0 || half_w <= 1e-6 || half_l / half_w < 2.5)
+        {
+            ++g_bar_fit_rej_size;
+            return false;
+        }
+
+        // ---- 5) 质量门 G2/G3/G1（判据标定见设计报告 §7.3）----
+        const cv::Point2f rough_axis = rectLongAxis(rough);
+        const double fit_ang = std::atan2(e1y, e1x) * 180.0 / CV_PI;
+        const double rough_ang = std::atan2(rough_axis.y, rough_axis.x) * 180.0 / CV_PI;
+        if (angleDiff180(fit_ang, rough_ang) > 5.0) // G2 轴偏差
+        {
+            ++g_bar_fit_rej_g2;
+            return false;
+        }
+        // G3 面积一致性（2026-10-14 修订，旧口径把"正确的修剪"拒掉）：
+        //   * solidity：拟合矩形面积 / 掩码实心面积（contourArea）∈ [0.80, 1.30]——
+        //     修剪凸起/光晕不改变它与 1 的接近程度；"把大片空白框进来"的形状会露馅；
+        //   * 对 minAreaRect 只保留上界 1.15：拟合面积**小于** minAreaRect 面积是
+        //     设计目的（后者含光晕/凸起），只有"变大"才是异常。
+        //   （旧口径双向卡 [0.75,1.15]：合成"侧边光晕/锯齿"案例中把本来正确的修剪
+        //    结果拒掉 → 回退到含光晕的 minAreaRect，改进被门吃掉——门控也被数据检验。）
+        const double solidity = (L * W) / std::max(mask_area, 1.0);
+        if (solidity < 0.80 || solidity > 1.30)
+        {
+            ++g_bar_fit_rej_g3;
+            return false;
+        }
+        const double rough_area = static_cast<double>(rough.size.width) * rough.size.height;
+        if ((L * W) / std::max(rough_area, 1e-9) > 1.15)
+        {
+            ++g_bar_fit_rej_g3;
+            return false;
+        }
+        const double support = L / std::max(u_sorted.back() - u_sorted.front(), 1e-9);
+        if (support < 0.85) // G1 支撑率（端点拖尾）
+        {
+            ++g_bar_fit_rej_g1;
+            return false;
+        }
+
+        // ---- 6) 输出：center=mu、size=(L,W)、angle=长轴方向角 ----
+        rect_out = cv::RotatedRect(cv::Point2f(static_cast<float>(mx), static_cast<float>(my)),
+                                   cv::Size2f(static_cast<float>(L), static_cast<float>(W)),
+                                   static_cast<float>(fit_ang));
+        return true;
+    }
+
+    // ===== 四边拟合 v2（按"检测灯条的四个边"重构，2026-10-14）=====
+    // 动机（v1 的遗留问题，均由数据暴露）：v1 的宽度/端点来自**分位数**——分位数对
+    // 局部点密度敏感，单侧大凸起（>10% 周长，如侧向光晕）会让分位落进凸起分布，
+    // 拟合退化到与 minAreaRect 同值；掩码轮廓在过曝/光晕下近似"椭圆"时，分位宽度
+    // 也不稳定。v2 改为"四条边"模型：
+    //   * 两条长边：把完整边界点按粗轴分成上下两条边带，各做 Huber 直线拟合——单侧
+    //     少数异常点被降权，宽度 = 两条边的**距离**（用整条边的几十~上百个点，而非
+    //     10%/90% 两个分位点），从机制上消除"分位掉进凸起"的失效模式；
+    //   * 两条端边：端盖含圆角/光晕、独立拟合端边线不可靠（历史 v3 实验已证伪：
+    //     蓝方检出 4227→1855），故端边取**⊥中轴**的约束形式，位置由沿轴稳健投影
+    //     2%/98% 分位给出；
+    //   * 四角 = 两条长边线 × 两条端线的**交点**——长边不平行时自然呈梯形，保留
+    //     透视形变（外缘是真实三维矩形的投影，梯形比内接矩形更贴近四角真值）。
+    // 质量门（任一触发回退 minAreaRect，与 v1 同风格；E=边模型，G=规格门）：
+    //   E1 边带点数不足 / 线拟合退化；E2 两长边夹角 > 8°（形状可疑）；
+    //   E3 拟合宽度 / minAreaRect 短边 ∉ [0.55, 1.35]；E4 两端的宽度比 > 1.4
+    //     （长边发散过大 → 交点外推不可靠）；G1/G2/G3 同 v1（支撑率/轴偏差/面积比）。
+    struct EdgeFit
+    {
+        bool ok{false};
+        std::array<cv::Point2f, 4> corners{}; // 四角（沿轴 -端/+端 × ±宽侧）
+        cv::RotatedRect rect;                 // 等价外接旋转矩形（下游兼容）
+        cv::Point2f center;
+        cv::Point2f axis;
+        float half_l{0.0F};
+        float half_w{0.0F};
+    };
+
+    bool fitBarConstrainedQuad(const std::vector<cv::Point> &contour_full,
+                               const cv::RotatedRect &rough, double mask_area, EdgeFit &out)
+    {
+        const std::size_t n = contour_full.size();
+        if (n < 12)
+        {
+            ++g_bar_fit_rej_pts;
+            return false;
+        }
+
+        // ---- 1) 主轴（同 v1：协方差闭式主特征向量）----
+        double sx = 0.0, sy = 0.0, sxx = 0.0, syy = 0.0, sxy = 0.0;
+        for (const cv::Point &p : contour_full)
+        {
+            const double x = p.x, y = p.y;
+            sx += x;
+            sy += y;
+            sxx += x * x;
+            syy += y * y;
+            sxy += x * y;
+        }
+        const double inv_n = 1.0 / static_cast<double>(n);
+        const double mx = sx * inv_n, my = sy * inv_n;
+        const double cxx = sxx * inv_n - mx * mx;
+        const double cyy = syy * inv_n - my * my;
+        const double cxy = sxy * inv_n - mx * my;
+        const double disc = std::sqrt((cxx - cyy) * (cxx - cyy) + 4.0 * cxy * cxy);
+        const double lam1 = 0.5 * (cxx + cyy + disc);
+        if (lam1 <= 1e-9)
+        {
+            ++g_bar_fit_rej_pts;
+            return false;
+        }
+        double e1x = 0.0, e1y = 0.0;
+        if (std::fabs(cxy) > 1e-12)
+        {
+            e1x = cxy;
+            e1y = lam1 - cxx;
+        }
+        else if (cxx >= cyy)
+        {
+            e1x = 1.0;
+        }
+        else
+        {
+            e1y = 1.0;
+        }
+        const double enorm = std::sqrt(e1x * e1x + e1y * e1y);
+        if (enorm < 1e-12)
+        {
+            ++g_bar_fit_rej_pts;
+            return false;
+        }
+        e1x /= enorm;
+        e1y /= enorm;
+        const double pvx = -e1y, pvy = e1x;
+
+        // ---- 2) 投影 + 逐侧稳健初始宽度（中位数，抗单侧凸起）----
+        std::vector<double> us(n), vs(n);
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            const double dx = contour_full[i].x - mx;
+            const double dy = contour_full[i].y - my;
+            us[i] = dx * e1x + dy * e1y;
+            vs[i] = dx * pvx + dy * pvy;
+        }
+        std::vector<double> v_pos, v_neg;
+        v_pos.reserve(n / 2);
+        v_neg.reserve(n / 2);
+        for (double v : vs)
+        {
+            (v > 0.0 ? v_pos : v_neg).push_back(v);
+        }
+        if (v_pos.size() < 6 || v_neg.size() < 6)
+        {
+            ++g_bar_fit_rej_edges; // E1：单侧点太少
+            return false;
+        }
+        auto median_of = [](std::vector<double> &v)
+        {
+            std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+            return v[v.size() / 2];
+        };
+        const double vp0 = median_of(v_pos);  // 正侧长边的稳健起始位置
+        const double vn0 = median_of(v_neg);  // 负侧
+        if (vp0 - vn0 <= 1.0 || vp0 <= 0.0 || vn0 >= 0.0)
+        {
+            ++g_bar_fit_rej_edges; // E1：宽度初值异常
+            return false;
+        }
+
+        // ---- 3) 两条长边：取每侧"外半带"的点做 Huber 直线拟合 ----
+        std::vector<cv::Point2f> band_pos, band_neg;
+        band_pos.reserve(n / 2);
+        band_neg.reserve(n / 2);
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            const cv::Point2f p(contour_full[i]);
+            if (vs[i] >= 0.5 * vp0)
+            {
+                band_pos.push_back(p);
+            }
+            if (vs[i] <= 0.5 * vn0)
+            {
+                band_neg.push_back(p);
+            }
+        }
+        if (band_pos.size() < 6 || band_neg.size() < 6)
+        {
+            ++g_bar_fit_rej_edges; // E1
+            return false;
+        }
+        cv::Vec4f la, lb;
+        cv::fitLine(band_pos, la, cv::DIST_HUBER, 0, 0.01, 0.01);
+        cv::fitLine(band_neg, lb, cv::DIST_HUBER, 0, 0.01, 0.01);
+        cv::Point2f da(la[0], la[1]), db(lb[0], lb[1]);
+        const float na = cv::norm(da), nb = cv::norm(db);
+        if (na < 1e-6F || nb < 1e-6F)
+        {
+            ++g_bar_fit_rej_edges; // E1
+            return false;
+        }
+        da *= 1.0F / na;
+        db *= 1.0F / nb;
+        if (da.dot(db) < 0.0F)
+        {
+            db = -db;
+        }
+        if (std::fabs(da.dot(db)) < 0.9903F) // E2：夹角 > 8°
+        {
+            ++g_bar_fit_rej_par;
+            return false;
+        }
+        const cv::Point2f ca(la[2], la[3]), cb(lb[2], lb[3]); // 直线过点
+        cv::Point2f dir = da + db;
+        const float dnorm = cv::norm(dir);
+        if (dnorm < 1e-3F)
+        {
+            ++g_bar_fit_rej_par;
+            return false;
+        }
+        dir *= 1.0F / dnorm;
+        const cv::Point2f nrm(-dir.y, dir.x);
+        // 宽度 = 两条长边在 nrm 方向上的距离
+        const float W = std::fabs((cb - ca).dot(nrm));
+        const float rough_short = std::min(rough.size.width, rough.size.height);
+        if (W <= 1.0F || rough_short <= 1e-3F || W / rough_short < 0.55F || W / rough_short > 1.35F)
+        {
+            ++g_bar_fit_rej_width; // E3
+            return false;
+        }
+        const double fit_ang = std::atan2(dir.y, dir.x) * 180.0 / CV_PI;
+
+        // ---- 4) 端点：沿轴稳健投影 2%/98% 分位（同 v1）----
+        std::vector<double> u_sorted = us;
+        std::sort(u_sorted.begin(), u_sorted.end());
+        const double u_lo = quantileLinear(u_sorted, 0.02);
+        const double u_hi = quantileLinear(u_sorted, 0.98);
+        const double L = u_hi - u_lo;
+        const double half_l = 0.5 * L;
+        const double half_w = 0.5 * W;
+        if (L < 20.0 || half_l / half_w < 2.5) // 接受门（同 v1）
+        {
+            ++g_bar_fit_rej_size;
+            return false;
+        }
+
+        // ---- 5) 质量门 G2/G3/G1（同 v1）----
+        const cv::Point2f rough_axis = rectLongAxis(rough);
+        const double rough_ang = std::atan2(rough_axis.y, rough_axis.x) * 180.0 / CV_PI;
+        if (angleDiff180(fit_ang, rough_ang) > 5.0) // G2 轴偏差
+        {
+            ++g_bar_fit_rej_g2;
+            return false;
+        }
+        // G3 面积一致性（2026-10-14 修订，旧口径把"正确的修剪"拒掉）：
+        //   * solidity：拟合矩形面积 / 掩码实心面积（contourArea）∈ [0.80, 1.30]——
+        //     修剪凸起/光晕不改变它与 1 的接近程度；"把大片空白框进来"的形状会露馅；
+        //   * 对 minAreaRect 只保留上界 1.15：拟合面积**小于** minAreaRect 面积是
+        //     设计目的（后者含光晕/凸起），只有"变大"才是异常。
+        //   （旧口径双向卡 [0.75,1.15]：合成"侧边光晕/锯齿"案例中把本来正确的修剪
+        //    结果拒掉 → 回退到含光晕的 minAreaRect，改进被门吃掉——门控也被数据检验。）
+        const double solidity = (L * W) / std::max(mask_area, 1.0);
+        if (solidity < 0.80 || solidity > 1.30)
+        {
+            ++g_bar_fit_rej_g3;
+            return false;
+        }
+        const double rough_area = static_cast<double>(rough.size.width) * rough.size.height;
+        if ((L * W) / std::max(rough_area, 1e-9) > 1.15)
+        {
+            ++g_bar_fit_rej_g3;
+            return false;
+        }
+        const double support = L / std::max(u_sorted.back() - u_sorted.front(), 1e-9);
+        if (support < 0.85) // G1 支撑率
+        {
+            ++g_bar_fit_rej_g1;
+            return false;
+        }
+
+        // ---- 6) 四角 = 两条长边线 × 两条端线（端线过中轴上的分位点、方向 ⊥ 中轴）----
+        // 交点用 2x2 线性方程组闭式解；解出后按"沿轴 −/+ 端 × 宽侧 ±"整理顺序。
+        auto intersect = [](const cv::Point2f &p1, const cv::Point2f &d1, const cv::Point2f &p2,
+                            const cv::Point2f &d2, cv::Point2f &out) -> bool
+        {
+            const double det = static_cast<double>(d1.x) * d2.y - static_cast<double>(d1.y) * d2.x;
+            if (std::fabs(det) < 1e-9)
+            {
+                return false;
+            }
+            const cv::Point2f r = p2 - p1;
+            const double t = (static_cast<double>(r.x) * d2.y - static_cast<double>(r.y) * d2.x) / det;
+            out = p1 + d1 * static_cast<float>(t);
+            return true;
+        };
+        // 中心：沿轴 = 分位区间中点；法向 = 两条长边的中线（相对投影原点 mu 计算）
+        const cv::Point2f mu_pt(static_cast<float>(mx), static_cast<float>(my));
+        const double u_mid = 0.5 * (u_lo + u_hi);
+        const float v_mid = (ca - mu_pt).dot(nrm) + 0.5F * (cb - ca).dot(nrm);
+        const cv::Point2f center = mu_pt + dir * static_cast<float>(u_mid) + nrm * v_mid;
+        // 两条端线：过中心、方向 ⊥ 中轴（nrm），分别落在 u_lo / u_hi 处
+        const cv::Point2f end_lo = center + dir * static_cast<float>(u_lo - u_mid);
+        const cv::Point2f end_hi = center + dir * static_cast<float>(u_hi - u_mid);
+        cv::Point2f c_pos_lo, c_neg_lo, c_pos_hi, c_neg_hi;
+        if (!intersect(ca, da, end_lo, nrm, c_pos_lo) || !intersect(cb, db, end_lo, nrm, c_neg_lo) ||
+            !intersect(ca, da, end_hi, nrm, c_pos_hi) || !intersect(cb, db, end_hi, nrm, c_neg_hi))
+        {
+            ++g_bar_fit_rej_edges;
+            return false;
+        }
+        // E4：两端宽度比（长边发散过大 → 透视外推不可靠）
+        const float w_lo = cv::norm(c_pos_lo - c_neg_lo);
+        const float w_hi = cv::norm(c_pos_hi - c_neg_hi);
+        if (std::max(w_lo, w_hi) / std::max(std::min(w_lo, w_hi), 1e-3F) > 1.4F)
+        {
+            ++g_bar_fit_rej_width;
+            return false;
+        }
+
+        out.ok = true;
+        out.corners = {c_pos_lo, c_pos_hi, c_neg_hi, c_neg_lo}; // 沿轴顺序成环
+        out.center = 0.25F * (c_pos_lo + c_pos_hi + c_neg_hi + c_neg_lo);
+        out.axis = dir;
+        out.half_l = 0.5F * ((cv::norm(c_pos_hi - c_pos_lo) + cv::norm(c_neg_hi - c_neg_lo)) * 0.5F);
+        out.half_w = 0.5F * static_cast<float>(0.5 * (w_lo + w_hi));
+        out.rect = cv::RotatedRect(out.center,
+                                   cv::Size2f(2.0F * out.half_l, 2.0F * out.half_w), fit_ang);
+        return true;
+    }
+
+    // ===== 四边拟合 v3（两条长边"偏移"估计 + 垂直端线；默认）=====
+    // v2（两条长边各自独立拟合直线、再四条边求交）在本素材上的实测更抖：独立线方向
+    // 经半长（~45px）力臂放大到角点，且宽度系统性偏小（红 G3 面积比拒 753 条、
+    // 蓝拒 4003 条；红角点 P50 1.12→1.29px、Δ半宽 P95 0.12→1.10px）——四条独立边的
+    // 自由度超出本素材信噪比能支撑的量（任务书：数据不支持四条独立边时，应采用约束
+    // 更强的模型）。v3 保留"四条边"的**鲁棒性内核**、去掉多余自由度：
+    //   * 两条长边：方向由两带 Huber 直线拟合**平均**（与 v1 同口径，实测方向最稳），
+    //     各自的位置用"该侧全部点在法向上的**中位数**"——对单侧凸起/光晕鲁棒
+    //     （中位数可容忍该侧 <50% 污染点；v1 的 10%/90% 分位只能容忍 <10%，
+    //      合成"侧边光晕"案例中 v1 与 minAreaRect 同值、误差 5.1px）；
+    //   * 两条端线：⊥ 方向、位于沿轴 2%/98% 分位处（端盖圆角/光晕不可独立拟合，
+    //     历史 v3 实验已证伪）；
+    //   * 四角 = 四条边求交（长边平行约束下即矩形——约束来自数据，不是假设）。
+    bool fitBarConstrainedEdges(const std::vector<cv::Point> &contour_full,
+                                const cv::RotatedRect &rough, double mask_area, EdgeFit &out)
+    {
+        const std::size_t n = contour_full.size();
+        if (n < 12)
+        {
+            ++g_bar_fit_rej_pts;
+            return false;
+        }
+
+        // ---- 1) 主轴（同 v1/v2）----
+        double sx = 0.0, sy = 0.0, sxx = 0.0, syy = 0.0, sxy = 0.0;
+        for (const cv::Point &p : contour_full)
+        {
+            const double x = p.x, y = p.y;
+            sx += x;
+            sy += y;
+            sxx += x * x;
+            syy += y * y;
+            sxy += x * y;
+        }
+        const double inv_n = 1.0 / static_cast<double>(n);
+        const double mx = sx * inv_n, my = sy * inv_n;
+        const double cxx = sxx * inv_n - mx * mx;
+        const double cyy = syy * inv_n - my * my;
+        const double cxy = sxy * inv_n - mx * my;
+        const double disc = std::sqrt((cxx - cyy) * (cxx - cyy) + 4.0 * cxy * cxy);
+        const double lam1 = 0.5 * (cxx + cyy + disc);
+        if (lam1 <= 1e-9)
+        {
+            ++g_bar_fit_rej_pts;
+            return false;
+        }
+        double e1x = 0.0, e1y = 0.0;
+        if (std::fabs(cxy) > 1e-12)
+        {
+            e1x = cxy;
+            e1y = lam1 - cxx;
+        }
+        else if (cxx >= cyy)
+        {
+            e1x = 1.0;
+        }
+        else
+        {
+            e1y = 1.0;
+        }
+        const double enorm = std::sqrt(e1x * e1x + e1y * e1y);
+        if (enorm < 1e-12)
+        {
+            ++g_bar_fit_rej_pts;
+            return false;
+        }
+        e1x /= enorm;
+        e1y /= enorm;
+        const cv::Point2f mu_pt(static_cast<float>(mx), static_cast<float>(my));
+
+        // ---- 2) 两条长边：外半带 Huber 直线定方向（v1 口径）----
+        const cv::Point2f e1(static_cast<float>(e1x), static_cast<float>(e1y));
+        const cv::Point2f e1n(-e1.y, e1.x);
+        std::vector<double> vs_n(n);
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            vs_n[i] = (cv::Point2f(contour_full[i]) - mu_pt).dot(e1n);
+        }
+        std::vector<double> vpos, vneg;
+        for (double v : vs_n)
+        {
+            (v > 0.0 ? vpos : vneg).push_back(v);
+        }
+        if (vpos.size() < 6 || vneg.size() < 6)
+        {
+            ++g_bar_fit_rej_edges; // E1
+            return false;
+        }
+        auto median_v = [](std::vector<double> &v)
+        {
+            std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+            return v[v.size() / 2];
+        };
+        const double vp0 = median_v(vpos);
+        const double vn0 = median_v(vneg);
+        if (vp0 - vn0 <= 1.0 || vp0 <= 0.0 || vn0 >= 0.0)
+        {
+            ++g_bar_fit_rej_edges; // E1：宽度初值异常
+            return false;
+        }
+        std::vector<cv::Point2f> band_pos, band_neg;
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            const cv::Point2f p(contour_full[i]);
+            if (vs_n[i] >= 0.5 * vp0)
+            {
+                band_pos.push_back(p);
+            }
+            if (vs_n[i] <= 0.5 * vn0)
+            {
+                band_neg.push_back(p);
+            }
+        }
+        if (band_pos.size() < 6 || band_neg.size() < 6)
+        {
+            ++g_bar_fit_rej_edges; // E1
+            return false;
+        }
+        cv::Vec4f la, lb;
+        cv::fitLine(band_pos, la, cv::DIST_HUBER, 0, 0.01, 0.01);
+        cv::fitLine(band_neg, lb, cv::DIST_HUBER, 0, 0.01, 0.01);
+        cv::Point2f da(la[0], la[1]), db(lb[0], lb[1]);
+        const float na = cv::norm(da), nb = cv::norm(db);
+        if (na < 1e-6F || nb < 1e-6F)
+        {
+            ++g_bar_fit_rej_edges; // E1
+            return false;
+        }
+        da *= 1.0F / na;
+        db *= 1.0F / nb;
+        if (da.dot(db) < 0.0F)
+        {
+            db = -db;
+        }
+        if (std::fabs(da.dot(db)) < 0.9903F) // E2：两长边夹角 > 8°
+        {
+            ++g_bar_fit_rej_par;
+            return false;
+        }
+        cv::Point2f dir = da + db;
+        const float dnorm = cv::norm(dir);
+        if (dnorm < 1e-3F)
+        {
+            ++g_bar_fit_rej_par;
+            return false;
+        }
+        dir *= 1.0F / dnorm;
+        const cv::Point2f nrm(-dir.y, dir.x);
+        const double fit_ang = std::atan2(dir.y, dir.x) * 180.0 / CV_PI;
+
+        // ---- 3) 两条长边的"位置"：该侧全部点在 nrm 上的中位数（抗单侧凸起）----
+        std::vector<double> off_pos, off_neg;
+        off_pos.reserve(n / 2);
+        off_neg.reserve(n / 2);
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            const double d = (cv::Point2f(contour_full[i]) - mu_pt).dot(nrm);
+            (d > 0.0 ? off_pos : off_neg).push_back(d);
+        }
+        if (off_pos.size() < 6 || off_neg.size() < 6)
+        {
+            ++g_bar_fit_rej_edges; // E1
+            return false;
+        }
+        const double v_pos = median_v(off_pos);
+        const double v_neg = median_v(off_neg);
+        const double W = v_pos - v_neg;
+        const float rough_short = std::min(rough.size.width, rough.size.height);
+        if (W <= 1.0 || rough_short <= 1e-3F || W / rough_short < 0.55 || W / rough_short > 1.35)
+        {
+            ++g_bar_fit_rej_width; // E3
+            return false;
+        }
+        const double half_w = 0.5 * W;
+
+        // ---- 4) 两条端线：沿轴 2%/98% 分位（同 v1）----
+        std::vector<double> us(n);
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            us[i] = (cv::Point2f(contour_full[i]) - mu_pt).dot(dir);
+        }
+        std::vector<double> u_sorted = us;
+        std::sort(u_sorted.begin(), u_sorted.end());
+        const double u_lo = quantileLinear(u_sorted, 0.02);
+        const double u_hi = quantileLinear(u_sorted, 0.98);
+        const double L = u_hi - u_lo;
+        const double half_l = 0.5 * L;
+        if (L < 20.0 || half_l / half_w < 2.5) // 接受门（同 v1）
+        {
+            ++g_bar_fit_rej_size;
+            return false;
+        }
+
+        // ---- 5) 质量门 G2/G3/G1（同 v1）----
+        const cv::Point2f rough_axis = rectLongAxis(rough);
+        const double rough_ang = std::atan2(rough_axis.y, rough_axis.x) * 180.0 / CV_PI;
+        if (angleDiff180(fit_ang, rough_ang) > 5.0) // G2 轴偏差
+        {
+            ++g_bar_fit_rej_g2;
+            return false;
+        }
+        // G3 面积一致性（2026-10-14 修订，旧口径把"正确的修剪"拒掉）：
+        //   * solidity：拟合矩形面积 / 掩码实心面积（contourArea）∈ [0.80, 1.30]——
+        //     修剪凸起/光晕不改变它与 1 的接近程度；"把大片空白框进来"的形状会露馅；
+        //   * 对 minAreaRect 只保留上界 1.15：拟合面积**小于** minAreaRect 面积是
+        //     设计目的（后者含光晕/凸起），只有"变大"才是异常。
+        //   （旧口径双向卡 [0.75,1.15]：合成"侧边光晕/锯齿"案例中把本来正确的修剪
+        //    结果拒掉 → 回退到含光晕的 minAreaRect，改进被门吃掉——门控也被数据检验。）
+        const double solidity = (L * W) / std::max(mask_area, 1.0);
+        if (solidity < 0.80 || solidity > 1.30)
+        {
+            ++g_bar_fit_rej_g3;
+            return false;
+        }
+        const double rough_area = static_cast<double>(rough.size.width) * rough.size.height;
+        if ((L * W) / std::max(rough_area, 1e-9) > 1.15)
+        {
+            ++g_bar_fit_rej_g3;
+            return false;
+        }
+        const double support = L / std::max(u_sorted.back() - u_sorted.front(), 1e-9);
+        if (support < 0.85) // G1 支撑率
+        {
+            ++g_bar_fit_rej_g1;
+            return false;
+        }
+
+        // ---- 6) 四条边求交（长边平行约束下即矩形）----
+        const double u_mid = 0.5 * (u_lo + u_hi);
+        const double v_mid = 0.5 * (v_pos + v_neg);
+        const cv::Point2f center = mu_pt + dir * static_cast<float>(u_mid) + nrm * static_cast<float>(v_mid);
+        auto intersect = [](const cv::Point2f &p1, const cv::Point2f &d1, const cv::Point2f &p2,
+                            const cv::Point2f &d2, cv::Point2f &out) -> bool
+        {
+            const double det = static_cast<double>(d1.x) * d2.y - static_cast<double>(d1.y) * d2.x;
+            if (std::fabs(det) < 1e-9)
+            {
+                return false;
+            }
+            const cv::Point2f r = p2 - p1;
+            const double t = (static_cast<double>(r.x) * d2.y - static_cast<double>(r.y) * d2.x) / det;
+            out = p1 + d1 * static_cast<float>(t);
+            return true;
+        };
+        const cv::Point2f line_pos = mu_pt + nrm * static_cast<float>(v_pos); // 正侧长边上的点
+        const cv::Point2f line_neg = mu_pt + nrm * static_cast<float>(v_neg);
+        const cv::Point2f end_lo = center + dir * static_cast<float>(u_lo - u_mid);
+        const cv::Point2f end_hi = center + dir * static_cast<float>(u_hi - u_mid);
+        cv::Point2f c_pos_lo, c_neg_lo, c_pos_hi, c_neg_hi;
+        if (!intersect(line_pos, dir, end_lo, nrm, c_pos_lo) ||
+            !intersect(line_neg, dir, end_lo, nrm, c_neg_lo) ||
+            !intersect(line_pos, dir, end_hi, nrm, c_pos_hi) ||
+            !intersect(line_neg, dir, end_hi, nrm, c_neg_hi))
+        {
+            ++g_bar_fit_rej_edges;
+            return false;
+        }
+
+        out.ok = true;
+        out.corners = {c_pos_lo, c_pos_hi, c_neg_hi, c_neg_lo};
+        out.center = center;
+        out.axis = dir;
+        out.half_l = static_cast<float>(half_l);
+        out.half_w = static_cast<float>(half_w);
+        out.rect = cv::RotatedRect(center, cv::Size2f(static_cast<float>(L), static_cast<float>(W)),
+                                   static_cast<float>(fit_ang));
+        return true;
+    }
+
+    // 调度：按 g_bar_fit_mode 选择拟合实现；返回 true 时 rect_out 为拟合几何，
+    // quad_out.ok=true 时用四角覆盖灯条角点。
+    bool fitBarConstrained(const std::vector<cv::Point> &contour_full,
+                           const cv::RotatedRect &rough, double mask_area,
+                           cv::RotatedRect &rect_out, EdgeFit &quad_out)
+    {
+        quad_out = EdgeFit{};
+        if (g_bar_fit_mode == 1)
+        {
+            return fitBarConstrainedRect(contour_full, rough, mask_area, rect_out);
+        }
+        const bool ok = (g_bar_fit_mode == 2)
+                            ? fitBarConstrainedQuad(contour_full, rough, mask_area, quad_out)
+                            : fitBarConstrainedEdges(contour_full, rough, mask_area, quad_out);
+        if (!ok)
+        {
+            rect_out = rough;
+            return false;
+        }
+        rect_out = quad_out.rect;
+        return true;
     }
 
     // 灯条过滤：细长、够长、近似实心、不太斜。
@@ -479,8 +1297,13 @@ namespace
     //   * 彩块本身达标（细长/实心/|tilt|<=40°）→ 直接采用彩块几何；
     //   * 不达标（被光晕撑宽的胖块/被拖尾拉斜的块）→ 用白芯做几何修复（见上方说明），
     //     修复结果仍不达标则丢弃。白芯缺失（如合成图纯色条）时自然走彩块路径。
+    // 几何估计（需求③）：彩块轮廓先过 fitBarConstrained（约束矩形拟合），通过全部门控
+    // 时采纳拟合几何，否则回退 minAreaRect（与旧行为逐位一致）。白芯修复路径不变。
+    std::vector<DebugBar> s_debug_bars; // 供 debugBars()（见 header）
+
     std::vector<LightBar> extractLightBars(const cv::Mat &bgr, const cv::Mat &mask)
     {
+        s_debug_bars.clear();
         std::vector<LightBar> bars;
         if (mask.empty() || mask.type() != CV_8UC1)
         {
@@ -490,25 +1313,76 @@ namespace
         std::vector<std::vector<cv::Point>> contours;
         cv::findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
 
+        // 需求③：约束拟合需要完整边界点集（规格要求 CHAIN_APPROX_NONE；SIMPLE 会把
+        // 长直边压缩成两点，分位数/协方差失真）。两次 findContours 对同一掩码的
+        // 轮廓顺序一致（按行扫描、RETR_EXTERNAL），按下标配对；关闭拟合时不跑第二遍。
+        std::vector<std::vector<cv::Point>> contours_full;
+        if (g_bar_fit_mode > 0)
+        {
+            cv::findContours(mask, contours_full, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
+            if (contours_full.size() != contours.size())
+            {
+                contours_full.clear(); // 顺序/数量异常：本次全部回退（防御性）
+            }
+        }
+
         // 白芯轮廓按档位懒加载（只有出现不达标彩块时才生成对应档位的掩码）
         std::array<std::vector<std::vector<cv::Point>>, kCoreLevels> core_contours;
         std::array<bool, kCoreLevels> core_ready{false, false, false};
 
-        for (const std::vector<cv::Point> &contour : contours)
+        // 记录灯条几何（供 debugBars()；每次 push 一次向量写入，成本可忽略）
+        auto push_bar = [&bars](const LightBar &b, bool fitted)
         {
+            bars.push_back(b);
+            DebugBar db;
+            db.center = b.rect.center;
+            db.axis = rectLongAxis(b.rect);
+            db.half_l = b.height * 0.5F;
+            db.half_w = b.width * 0.5F;
+            db.fitted = fitted;
+            db.corners = b.corners; // 拟合 v2 时即四边形交点
+            s_debug_bars.push_back(db);
+        };
+
+        for (std::size_t ci = 0; ci < contours.size(); ++ci)
+        {
+            const std::vector<cv::Point> &contour = contours[ci];
             if (cv::contourArea(contour) < 20.0)
             {
                 continue;
             }
+            const double contour_area = cv::contourArea(contour); // 只算一次
+            const cv::RotatedRect rough = cv::minAreaRect(contour); // 原几何（回退值）
+            cv::RotatedRect rect = rough;
+            EdgeFit quad;
+            bool fitted = false;
+            if (ci < contours_full.size())
+            {
+                const auto fit_t0 = std::chrono::steady_clock::now();
+                ++g_bar_fit_total;
+                fitted = fitBarConstrained(contours_full[ci], rough, contour_area, rect, quad);
+                if (fitted)
+                {
+                    ++g_bar_fit_accept;
+                }
+                g_bar_fit_ms_total += std::chrono::duration<double, std::milli>(
+                                          std::chrono::steady_clock::now() - fit_t0)
+                                          .count();
+            }
             LightBar bar;
-            fillBarGeometry(bar, cv::minAreaRect(contour));
-            const float fill = static_cast<float>(cv::contourArea(contour)) /
-                               (bar.width * bar.height);
+            fillBarGeometry(bar, rect);
+            if (quad.ok)
+            {
+                // v2/v3：四角用"四条边求交"的结果；rect 仍为等价外接（中心/倾角/配对用），
+                // 二者共用同一套下游。
+                bar.corners = quad.corners;
+            }
+            const float fill = static_cast<float>(contour_area) / (bar.width * bar.height);
 
             // 达标不修：避免短噪白芯把本就良好的几何带偏（实测教训）
             if (passesBarFilter(bar, fill))
             {
-                bars.push_back(bar);
+                push_bar(bar, fitted);
                 continue;
             }
             if (bgr.empty())
@@ -562,7 +1436,7 @@ namespace
                                 : 0.0F;
                         if (passesBarFilter(refined, std::min(rfill, 1.0F)))
                         {
-                            bars.push_back(refined);
+                            push_bar(refined, false); // 白芯修复几何（不参与拟合）
                         }
                     }
                     break; // 只用最严档位里找到的有效白芯（与调参实验一致）
@@ -881,6 +1755,34 @@ namespace
 cv::Mat enemyMaskForDebug(const cv::Mat &bgr, TeamColor enemy_color)
 {
     return buildEnemyMask(bgr, enemy_color);
+}
+
+// 调试钩子：最近一次 armor_detect 提取出的灯条最终几何（说明见 header）。
+std::vector<DebugBar> debugBars()
+{
+    return s_debug_bars;
+}
+
+// 调试辅助：正则化掩码——原始掩码压暗（保留对照），灯条拟合四边形画满（亮）。
+// 与 enemyMaskForDebug 一样只供测试工具显示；内部会重跑一次灯条提取（会覆盖
+// debugBars() 的暂存，工具请在 armor_detect 之后、显示之前调用）。
+cv::Mat regularizedMaskForDebug(const cv::Mat &bgr, TeamColor enemy_color)
+{
+    const cv::Mat mask = buildEnemyMask(bgr, enemy_color);
+    const std::vector<LightBar> bars = extractLightBars(bgr, mask);
+    cv::Mat canvas(mask.size(), CV_8UC1, cv::Scalar(0));
+    canvas.setTo(70, mask > 0); // 原始掩码：暗灰底，能看清"毛糙"来源
+    for (const LightBar &b : bars)
+    {
+        std::vector<cv::Point> poly;
+        poly.reserve(4);
+        for (const cv::Point2f &p : b.corners)
+        {
+            poly.emplace_back(cvRound(p.x), cvRound(p.y));
+        }
+        cv::fillPoly(canvas, std::vector<std::vector<cv::Point>>{poly}, cv::Scalar(255));
+    }
+    return canvas;
 }
 
 // 显示用位姿解算（含平面目标孪生解消歧），详见头文件注释。

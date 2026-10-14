@@ -102,7 +102,7 @@ int main(int argc, char **argv)
     }
     std::cout << "视频总帧数: " << cap.get(cv::CAP_PROP_FRAME_COUNT)
               << "  FPS(元数据): " << cap.get(cv::CAP_PROP_FPS) << "\n";
-    std::cout << "ESC/q quit, 空格 暂停/继续, ←→ 逐帧前后, s 保存帧\n";
+    std::cout << "ESC/q quit, 空格 暂停/继续, ←→ 逐帧前后, s 保存帧, k 掩码窗口 原始/正则化\n";
 
     cv::Mat frame;
     int save_idx = 0;
@@ -138,6 +138,9 @@ int main(int argc, char **argv)
     std::vector<ArmorPose> poses;
     cv::Mat mask_dbg;
     bool need_recompute = true;
+    // 掩码窗口模式：1=正则化（原始掩码压暗 + 拟合四边形填满，展示"剔除毛糙"效果）；
+    // 0=原始掩码。k 键切换（切换后强制重算一次）。
+    int mask_mode = 1;
 
     while (true)
     {
@@ -171,7 +174,8 @@ int main(int argc, char **argv)
         {
             dets = armor_detect(frame, enemy);
             poses = armor_solve(dets, camera, gimbal);
-            mask_dbg = enemyMaskForDebug(frame, enemy);
+            mask_dbg = (mask_mode == 1) ? regularizedMaskForDebug(frame, enemy)
+                                        : enemyMaskForDebug(frame, enemy);
 
             // PnP 位姿（供坐标轴绘制与 m 键矩阵打印）
             dbg_rvecs.clear();
@@ -338,6 +342,12 @@ int main(int argc, char **argv)
         else if (key == ' ')
         {
             paused = !paused;
+        }
+        else if (key == 'k')
+        {
+            mask_mode = 1 - mask_mode;
+            need_recompute = true; // 下一轮重算掩码窗口
+            std::cout << "掩码窗口: " << (mask_mode == 1 ? "正则化（拟合四边形）" : "原始") << "\n";
         }
         else if (key == 'm')
         {
