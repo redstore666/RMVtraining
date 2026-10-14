@@ -226,14 +226,6 @@ int main(int argc, char **argv)
         }
         const auto t1 = Clock::now();
 
-        // 重要：必须在绘制检测框/坐标轴之前生成调试掩码，否则叠加的红/蓝线会被颜色阈值提取。
-        // mask_mode：1=正则化（拟合四边形填满；k 键切换）0=原始掩码
-        static int mask_mode = 1;
-        static bool mask_mode_key_prev = false;
-        (void)mask_mode_key_prev;
-        const cv::Mat mask_dbg = (mask_mode == 1) ? regularizedMaskForDebug(frame, enemy)
-                                                  : enemyMaskForDebug(frame, enemy);
-
         // 实时相机帧率 = 相邻两次成功取帧的间隔倒数（EMA 平滑）
         if (prev_grab_done.time_since_epoch().count() != 0)
         {
@@ -383,8 +375,6 @@ int main(int argc, char **argv)
                     cv::FONT_HERSHEY_SIMPLEX, 0.8,
                     cv::Scalar(0, 255, 255), 2);
 
-        // mask_dbg 已在绘制覆盖层之前从原始相机帧生成。
-
         // ===== 显示 =====
         cv::Mat display;
         if (frame.cols > 1920)
@@ -393,7 +383,6 @@ int main(int argc, char **argv)
             display = frame;
 
         cv::imshow("camera_live", display);
-        cv::imshow("mask", mask_dbg);
         const auto t4 = Clock::now();
 
         // ===== 统计（精简输出：每 150 帧一行；err 分布每 300 帧）=====
@@ -427,18 +416,11 @@ int main(int argc, char **argv)
         const int key = cv::waitKey(1) & 0xFF;
         if (key == 27 || key == 'q')
             break;
-        if (key == 'k')
-        {
-            mask_mode = 1 - mask_mode;
-            std::cout << "掩码窗口: " << (mask_mode == 1 ? "正则化（拟合四边形）" : "原始") << "\n";
-        }
         if (key == 's')
         {
             const std::string fname = cv::format("./tmp/live_%03d.png", save_idx);
-            const std::string mask_fname = cv::format("./tmp/mask_%03d.png", save_idx);
             cv::imwrite(fname, frame);
-            cv::imwrite(mask_fname, mask_dbg);
-            std::cout << "已保存: " << fname << " 和 " << mask_fname << "\n";
+            std::cout << "已保存: " << fname << "\n";
             ++save_idx;
         }
         else if (key == 'm')

@@ -136,11 +136,7 @@ int main(int argc, char **argv)
     // 每帧的检测结果缓存（只在读入新帧时刷新一次）
     std::vector<ArmorDetection> dets;
     std::vector<ArmorPose> poses;
-    cv::Mat mask_dbg;
     bool need_recompute = true;
-    // 掩码窗口模式：1=正则化（原始掩码压暗 + 拟合四边形填满，展示"剔除毛糙"效果）；
-    // 0=原始掩码。k 键切换（切换后强制重算一次）。
-    int mask_mode = 1;
 
     while (true)
     {
@@ -174,8 +170,6 @@ int main(int argc, char **argv)
         {
             dets = armor_detect(frame, enemy);
             poses = armor_solve(dets, camera, gimbal);
-            mask_dbg = (mask_mode == 1) ? regularizedMaskForDebug(frame, enemy)
-                                        : enemyMaskForDebug(frame, enemy);
 
             // PnP 位姿（供坐标轴绘制与 m 键矩阵打印）
             dbg_rvecs.clear();
@@ -311,7 +305,6 @@ int main(int argc, char **argv)
                         cv::Scalar(0, 0, 255), 3);
         }
         cv::imshow("playback", display);
-        cv::imshow("mask", mask_dbg);
 
         // ===== 按键处理 =====
         // 用 waitKeyEx 拿到完整键码——方向键的高位不会丢
@@ -343,12 +336,6 @@ int main(int argc, char **argv)
         {
             paused = !paused;
         }
-        else if (key == 'k')
-        {
-            mask_mode = 1 - mask_mode;
-            need_recompute = true; // 下一轮重算掩码窗口
-            std::cout << "掩码窗口: " << (mask_mode == 1 ? "正则化（拟合四边形）" : "原始") << "\n";
-        }
         else if (key == 'm')
         {
             // 打印当前帧各观测的 PnP 位姿矩阵（R: 3x3 旋转矩阵，t: 3x1 平移，单位 m）
@@ -365,10 +352,8 @@ int main(int argc, char **argv)
         else if (key == 's')
         {
             const std::string fname = cv::format("./tmp/playback_%03d.png", save_idx);
-            const std::string mask_fname = cv::format("./tmp/playback_mask_%03d.png", save_idx);
             cv::imwrite(fname, display_canvas); // 保存带标注的克隆图（原始帧不含标注）
-            cv::imwrite(mask_fname, mask_dbg);
-            std::cout << "已保存: " << fname << " 和 " << mask_fname << "\n";
+            std::cout << "已保存: " << fname << "\n";
             ++save_idx;
         }
         else if (raw_key > 0 && raw_key != -1 && raw_key != 255)

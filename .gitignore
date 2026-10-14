@@ -37,4 +37,8 @@ __pycache__/
 .zcode/
 .zcodeignore
 
+# ===== AI 助手工作区 / 系统回收站（与作业无关，绝不提交）=====
+.workbuddy/
+.Trash-0/
+
 # 注意：不要忽略 *.png / *.onnx —— calib_data、tests/data、models/ 是必须提交的材料

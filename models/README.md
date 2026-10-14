@@ -2,7 +2,8 @@
 
 ## armor_cls_64.onnx
 
-装甲板数字分类器（9 类），供 `armor_detect` 使用。
+装甲板数字分类器（9 类）。神经网络路线下编号由 YOLO 直接输出、armor_detect
+不再调用本模型；保留供 `tests/test_classifier` 链路自检与传统路线参考。
 
 | 项 | 值 |
 | --- | --- |
@@ -47,6 +48,74 @@ yolo export model=runs_cls/cls64_v2/weights/best.pt format=onnx opset=12 imgsz=6
 ```
 
 训练脚本与完整结果（results.csv、混淆矩阵）在 `RMVtrainingHomework/train_cls/`。
+
+## yolov5.xml / yolov5.bin（神经网络四点检测，主用）
+
+装甲板四点关键点检测模型，OpenVINO IR（version 11），供 `ArmorDetectorNet` 使用。
+来源：同济大学 SuperPower 战队 25 赛季开源视觉框架
+[redstore666/sp_vision_25](https://github.com/redstore666/sp_vision_25)
+（standard3 上场默认模型，流程解析见同目录 `自瞄识别全流程解析.md`）。
+
+| 项 | 值 |
+| --- | --- |
+| 输入 | 1x3x640x640 FP32，RGB 顺序，/255 归一化 |
+| 预处理 | 等比缩放（scale = min(640/rows, 640/cols)），左上对齐放入 640x640 黑底画布（letterbox） |
+| 输出 | 1x25200x22 FP32，每行一个候选 |
+
+输出行布局（与 sp_vision_25 `tasks/auto_aim/yolos/yolov5.cpp` 解码严格一致）：
+
+```
+[0:8)   4 个关键点（letterbox 坐标，像素）：
+        (0,1)=TL  (2,3)=BL  (4,5)=BR  (6,7)=TR
+        拼成工程约定 TL,TR,BR,BL 的取列顺序为 (0,1),(6,7),(4,5),(2,3)
+[8]     objectness（需 sigmoid，阈值 0.7）
+[9:13)  颜色 one-hot 4 类 argmax：0=blue 1=red 2=extinguish 3=purple
+        （注意：one-hot 顺序与 yolo11 的属性表枚举不同，源自
+          sp_vision_25 Armor(color_id, num_id,...) 构造函数的映射）
+[13:22) 编号 one-hot 9 类 argmax：
+        0=sentry 1=one 2=two 3=three 4=four 5=five
+        6=outpost 7=base 8=not_armor(丢弃)
+```
+
+后处理：score(sigmoid) ≥ 0.7 → 关键点 ÷scale 还原原图坐标 → NMS(conf 0.7 / IoU 0.3)。
+语义映射到本工程：blue/red → `TeamColor`；sentry→7(7guard)、one..five→1..5、
+outpost→6、base→8；extinguish/purple（熄灭/紫）直接丢弃（不可击打状态）。
+大小板：输出不含大小类，用四角点几何 ratio（外缘宽/条高 ≈2.37 小 / 4.04 大，
+与传统路线 classifyArmorSize 同标准）判定。
+
+### 部署链路验证记录（2026-10-14）
+
+- 推理引擎：OpenVINO 运行时（pip openvino 2026.4.1，CPU LATENCY 模式）。
+  系统 OpenCV 4.5.4 未编译 Inference Engine，不能读 IR；IR→ONNX 转换
+  （openvino2onnx）会因 HardSwish/ReduceMean/Resize(opset18) 语义在本版
+  OpenCV 上图解析失败，故采用原生 OpenVINO，避免关键点精度受损；
+- 实拍视频抽帧回归（每 30 帧抽 1 张，2500μs 曝光 60fps）：
+  红色 64/64、蓝色 141/141 检出率 100%，单帧推理 13~25ms；
+- PnP 链路（test_solve）：距离抖动 ~1cm/帧，重投影误差 1.6~1.8px
+  （同帧传统路线 2.6px）。
+
+## yolo11.xml / yolo11.bin（备选四点检测）
+
+同来源（sp_vision_25），与 yolov5 并列的备选检测模型。
+
+| 项 | 值 |
+| --- | --- |
+| 输入 | 1x3x640x640 FP32，预处理同 yolov5 |
+| 输出 | 1x50x8400 FP32，transpose 后每行一个候选 |
+
+输出行布局（transpose 后，与 `yolo11.cpp` 解码一致）：
+
+```
+[0:4)   xywh 检测框（letterbox 坐标）
+[4:42)  38 类分数（颜色x编号x大小组合，armor_properties 表，见 ArmorDetectorNet.cpp）
+[42:50) 4 个关键点（letterbox 坐标），需按 y 分组、组内按 x 排序为 TL,TR,BR,BL
+```
+
+## tiny_resnet.onnx（备选数字分类器）
+
+sp_vision_25 传统路线配套的数字分类器：32x32 灰度输入、9 类输出
+（one..five/sentry/outpost/base/not_armor）。本工程 NN 路线的编号由 YOLO
+直接输出，此模型仅归档备用；主用数字分类器仍为 armor_cls_64.onnx。
 
 ### 部署链路验证记录（2026-10-03）
 

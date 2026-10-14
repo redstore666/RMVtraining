@@ -12,6 +12,11 @@ find_package(Eigen3 REQUIRED)
 find_package(OpenCV 4 REQUIRED COMPONENTS core imgcodecs imgproc calib3d highgui dnn)
 find_package(Threads REQUIRED)
 
+# OpenVINO 运行时（神经网络四点检测路线，ArmorDetectorNet 依赖）。
+# 安装：python3 -m pip install openvino
+# 然后用 -DOpenVINO_DIR=<venv>/lib/python3.X/site-packages/openvino/cmake 指向配置目录。
+find_package(OpenVINO REQUIRED COMPONENTS Runtime)
+
 add_subdirectory(serialPort)
 
 if(ENABLE_WEB_DEBUG)
@@ -33,6 +38,7 @@ add_library(training_core STATIC
     src/AutoAimTypes.cpp
     student/src/StudentTasks.cpp
     student/src/ArmorClassifier.cpp
+    student/src/ArmorDetectorNet.cpp
 )
 target_include_directories(training_core
     PUBLIC
@@ -46,12 +52,20 @@ target_link_libraries(training_core
     PUBLIC
     serialPort
     ${OpenCV_LIBS}
+    openvino::runtime
     MvCameraControl # ← 新增：MVS SDK 库
 )
 target_link_directories(training_core
     PUBLIC
     ${MVS_SDK_ROOT}/lib/64 # ← 新增：库搜索路径
 )
+
+# OpenVINO 运行库目录（pip 包内 libs/，与 cmake/ 同级）：RPATH 传导给所有可执行文件，
+# 保证 dlopen 能找到 libopenvino.so 与 CPU 插件。
+get_filename_component(OV_LIBS_DIR "${OpenVINO_DIR}/../libs" ABSOLUTE)
+set_target_properties(training_core PROPERTIES
+    INTERFACE_BUILD_RPATH "${OV_LIBS_DIR}")
+link_directories("${OV_LIBS_DIR}")
 
 add_executable(rmv_training main.cpp)
 target_include_directories(rmv_training PRIVATE web_debug/include)
@@ -162,8 +176,3 @@ target_include_directories(test_camera_playback PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_link_options(test_camera_playback PRIVATE "-Wl,--disable-new-dtags")
 set_target_properties(test_camera_playback PROPERTIES
     BUILD_RPATH "/opt/MVS/lib/64")
-
-# 灯条约束拟合（fitBarConstrained）离线验证：合成真值对照 / 视频 A/B / 位姿统计。
-add_executable(test_bar_fit tests/test_bar_fit.cpp)
-target_link_libraries(test_bar_fit PRIVATE training_core ${OpenCV_LIBS})
-target_include_directories(test_bar_fit PRIVATE ${OpenCV_INCLUDE_DIRS})
