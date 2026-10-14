@@ -33,6 +33,13 @@ extern int g_bar_fit_rej_par;
 extern int g_bar_fit_rej_width;
 extern double g_bar_fit_ms_total; // 累计拟合耗时（毫秒），除以帧数得每帧近似开销
 
+// ===== test钩子（需求③ P3：宽度短时域稳健化）=====
+// 灯条"宽度"参数的中位数窗长度（0=关闭；默认 5）。环境变量 RMV_BAR_WIDTH_WIN 可覆盖。
+// 只平滑宽度（沿中轴的垂直分量），中心/方向/端点不参与，避免引入跟踪滞后。
+extern int g_bar_width_window;
+extern int g_bar_width_smooth_count; // 累计"应用了宽度平滑"的灯条次数
+extern int g_bar_width_reset_count;  // 累计轨迹重置次数（新建/间隔过长/中心跳变）
+
 // 调试钩子：最近一次 armor_detect 提取出的灯条最终几何（拟合采纳或回退后的结果），
 // 供离线度量工具统计灯条级稳定性；主流程不读取。
 struct DebugBar

@@ -69,6 +69,21 @@ int g_bar_fit_rej_edges = 0;
 int g_bar_fit_rej_par = 0;
 int g_bar_fit_rej_width = 0;
 double g_bar_fit_ms_total = 0.0;
+
+// ===== test钩子（需求③ P3：宽度短时域稳健化；说明见 StudentTasks.hpp）=====
+// 窗口长度上限 5（见 StudentTasks.cpp 内 P3 区块的机制说明）；RMV_BAR_WIDTH_WIN=0 关闭。
+constexpr int kWidthWindowMax = 5;
+int g_bar_width_window = [] {
+    const char *env = std::getenv("RMV_BAR_WIDTH_WIN");
+    if (env == nullptr)
+    {
+        return kWidthWindowMax;
+    }
+    const int v = std::atoi(env);
+    return v <= 0 ? 0 : std::min(v, kWidthWindowMax);
+}();
+int g_bar_width_smooth_count = 0;
+int g_bar_width_reset_count = 0;
 // ============ 辅助函数 ============
 bool init_camera(void **handle, bool verbose)
 {
@@ -302,8 +317,9 @@ namespace
 
     struct LightBar
     {
-        cv::RotatedRect rect;                 // minAreaRect 原始结果
-        std::array<cv::Point2f, 4> corners{}; // rect 的四个角点
+        cv::RotatedRect rect;                 // minAreaRect 原始结果（宽度平滑后就地重算）
+        std::array<cv::Point2f, 4> corners{}; // 四角（拟合 v2/v3 采纳时为四边形交点）
+        bool fitted{false};                   // true=几何来自 fitBarConstrained 采纳
         float width{0.0F};                    // 归一化后：height 为长边
         float height{0.0F};
         float tilt_deg{0.0F}; // 相对竖直方向的夹角，竖直=0
@@ -1292,6 +1308,143 @@ namespace
         return true;
     }
 
+    // ===== 需求③ P3：灯条"宽度"的短时域稳健化（2026-10-14，用户验收反馈驱动）=====
+    // 动机（蓝素材取证）：宽度是缓变量，但二值边界的栅格相位逐帧变化 → 单帧宽度按
+    // ~1px 阶梯振荡（"移动后相对静止"最差段帧间 |Δ宽|>0.5px 占比 49%、P90 1.24px、
+    // 灯条在画面里仍以 ~1.7px/帧 漂移），角点/检测框随之频繁跳动。
+    // 处理：只对"宽度"这一个参数做"最近 ≤N 帧的中位数窗"——中位数无偏（不引入
+    // 系统偏窄，均值类口径实测在合成真值上偏窄 0.4~0.9px，故不采用），窗口首帧用原始
+    // 值；中心/方向/端点**不参与**平滑，避免跟踪滞后。
+    // 关联与重置（任务书方案D 的要求）：
+    //   * 关联：中心 ≤15px 且长轴方向 ≤20° 视为同一物理灯条（贪心最近，一对一）；
+    //   * 重置：新建轨迹 / 与上次出现间隔 >10 帧（≈0.3s@30fps，覆盖短时丢检）/ 中心
+    //     跳变 >40px（换目标或快速重捕）→ 窗口清空、本帧用原始宽度；
+    //   * 只缩放角点在"垂直中轴"方向上的分量；轴向位置/中心/方向不动。
+    // 开关：环境变量 RMV_BAR_WIDTH_WIN=0（或 --width-win 0）关闭；默认 5。
+    // 按 g_bar_fit_mode 分表存储，保证离线 A/B（同进程交替两个变体）互不污染。
+    constexpr long kWidthGapFrames = 10;
+    constexpr float kWidthAssocDist = 15.0F;
+    constexpr float kWidthAssocAngle = 20.0F;
+    constexpr float kWidthResetDist = 40.0F;
+
+    struct WidthTrack
+    {
+        cv::Point2f center;
+        float angle_deg{0.0F};
+        long last_frame{-1};
+        std::vector<float> widths; // 最近 ≤N 帧的"原始"宽度
+    };
+    std::array<std::vector<WidthTrack>, 4> s_width_tracks; // 按拟合模式分表
+    std::array<long, 4> s_width_frame{0, 0, 0, 0};
+
+    // 只缩放角点在垂直中轴方向上的分量（中心/轴向/方向不动），并同步 width/rect。
+    void applyWidthScale(LightBar &bar, float scale)
+    {
+        const cv::Point2f axis = rectLongAxis(bar.rect);
+        if (cv::norm(axis) < 1e-6F)
+        {
+            return;
+        }
+        const cv::Point2f perp(-axis.y, axis.x);
+        const cv::Point2f c = bar.rect.center;
+        for (cv::Point2f &p : bar.corners)
+        {
+            const cv::Point2f d = p - c;
+            const float axial = d.dot(axis);
+            const float lateral = d.dot(perp);
+            p = c + axis * axial + perp * (lateral * scale);
+        }
+        bar.width *= scale;
+        bar.rect = cv::minAreaRect(std::vector<cv::Point2f>(bar.corners.begin(), bar.corners.end()));
+        ++g_bar_width_smooth_count;
+    }
+
+    // 一帧的宽度平滑：原地修改 bars（宽度与角点），推进该模式的轨迹表。
+    void applyWidthSmoothing(std::vector<LightBar> &bars, std::vector<WidthTrack> &tracks, long &frame)
+    {
+        ++frame;
+        if (g_bar_width_window <= 1)
+        {
+            return; // 关闭（0 或 1 帧窗口 = 原始宽度）
+        }
+        // 1) 清理过期轨迹（间隔超过 kWidthGapFrames 视为目标消失）
+        for (auto it = tracks.begin(); it != tracks.end();)
+        {
+            it = (frame - it->last_frame > kWidthGapFrames) ? tracks.erase(it) : it + 1;
+        }
+        // 2) 贪心最近中心一对一关联（同帧重复中心/方向门限）
+        std::vector<int> match(bars.size(), -1);
+        std::vector<bool> used(tracks.size(), false);
+        for (std::size_t i = 0; i < bars.size(); ++i)
+        {
+            int best_j = -1;
+            float best_d = kWidthAssocDist;
+            for (std::size_t j = 0; j < tracks.size(); ++j)
+            {
+                if (used[j])
+                {
+                    continue;
+                }
+                const float d = cv::norm(bars[i].rect.center - tracks[j].center);
+                if (d >= best_d ||
+                    angleDiff180(bars[i].tilt_deg, tracks[j].angle_deg) > kWidthAssocAngle)
+                {
+                    continue;
+                }
+                best_d = d;
+                best_j = static_cast<int>(j);
+            }
+            if (best_j >= 0)
+            {
+                used[static_cast<std::size_t>(best_j)] = true;
+                match[i] = best_j;
+            }
+        }
+        // 3) 更新轨迹并决定本帧使用的宽度
+        for (std::size_t i = 0; i < bars.size(); ++i)
+        {
+            const float raw_w = bars[i].width;
+            if (raw_w <= 1e-3F)
+            {
+                continue;
+            }
+            const int j = match[i];
+            if (j < 0)
+            {
+                // 新轨迹：本帧用原始宽度（无偏），建立历史
+                tracks.push_back(WidthTrack{bars[i].rect.center, bars[i].tilt_deg, frame, {raw_w}});
+                ++g_bar_width_reset_count;
+                continue;
+            }
+            WidthTrack &tr = tracks[static_cast<std::size_t>(j)];
+            if (cv::norm(bars[i].rect.center - tr.center) > kWidthResetDist)
+            {
+                tr.widths.assign(1, raw_w); // 中心跳变：重置窗口
+                ++g_bar_width_reset_count;
+            }
+            else
+            {
+                tr.widths.push_back(raw_w);
+                if (static_cast<int>(tr.widths.size()) > g_bar_width_window)
+                {
+                    tr.widths.erase(tr.widths.begin());
+                }
+            }
+            tr.center = bars[i].rect.center;
+            tr.angle_deg = bars[i].tilt_deg;
+            tr.last_frame = frame;
+
+            std::vector<float> med = tr.widths;
+            std::sort(med.begin(), med.end());
+            const float w_med = med[med.size() / 2];
+            const float scale = w_med / raw_w;
+            if (std::fabs(scale - 1.0F) > 1e-3F && scale > 0.6F && scale < 1.6F)
+            {
+                applyWidthScale(bars[i], scale);
+            }
+        }
+    }
+
     // 步骤 2：从掩码提取灯条。
     // 轮廓 -> minAreaRect -> 过滤。实拍调参后的策略：
     //   * 彩块本身达标（细长/实心/|tilt|<=40°）→ 直接采用彩块几何；
@@ -1301,7 +1454,8 @@ namespace
     // 时采纳拟合几何，否则回退 minAreaRect（与旧行为逐位一致）。白芯修复路径不变。
     std::vector<DebugBar> s_debug_bars; // 供 debugBars()（见 header）
 
-    std::vector<LightBar> extractLightBars(const cv::Mat &bgr, const cv::Mat &mask)
+    std::vector<LightBar> extractLightBars(const cv::Mat &bgr, const cv::Mat &mask,
+                                          bool update_state = true)
     {
         s_debug_bars.clear();
         std::vector<LightBar> bars;
@@ -1330,18 +1484,12 @@ namespace
         std::array<std::vector<std::vector<cv::Point>>, kCoreLevels> core_contours;
         std::array<bool, kCoreLevels> core_ready{false, false, false};
 
-        // 记录灯条几何（供 debugBars()；每次 push 一次向量写入，成本可忽略）
+        // 收集灯条（几何平滑在函数末尾统一做，debugBars 记录平滑后的最终几何）
         auto push_bar = [&bars](const LightBar &b, bool fitted)
         {
-            bars.push_back(b);
-            DebugBar db;
-            db.center = b.rect.center;
-            db.axis = rectLongAxis(b.rect);
-            db.half_l = b.height * 0.5F;
-            db.half_w = b.width * 0.5F;
-            db.fitted = fitted;
-            db.corners = b.corners; // 拟合 v2 时即四边形交点
-            s_debug_bars.push_back(db);
+            LightBar out = b;
+            out.fitted = fitted;
+            bars.push_back(out);
         };
 
         for (std::size_t ci = 0; ci < contours.size(); ++ci)
@@ -1442,6 +1590,25 @@ namespace
                     break; // 只用最严档位里找到的有效白芯（与调参实验一致）
                 }
             }
+        }
+
+        if (update_state)
+        {
+            // 需求③ P3：宽度短时域稳健化（只动宽度参数；分模式存储）
+            const std::size_t mode = static_cast<std::size_t>(std::min(std::max(g_bar_fit_mode, 0), 3));
+            applyWidthSmoothing(bars, s_width_tracks[mode], s_width_frame[mode]);
+        }
+        // 记录灯条最终几何（供 debugBars()）：平滑后的宽度/角点即为下游实际使用值
+        for (const LightBar &b : bars)
+        {
+            DebugBar db;
+            db.center = b.rect.center;
+            db.axis = rectLongAxis(b.rect);
+            db.half_l = b.height * 0.5F;
+            db.half_w = b.width * 0.5F;
+            db.fitted = b.fitted;
+            db.corners = b.corners;
+            s_debug_bars.push_back(db);
         }
         return bars;
     }
@@ -1769,7 +1936,7 @@ std::vector<DebugBar> debugBars()
 cv::Mat regularizedMaskForDebug(const cv::Mat &bgr, TeamColor enemy_color)
 {
     const cv::Mat mask = buildEnemyMask(bgr, enemy_color);
-    const std::vector<LightBar> bars = extractLightBars(bgr, mask);
+    const std::vector<LightBar> bars = extractLightBars(bgr, mask, /*update_state=*/false);
     cv::Mat canvas(mask.size(), CV_8UC1, cv::Scalar(0));
     canvas.setTo(70, mask > 0); // 原始掩码：暗灰底，能看清"毛糙"来源
     for (const LightBar &b : bars)

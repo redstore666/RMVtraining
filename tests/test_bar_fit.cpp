@@ -337,6 +337,8 @@ namespace
                         g_bar_fit_ms_total / static_cast<double>(frames),
                         static_cast<double>(g_bar_fit_total) / static_cast<double>(frames));
         }
+        std::printf("宽度平滑(P3): 窗口=%d 帧 | 应用 %d 次 | 轨迹重置 %d 次\n", g_bar_width_window,
+                    g_bar_width_smooth_count, g_bar_width_reset_count);
     }
 
     // ================= 模式 1：进程内 A/B（几何/角点/检出/耗时）=================
