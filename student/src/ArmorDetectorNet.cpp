@@ -97,15 +97,53 @@ ArmorSize classifySizeByGeometry(const std::array<cv::Point2f, 4> &c)
 
 } // namespace
 
-bool ArmorDetectorNet::load(const std::string &xml_path, ModelKind kind, std::string &error)
+bool ArmorDetectorNet::load(const std::string &xml_path, ModelKind kind,
+                            int input_size, const std::string &device,
+                            std::string &error)
 {
     try
     {
-        // OpenVINO 直接读 IR（bin 同名换后缀自动查找），CPU + LATENCY 模式，
+        input_size_ = input_size;
+        // OpenVINO 直接读 IR（bin 同名换后缀自动查找），LATENCY 模式，
         // 与 sp_vision_25 standard3 配置一致。
         std::shared_ptr<ov::Model> model = core_.read_model(xml_path);
-        compiled_ = core_.compile_model(
-            model, "CPU", ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY));
+        // 预处理融合进模型图：u8 BGR NHWC 直投，模型内转 RGB + /255，
+        // 比 blobFromImage 少两次全图拷贝。
+        ov::preprocess::PrePostProcessor ppp(model);
+        ppp.input().tensor()
+            .set_element_type(ov::element::u8)
+            .set_layout("NHWC")
+            .set_color_format(ov::preprocess::ColorFormat::BGR)
+            .set_shape({1, static_cast<size_t>(input_size_),
+                        static_cast<size_t>(input_size_), 3});
+        ppp.input().model().set_layout("NCHW");
+        ppp.input().preprocess()
+            .convert_color(ov::preprocess::ColorFormat::RGB)
+            .convert_element_type(ov::element::f32)
+            .scale(255.0F);
+        model = ppp.build();
+        // 非 CPU 设备编译失败（无 /dev/dri 等）时自动回退 CPU。
+        std::string target = device.empty() ? "CPU" : device;
+        try
+        {
+            compiled_ = core_.compile_model(
+                model, target,
+                ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY));
+        }
+        catch (const std::exception &e)
+        {
+            if (target == "CPU")
+            {
+                throw;
+            }
+            std::cerr << "设备 " << target << " 编译失败（" << e.what()
+                      << "），回退 CPU\n";
+            target = "CPU";
+            compiled_ = core_.compile_model(
+                model, target,
+                ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY));
+        }
+        device_ = target;
         infer_request_ = compiled_.create_infer_request();
         kind_ = kind;
         ready_ = true;
@@ -126,24 +164,32 @@ std::vector<ArmorDetectorNet::Detection> ArmorDetectorNet::detect(const cv::Mat 
     {
         return results;
     }
+    // 黑帧早退：main 连续取流失败时会补黑帧走完整链路，没必要浪费一次推理。
+    // 实拍曝光下正常帧三通道均值远大于此阈值。
+    const cv::Scalar mean = cv::mean(bgr);
+    if (mean[0] + mean[1] + mean[2] < 3.0)
+    {
+        return results;
+    }
 
-    // 预处理：等比缩放 + 左上对齐放入 640x640 黑画布（letterbox），
-    // 与 sp_vision_25 一致——padding 在右下，还原坐标只需 /scale。
+    // 预处理：等比缩放 + 左上对齐放入黑画布（letterbox，与 sp_vision_25 一致，
+    // padding 在右下，还原坐标只需 /scale）。画布复用，每帧清零后写入。
     const double scale =
-        std::min(static_cast<double>(kInputSize) / bgr.rows,
-                 static_cast<double>(kInputSize) / bgr.cols);
+        std::min(static_cast<double>(input_size_) / bgr.rows,
+                 static_cast<double>(input_size_) / bgr.cols);
     const int w = static_cast<int>(bgr.cols * scale);
     const int h = static_cast<int>(bgr.rows * scale);
-    cv::Mat canvas(kInputSize, kInputSize, CV_8UC3, cv::Scalar(0, 0, 0));
-    cv::resize(bgr, canvas(cv::Rect(0, 0, w, h)), cv::Size(w, h));
+    if (canvas_.empty())
+    {
+        canvas_ = cv::Mat(input_size_, input_size_, CV_8UC3);
+    }
+    canvas_.setTo(cv::Scalar(0, 0, 0));
+    cv::resize(bgr, canvas_(cv::Rect(0, 0, w, h)), cv::Size(w, h));
 
-    // BGR -> RGB，/255，NCHW FP32，直接拷贝进输入 tensor。
-    const cv::Mat blob = cv::dnn::blobFromImage(canvas, 1.0 / 255.0,
-                                                cv::Size(kInputSize, kInputSize),
-                                                cv::Scalar(), true, false);
+    // u8 BGR 直投输入 tensor，BGR->RGB 与 /255 由模型内预处理完成。
     ov::Tensor input_tensor = infer_request_.get_input_tensor();
-    std::memcpy(input_tensor.data<float>(), blob.ptr<float>(),
-                blob.total() * sizeof(float));
+    std::memcpy(input_tensor.data(), canvas_.data,
+                canvas_.total() * canvas_.elemSize());
     infer_request_.infer();
     const ov::Tensor output = infer_request_.get_output_tensor();
 

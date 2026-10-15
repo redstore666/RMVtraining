@@ -18,6 +18,9 @@ extern int g_pnp_fail;
 bool init_camera(void **handle, bool verbose = false);
 void close_camera(void *handle);
 void release_camera(); // 释放相机资源（程序退出前调用）
+// 相机固件自算的实际出帧率（MVS "ResultingFrameRate" 节点），与主机处理/显示
+// 速度无关；未取到返回 -1。get_pic 内每 30 帧轮询刷新，供调试工具显示。
+float cameraResultingFps();
 // 画框的辅助函数：
 void drawDetections(cv::Mat &image, const std::vector<ArmorDetection> &detections);
 bool get_pic(cv::Mat &pic);

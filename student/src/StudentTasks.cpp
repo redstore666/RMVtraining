@@ -28,6 +28,9 @@ static bool s_ready = false;
 static void *s_handle = nullptr; // MV_CC handle
 static int s_lost_count = 0;
 static int s_init_attempt_count = 0;
+// 相机固件自算帧率（MV_CC_GetFloatValue "ResultingFrameRate"），-1=未取到。
+// 与主机处理速度无关，是纯硬件层实际出帧率；每 30 帧查询一次（GenICam 读节点）。
+static float s_camera_fps = -1.0F;
 
 // ===== test计数器（armor_solve 拒绝原因统计，供 test_camera_live 打印）=====
 int g_rej_reproj = 0;
@@ -83,9 +86,9 @@ bool init_camera(void **handle, bool verbose)
     warn(MV_CC_SetEnumValue(*handle, "TriggerMode", MV_TRIGGER_MODE_OFF), "TriggerMode");
     warn(MV_CC_SetEnumValue(*handle, "ExposureAuto", 0), "ExposureAuto");
     warn(MV_CC_SetEnumValue(*handle, "GainAuto", 0), "GainAuto");
-    warn(MV_CC_SetFloatValue(*handle, "ExposureTime", 3000.0f), "ExposureTime");
-    warn(MV_CC_SetFloatValue(*handle, "Gain", 10.0f), "Gain");
-    warn(MV_CC_SetFloatValue(*handle, "AcquisitionFrameRate", 30.0f), "AcquisitionFrameRate");
+    warn(MV_CC_SetFloatValue(*handle, "ExposureTime", 1000.0f), "ExposureTime");
+    warn(MV_CC_SetFloatValue(*handle, "Gain", 16.0f), "Gain");
+    warn(MV_CC_SetFloatValue(*handle, "AcquisitionFrameRate", 160.0f), "AcquisitionFrameRate");
 
     // PixelFormat 关键：失败就回滚整个 init
     if (MV_CC_SetEnumValue(*handle, "PixelFormat", PixelType_Gvsp_BayerRG8) != MV_OK)
@@ -222,6 +225,20 @@ bool get_pic(cv::Mat &pic)
     }
     s_lost_count = 0;
 
+    // ===== 相机固件自算帧率（每 30 帧轮询一次，GenICam 节点读取）=====
+    // "ResultingFrameRate" 由相机固件根据实际出帧计算，不受主机处理/显示速度
+    // 影响，是纯硬件层帧率；调试工具以此为准判断"相机到底出了多少帧"。
+    static int fps_poll_count = 0;
+    if (++fps_poll_count >= 30)
+    {
+        fps_poll_count = 0;
+        MVCC_FLOATVALUE fps_value{};
+        if (MV_CC_GetFloatValue(s_handle, "ResultingFrameRate", &fps_value) == MV_OK)
+        {
+            s_camera_fps = fps_value.fCurValue;
+        }
+    }
+
     // ============ 像素格式转换：原始 Bayer → BGR ============
     static std::vector<unsigned char> bgr_buffer;
     bgr_buffer.resize(frame_info.nWidth * frame_info.nHeight * 3);
@@ -254,6 +271,13 @@ bool get_pic(cv::Mat &pic)
     return true;
 }
 
+// 相机固件自算的实际出帧率（"ResultingFrameRate"），未取到时返回 -1。
+// 由相机固件计算、与主机处理/显示速度无关；get_pic 内每 30 帧轮询刷新。
+float cameraResultingFps()
+{
+    return s_camera_fps;
+}
+
 // ==================== 任务 2：装甲板识别 ====================
 // 神经网络四点检测路线（唯一实现）：OpenVINO 推理 + 关键点解码，
 // 输出角点/大小/编号/置信度。接口契约见 StudentTasks.hpp。
@@ -276,8 +300,8 @@ bool solveArmorPoseDisambiguated(const std::vector<cv::Point3f> &object_points,
     int pick = 0;
     if (n >= 2)
     {
-        double err[2] = {0.0, 0.0};                  // 各解的重投影平均误差
-        cv::Vec3d n_vec[2] = {cv::Vec3d(0, 0, 1),     // 各解法向 n = R·(0,0,1)
+        double err[2] = {0.0, 0.0};               // 各解的重投影平均误差
+        cv::Vec3d n_vec[2] = {cv::Vec3d(0, 0, 1), // 各解法向 n = R·(0,0,1)
                               cv::Vec3d(0, 0, 1)};
         for (int i = 0; i < 2; ++i)
         {
@@ -318,88 +342,135 @@ bool solveArmorPoseDisambiguated(const std::vector<cv::Point3f> &object_points,
 namespace
 {
 
-// ===== 神经网络四点检测路线（默认）=====
-// 模型：models/yolov5.xml（sp_vision_25 上场默认）；RMV_DET_MODEL=yolo11 切备选模型。
-// 解码与语义映射见 ArmorDetectorNet.cpp 与 models/README.md。
-constexpr float kNnMinConfidence = 0.8F; // 对齐 sp_vision_25 min_confidence
+    // ===== 神经网络四点检测路线（默认）=====
+    // 模型：models/yolov5.xml（sp_vision_25 上场默认）；RMV_DET_MODEL=yolo11 切备选模型。
+    // 解码与语义映射见 ArmorDetectorNet.cpp 与 models/README.md。
+    // 最终输出置信度门限：0.7（512 输入时远处小目标定位噪声大，用户实测 0.6/0.8
+    // 都不影响"抖动只来自定位精度"这一结论；门限只过滤漏检不过滤抖动）。
+    constexpr float kNnMinConfidence = 0.7F;
 
-ArmorDetectorNet &nnDetector(bool &ok)
-{
-    static ArmorDetectorNet detector;
-    static bool load_attempted = false;
-    static bool load_ok = false;
-    if (!load_attempted)
+    ArmorDetectorNet &nnDetector(bool &ok)
     {
-        load_attempted = true;
-        std::string error;
-        const char *model_env = std::getenv("RMV_DET_MODEL");
-        const bool use_yolo11 = model_env != nullptr && std::string(model_env) == "yolo11";
-        const char *model_path = use_yolo11 ? "models/yolo11.xml" : "models/yolov5.xml";
-        const ArmorDetectorNet::ModelKind kind =
-            use_yolo11 ? ArmorDetectorNet::ModelKind::YOLO11
-                       : ArmorDetectorNet::ModelKind::YOLOv5;
-        load_ok = detector.load(model_path, kind, error) ||
-                  detector.load(std::string("../") + model_path, kind, error);
-        if (!load_ok)
+        static ArmorDetectorNet detector;
+        static bool load_attempted = false;
+        static bool load_ok = false;
+        if (!load_attempted)
         {
-            std::cerr << "神经网络检测器加载失败: " << error << "\n";
-        }
-    }
-    ok = load_ok;
-    return detector;
-}
-
-std::vector<ArmorDetection> armorDetectNn(const cv::Mat &pic, TeamColor enemy_color)
-{
-    std::vector<ArmorDetection> detections;
-    if (pic.empty() || pic.type() != CV_8UC3)
-    {
-        return detections;
-    }
-
-    bool ok = false;
-    ArmorDetectorNet &detector = nnDetector(ok);
-    if (!ok)
-    {
-        return detections; // 模型加载失败已在加载时打印错误，按无目标处理
-    }
-
-    for (const ArmorDetectorNet::Detection &det : detector.detect(pic))
-    {
-        // 只保留敌方颜色；extinguish/purple 已在解码时丢弃。
-        if (det.color != enemy_color)
-        {
-            continue;
-        }
-        if (det.confidence < kNnMinConfidence)
-        {
-            continue;
-        }
-        // 拒绝超出图像范围的角点。
-        bool inside = true;
-        for (const cv::Point2f &p : det.corners)
-        {
-            if (p.x < 0.0F || p.y < 0.0F || p.x >= static_cast<float>(pic.cols) ||
-                p.y >= static_cast<float>(pic.rows))
+            load_attempted = true;
+            std::string error;
+            const char *model_env = std::getenv("RMV_DET_MODEL");
+            const bool use_yolo11 = model_env != nullptr && std::string(model_env) == "yolo11";
+            // 推理输入边长：默认 640（yolov5 原始训练尺寸，远处定位最稳）；
+            // RMV_DET_SIZE=512 可切小尺寸提速 ~30%（需 models/yolov5_512.xml，
+            // 由 tools/make_small_ir.py 生成；远处 2m 左右角点抖动明显增大，
+            // 2026-10-14 用户验收后决定默认回 640）。缺模型文件自动回退 640。
+            int size = 640;
+            if (const char *size_env = std::getenv("RMV_DET_SIZE"))
             {
-                inside = false;
-                break;
+                const int requested = std::atoi(size_env);
+                if (requested >= 320 && requested % 32 == 0)
+                {
+                    size = requested;
+                }
+            }
+            // 推理设备：RMV_DET_DEVICE=GPU/AUTO 可切（有 iGPU 渲染节点的机器可用；
+            // 编译失败自动回退 CPU）。
+            std::string device = "CPU";
+            if (const char *dev_env = std::getenv("RMV_DET_DEVICE"))
+            {
+                device = dev_env;
+            }
+            const std::string base = use_yolo11 ? "yolo11" : "yolov5";
+            const ArmorDetectorNet::ModelKind kind =
+                use_yolo11 ? ArmorDetectorNet::ModelKind::YOLO11
+                           : ArmorDetectorNet::ModelKind::YOLOv5;
+            std::string path = "models/" + base + ".xml";
+            if (size != 640)
+            {
+                const std::string sized = "models/" + base + "_" + std::to_string(size) + ".xml";
+                std::string sized_error;
+                if (detector.load(sized, kind, size, device, sized_error))
+                {
+                    load_ok = true;
+                }
+                else
+                {
+                    std::cerr << "未找到 " << sized << "（" << sized_error.substr(0, 80)
+                              << "），回退 640 输入\n";
+                    detector = ArmorDetectorNet{};
+                    load_ok = detector.load(path, kind, 640, device, error);
+                }
+            }
+            else
+            {
+                load_ok = detector.load(path, kind, size, device, error);
+            }
+            if (load_ok)
+            {
+                std::cout << "神经网络检测器就绪: " << base << " " << detector.input_size()
+                          << "x" << detector.input_size() << " device=" << detector.device()
+                          << "\n";
+            }
+            else
+            {
+                std::cerr << "神经网络检测器加载失败: " << error << "\n";
             }
         }
-        if (!inside)
+        ok = load_ok;
+        return detector;
+    }
+
+    std::vector<ArmorDetection> armorDetectNn(const cv::Mat &pic, TeamColor enemy_color)
+    {
+        std::vector<ArmorDetection> detections;
+        if (pic.empty() || pic.type() != CV_8UC3)
         {
-            continue;
+            return detections;
         }
 
-        ArmorDetection out;
-        out.corners = det.corners;
-        out.size = det.size;
-        out.target_id = det.target_id;
-        out.confidence = det.confidence;
-        detections.push_back(out);
+        bool ok = false;
+        ArmorDetectorNet &detector = nnDetector(ok);
+        if (!ok)
+        {
+            return detections; // 模型加载失败已在加载时打印错误，按无目标处理
+        }
+
+        for (const ArmorDetectorNet::Detection &det : detector.detect(pic))
+        {
+            // 只保留敌方颜色；extinguish/purple 已在解码时丢弃。
+            if (det.color != enemy_color)
+            {
+                continue;
+            }
+            if (det.confidence < kNnMinConfidence)
+            {
+                continue;
+            }
+            // 拒绝超出图像范围的角点。
+            bool inside = true;
+            for (const cv::Point2f &p : det.corners)
+            {
+                if (p.x < 0.0F || p.y < 0.0F || p.x >= static_cast<float>(pic.cols) ||
+                    p.y >= static_cast<float>(pic.rows))
+                {
+                    inside = false;
+                    break;
+                }
+            }
+            if (!inside)
+            {
+                continue;
+            }
+
+            ArmorDetection out;
+            out.corners = det.corners;
+            out.size = det.size;
+            out.target_id = det.target_id;
+            out.confidence = det.confidence;
+            detections.push_back(out);
+        }
+        return detections;
     }
-    return detections;
-}
 
 } // namespace
 
@@ -460,8 +531,7 @@ namespace
     {
         using TrackKey = std::pair<int, int>;
         static std::map<TrackKey, TrackedPoseHistory> history_by_track;
-        TrackedPoseHistory &history = history_by_track[
-            TrackKey{target_id, static_cast<int>(size)}];
+        TrackedPoseHistory &history = history_by_track[TrackKey{target_id, static_cast<int>(size)}];
         const auto now = std::chrono::steady_clock::now();
 
         cv::Point2f center(0.0F, 0.0F);
@@ -475,8 +545,8 @@ namespace
 
         std::vector<cv::Mat> rvecs, tvecs;
         const int count = cv::solvePnPGeneric(object_points, image_points,
-                                               camera_matrix, distortion_coefficients,
-                                               rvecs, tvecs, false, cv::SOLVEPNP_IPPE);
+                                              camera_matrix, distortion_coefficients,
+                                              rvecs, tvecs, false, cv::SOLVEPNP_IPPE);
         if (count <= 0)
             return false;
 
@@ -502,7 +572,7 @@ namespace
             normals[static_cast<std::size_t>(i)] = cv::Vec3d(
                 rotation.at<double>(0, 2), rotation.at<double>(1, 2), rotation.at<double>(2, 2));
             if (best_error_index < 0 || errors[static_cast<std::size_t>(i)] <
-                                          errors[static_cast<std::size_t>(best_error_index)])
+                                            errors[static_cast<std::size_t>(best_error_index)])
                 best_error_index = i;
         }
         if (best_error_index < 0)
@@ -645,6 +715,8 @@ std::vector<ArmorPose> armor_solve(const std::vector<ArmorDetection> &detections
     }
     return poses;
 }
+
+// ==================== 任务 4：EKF 跟踪与预测 ====================
 
 PredictionResult ekf_predict(const std::vector<ArmorPose> &, const GimbalState &,
                              double)

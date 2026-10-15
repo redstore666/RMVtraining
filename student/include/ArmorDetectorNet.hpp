@@ -28,28 +28,39 @@
 //     用四角点几何 ratio（外缘宽/条高 ≈2.37 小 / 4.04 大）判定。
 //
 // 注意：detect() 复用内部 InferRequest，只应在单一（操作）线程调用。
-class ArmorDetectorNet {
+class ArmorDetectorNet
+{
 public:
-    enum class ModelKind {
+    enum class ModelKind
+    {
         YOLOv5,
         YOLO11,
     };
 
-    struct Detection {
+    struct Detection
+    {
         // 图像角点按顺时针排列：左上、右上、右下、左下（与 ArmorDetection 一致）。
         std::array<cv::Point2f, 4> corners{};
-        cv::Rect box{};                    // 关键点外接框（原图坐标）
-        TeamColor color{TeamColor::Red};   // 仅 Red/Blue，其余已在解码时丢弃
-        int target_id{0};                  // 1..8（工程编号体系）
+        cv::Rect box{};                  // 关键点外接框（原图坐标）
+        TeamColor color{TeamColor::Red}; // 仅 Red/Blue，其余已在解码时丢弃
+        int target_id{0};                // 1..8（工程编号体系）
         ArmorSize size{ArmorSize::Small};
-        float confidence{0.0F};            // objectness（yolov5）/ 38类分数（yolo11）
+        float confidence{0.0F}; // objectness（yolov5）/ 38类分数（yolo11）
     };
 
-    // 加载 OpenVINO IR 模型（xml 路径，bin 同名换后缀自动查找）。失败时 error 写入原因。
-    bool load(const std::string &xml_path, ModelKind kind, std::string &error);
+    // 加载 OpenVINO IR 模型（xml 路径，bin 同名换后缀自动查找）。
+    // input_size 为推理输入边长（须与模型实际尺寸一致；512 输入需先用
+    // tools/make_small_ir.py 生成 models/yolov5_512.xml）。
+    // device 为推理设备（"CPU"/"GPU"/"AUTO"；非 CPU 设备编译失败时自动回退 CPU）。
+    // 预处理（BGR->RGB、/255）由 OpenVINO PrePostProcessor 融合进模型，
+    // detect() 直接投 u8 letterbox 图像，省去两次全图拷贝。
+    bool load(const std::string &xml_path, ModelKind kind, int input_size,
+              const std::string &device, std::string &error);
 
     bool ready() const { return ready_; }
     ModelKind kind() const { return kind_; }
+    int input_size() const { return input_size_; }
+    const std::string &device() const { return device_; }
 
     // 对一帧 BGR 图像推理。输入为空或模型未就绪时返回空。
     std::vector<Detection> detect(const cv::Mat &bgr);
@@ -64,6 +75,9 @@ private:
     ov::CompiledModel compiled_;
     ov::InferRequest infer_request_;
     ModelKind kind_{ModelKind::YOLOv5};
+    int input_size_{kInputSize};
+    std::string device_{"CPU"};
+    cv::Mat canvas_; // 复用的 letterbox 画布（单线程使用）
     bool ready_{false};
     float score_threshold_{0.7F}; // 与 sp_vision_25 standard3 配置一致
     float nms_threshold_{0.3F};

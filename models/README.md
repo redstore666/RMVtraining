@@ -49,7 +49,7 @@ yolo export model=runs_cls/cls64_v2/weights/best.pt format=onnx opset=12 imgsz=6
 
 训练脚本与完整结果（results.csv、混淆矩阵）在 `RMVtrainingHomework/train_cls/`。
 
-## yolov5.xml / yolov5.bin（神经网络四点检测，主用）
+## yolov5.xml / yolov5.bin（神经网络四点检测，主用，640 输入）
 
 装甲板四点关键点检测模型，OpenVINO IR（version 11），供 `ArmorDetectorNet` 使用。
 来源：同济大学 SuperPower 战队 25 赛季开源视觉框架
@@ -93,6 +93,39 @@ outpost→6、base→8；extinguish/purple（熄灭/紫）直接丢弃（不可�
   红色 64/64、蓝色 141/141 检出率 100%，单帧推理 13~25ms；
 - PnP 链路（test_solve）：距离抖动 ~1cm/帧，重投影误差 1.6~1.8px
   （同帧传统路线 2.6px）。
+
+## yolov5_512.xml / yolov5_512.bin（同网络 512 输入版，当前默认）
+
+由 `tools/make_small_ir.py` 从 yolov5.xml 离线手术生成：Detect 头 3 个 Reshape
+常量改 `[1,3,22,0,-1]`（special_zero 动态化）、3 个 meshgrid 常量换成
+"从 Multiply 输出形状动态生成"的子图，再 reshape 输入到 512。
+数值验证：与 640 原模型在同一实拍帧上检出完全一致、置信度一致、
+角点偏差 2.5~7.6px（低分辨率固有定位损失）。
+
+复现：`python3 tools/make_small_ir.py models/yolov5.xml models/yolov5_512 512`
+
+### 运行参数（环境变量，ArmorDetectorNet）
+
+| 变量 | 取值 | 说明 |
+| --- | --- | --- |
+| `RMV_DET_SIZE` | 320/416/512/640 等 32 倍数 | 推理输入边长，默认 512；缺对应模型文件自动回退 640 |
+| `RMV_DET_DEVICE` | CPU/GPU/AUTO | 推理设备，默认 CPU；GPU 编译失败自动回退 CPU（有 iGPU 渲染节点 `/dev/dri` 的机器可用 GPU） |
+| `RMV_DET_MODEL` | yolo11 | 切换备选模型 yolo11.xml |
+
+### 512 输入 A/B 验收（2026-10-14，实拍视频抽帧）
+
+| 输入 | 红 64 帧 | 蓝 141 帧 | 平均耗时 |
+| --- | --- | --- | --- |
+| 640 | 64/64 | 141/141 | 16.2 / 21.8 ms |
+| 512 | 64/64 | 141/141 | 11.1 / 16.0 ms |
+
+2026-10-14 用户实机验收：512 在远处（~2m）角点抖动明显（有效像素 -36%，关键点
+回归噪声增大，实测同帧角点偏差 2.5~7.6px），**默认值定回 640**（定位稳优先）；
+512 模型与 `RMV_DET_SIZE=512` 保留，需要吞吐时可切。
+
+GPU 路径结论：本机 Intel iGPU 有 i915 驱动但容器内无 `/dev/dri` 渲染节点、
+`mknod` 被禁，OpenVINO 仅识别 CPU；NVIDIA 显卡 OpenVINO 不支持。
+GPU 回退逻辑已实装，宿主环境（有渲染节点）可直接 `RMV_DET_DEVICE=GPU` 使用。
 
 ## yolo11.xml / yolo11.bin（备选四点检测）
 
