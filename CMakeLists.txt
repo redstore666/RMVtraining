@@ -37,7 +37,6 @@ add_library(training_core STATIC
     src/AppSupport.cpp
     src/AutoAimTypes.cpp
     student/src/StudentTasks.cpp
-    student/src/ArmorClassifier.cpp
     student/src/ArmorDetectorNet.cpp
 )
 target_include_directories(training_core
@@ -119,11 +118,7 @@ add_executable(calibrate_intrinsics tools/calibrate_intrinsics.cpp)
 target_link_libraries(calibrate_intrinsics PRIVATE ${OpenCV_LIBS})
 target_include_directories(calibrate_intrinsics PRIVATE ${OpenCV_INCLUDE_DIRS})
 
-# ============ 任务 2 配套工具（数字分类 / 装甲板检测）============
-
-# 数字分类器独立测试：模型 + 预处理链路是否工作。
-add_executable(test_classifier tests/test_classifier.cpp)
-target_link_libraries(test_classifier PRIVATE training_core ${OpenCV_LIBS})
+# ============ 任务 2 配套工具（装甲板检测）============
 
 # 装甲板检测离线测试：调用 armor_detect，跑 tests/data/ 里的合成图。
 add_executable(test_detect tests/test_detect.cpp)
@@ -148,31 +143,4 @@ target_include_directories(test_camera_live PRIVATE ${OpenCV_INCLUDE_DIRS})
 # 同 test_camera：让 dlopen 能按 RPATH 找到 libFormatConversion.so。
 target_link_options(test_camera_live PRIVATE "-Wl,--disable-new-dtags")
 set_target_properties(test_camera_live PROPERTIES
-    BUILD_RPATH "/opt/MVS/lib/64")
-
-# 分类器烟雾测试（ctest -R classifier 运行）。
-add_test(NAME classifier_sticker_1
-    COMMAND test_classifier ${CMAKE_SOURCE_DIR}/tests/data/sticker_1.png
-    --onnx ${CMAKE_SOURCE_DIR}/models/armor_cls_64.onnx --expect 1)
-add_test(NAME classifier_sticker_5
-    COMMAND test_classifier ${CMAKE_SOURCE_DIR}/tests/data/sticker_5.png
-    --onnx ${CMAKE_SOURCE_DIR}/models/armor_cls_64.onnx --expect 5)
-add_test(NAME classifier_sticker_9neg
-    COMMAND test_classifier ${CMAKE_SOURCE_DIR}/tests/data/sticker_9neg.jpg
-    --onnx ${CMAKE_SOURCE_DIR}/models/armor_cls_64.onnx --expect 9neg)
-
-# VIDEO-RECORD TOOL
-add_executable(test_camera_record tests/test_camera_record.cpp)
-target_link_libraries(test_camera_record PRIVATE training_core ${OpenCV_LIBS})
-target_include_directories(test_camera_record PRIVATE ${OpenCV_INCLUDE_DIRS})
-target_link_options(test_camera_record PRIVATE "-Wl,--disable-new-dtags")
-set_target_properties(test_camera_record PROPERTIES
-    BUILD_RPATH "/opt/MVS/lib/64")
-
-# VIDEO-CAPTURE TOOL
-add_executable(test_camera_playback tests/test_camera_playback.cpp)
-target_link_libraries(test_camera_playback PRIVATE training_core ${OpenCV_LIBS})
-target_include_directories(test_camera_playback PRIVATE ${OpenCV_INCLUDE_DIRS})
-target_link_options(test_camera_playback PRIVATE "-Wl,--disable-new-dtags")
-set_target_properties(test_camera_playback PROPERTIES
     BUILD_RPATH "/opt/MVS/lib/64")

@@ -141,18 +141,13 @@ void drawDetections(cv::Mat &image, const std::vector<ArmorDetection> &detection
 {
     for (const ArmorDetection &det : detections)
     {
-        // 画框内缩（学长要求"识别框放中间"）：左右边从灯条外缘收到灯条中线附近。
-        // 内缩比例 ≈ 半条宽 / 外缘宽：小装甲板 ~4%、大装甲板 ~2%。
-        // 注意：只影响显示；检测角点、PnP、数字裁剪仍使用外缘角点
-        // （与物点模型 135/230mm 外缘尺寸一致，见 armor_solve 物点建模注释）。
-        const float inset = (det.size == ArmorSize::Small) ? 0.04F : 0.02F;
+        // 神经网络路线角点即装甲板四角（与 PnP 物点同源），直接从角点画框，
+        // 不再做"内收到灯条中线"的显示修正（那是传统路线灯条外缘口径的补偿）。
         std::vector<cv::Point> pts;
+        pts.reserve(4);
         for (int k = 0; k < 4; ++k)
         {
-            const cv::Point2f a = det.corners[k];
-            const int neighbor = (k % 2 == 0) ? k + 1 : k - 1; // TL↔TR、BR↔BL
-            const cv::Point2f p = a + (det.corners[neighbor] - a) * inset;
-            pts.emplace_back(cvRound(p.x), cvRound(p.y));
+            pts.emplace_back(cvRound(det.corners[k].x), cvRound(det.corners[k].y));
         }
 
         cv::polylines(image, pts, true, cv::Scalar(0, 255, 0), 2);

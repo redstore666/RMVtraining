@@ -1,54 +1,5 @@
 # models/ 离线模型资源
 
-## armor_cls_64.onnx
-
-装甲板数字分类器（9 类）。神经网络路线下编号由 YOLO 直接输出、armor_detect
-不再调用本模型；保留供 `tests/test_classifier` 链路自检与传统路线参考。
-
-| 项 | 值 |
-| --- | --- |
-| 网络 | YOLO26n-cls（Ultralytics 官方预训练 `yolo26n-cls.pt` 微调） |
-| 训练数据 | 课程提供数据集 `RMVtrainingHomework/datasets/`，9 类：`1,2,3,4,5,6outpost,7guard,8base,9neg` |
-| 训练配置 | imgsz=64，batch=256，flr=0，50 epochs 上限（早停于 34，最佳 14），seed=0 |
-| 验证结果 | 去重划分后 val top1 = 100%（1775 张）|
-| 导出 | ONNX opset 12，输入 1x3x64x64，输出 1x9 softmax（已含 softmax） |
-| 大小 | 6.2 MB |
-
-### 类别顺序（输出向量下标 → 含义）
-
-```
-0:'1'  1:'2'  2:'3'  3:'4'  4:'5'  5:'6outpost'  6:'7guard'  7:'8base'  8:'9neg'
-```
-
-对应 `ArmorDetection::target_id = index + 1`；`9neg` 表示"不是数字"，必须丢弃。
-
-### 推理预处理（必须与训练一致，ArmorClassifier 已实现）
-
-1. 灰度化（训练图是单通道贴纸裁片）；
-2. Otsu 二值化（训练图是"白字黑底"的二值图，二值化让实拍裁剪贴近训练分布）；
-3. 短边缩放到 64（截断取整），中心裁剪 64x64；
-4. /255 归一化，RGB 顺序，NCHW。
-
-### 重要：裁剪必须紧贴数字
-
-训练裁片里数字几乎充满整幅图。实测把"灯条间整个区域"直接送去分类
-（数字仅占画面 ~8%）会被判成 `9neg`。正确做法：二值化后取最大连通域
-（或面积 ≥ 最大域 10% 的连通域并集）的外接矩形，外扩约 15% 再送入分类。
-
-### 复现步骤
-
-```bash
-# 1) 划分（按 md5 去重，避免同帧重复样本跨 train/val）
-cd RMVtrainingHomework/train_cls && python3 split_data.py
-# 2) 训练
-yolo classify train data=dataset model=yolo26n-cls.pt imgsz=64 epochs=50 batch=256 \
-    fliplr=0.0 patience=20 cache=True seed=0
-# 3) 导出
-yolo export model=runs_cls/cls64_v2/weights/best.pt format=onnx opset=12 imgsz=64
-```
-
-训练脚本与完整结果（results.csv、混淆矩阵）在 `RMVtrainingHomework/train_cls/`。
-
 ## yolov5.xml / yolov5.bin（神经网络四点检测，主用，640 输入）
 
 装甲板四点关键点检测模型，OpenVINO IR（version 11），供 `ArmorDetectorNet` 使用。
@@ -94,7 +45,7 @@ outpost→6、base→8；extinguish/purple（熄灭/紫）直接丢弃（不可�
 - PnP 链路（test_solve）：距离抖动 ~1cm/帧，重投影误差 1.6~1.8px
   （同帧传统路线 2.6px）。
 
-## yolov5_512.xml / yolov5_512.bin（同网络 512 输入版，当前默认）
+## yolov5_512.xml / yolov5_512.bin（同网络 512 输入版）
 
 由 `tools/make_small_ir.py` 从 yolov5.xml 离线手术生成：Detect 头 3 个 Reshape
 常量改 `[1,3,22,0,-1]`（special_zero 动态化）、3 个 meshgrid 常量换成
@@ -144,13 +95,5 @@ GPU 回退逻辑已实装，宿主环境（有渲染节点）可直接 `RMV_DET_
 [42:50) 4 个关键点（letterbox 坐标），需按 y 分组、组内按 x 排序为 TL,TR,BR,BL
 ```
 
-## tiny_resnet.onnx（备选数字分类器）
-
-sp_vision_25 传统路线配套的数字分类器：32x32 灰度输入、9 类输出
-（one..five/sentry/outpost/base/not_armor）。本工程 NN 路线的编号由 YOLO
-直接输出，此模型仅归档备用；主用数字分类器仍为 armor_cls_64.onnx。
-
-### 部署链路验证记录（2026-10-03）
-
-- Python：手动预处理 + `cv2.dnn` 与 Ultralytics 推理在 54/54 张 val 图上 argmax 一致，概率最大偏差 0.0000；
-- C++：系统 OpenCV 4.5.4 `cv::dnn::readNetFromONNX` 加载成功，`tests/test_classifier` 验证通过。
+yolo11 解码器已实现但未经实拍 A/B（默认模型为 yolov5）；切换方式
+`RMV_DET_MODEL=yolo11`，实拍验收通过后再作为主用。

@@ -7,7 +7,7 @@
 //   ./build/test_batch tmp/blue-test --blue --save /tmp/batch_out
 //
 // 用途：实拍调参的量化工具（before/after 检出率对照、回归检查）。
-// 从仓库根目录运行（分类器模型按相对路径 models/armor_cls_64.onnx 加载）。
+// 从仓库根目录运行（检测模型按相对路径 models/ 加载）。
 #include "StudentTasks.hpp"
 
 #include <algorithm>

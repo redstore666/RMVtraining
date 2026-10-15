@@ -8,11 +8,12 @@
 //   ./build/test_detect tests/data/synth_dual_3_7_blue.png --blue --save /tmp/out.png
 //
 // 直接调用 student/src/StudentTasks.cpp 中的 armor_detect，打印检测结果；
-// --save 输出角点叠加图。合成测试图由 tools/gen_synth_armor.py 生成：
+// --save 输出角点叠加图。tests/data/ 下的合成图仅作链路冒烟用例
+// （传统视觉路线时期的遗产，NN 模型对合成图为分布外数据，检出为空属正常，
+// 实拍验收请用 test_batch）：
 //   synth_small_1.png / synth_large_5.png  单目标（红）
 //   synth_dual_3_7_blue.png                双目标（蓝）
 //   synth_tilted_2.png                     倾斜 12°（红）
-//   synth_fake_number.png                  配对成立但中间是噪声数字（应被分类器拒绝）
 //   synth_negative.png                     空场景（应无检测）
 #include "StudentTasks.hpp"
 
