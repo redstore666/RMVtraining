@@ -185,6 +185,12 @@ add_executable(test_detect tests/test_detect.cpp)
 target_link_libraries(test_detect PRIVATE training_core ${OpenCV_LIBS})
 target_include_directories(test_detect PRIVATE ${OpenCV_INCLUDE_DIRS})
 
+# 检测耗时基准：把 detect() 拆成 预处理/推理/解码 三段，并对比模型尺寸与
+# OpenVINO 线程数、性能提示（优化 detect 时间前先量清楚时间花在哪）。
+add_executable(bench_detect tests/bench_detect.cpp)
+target_link_libraries(bench_detect PRIVATE training_core ${OpenCV_LIBS})
+target_include_directories(bench_detect PRIVATE ${OpenCV_INCLUDE_DIRS})
+
 # 位姿解算离线测试：armor_detect → armor_solve，打印位姿（单位外参开发配置）。
 add_executable(test_solve tests/test_solve.cpp)
 target_link_libraries(test_solve PRIVATE training_core ${OpenCV_LIBS})
