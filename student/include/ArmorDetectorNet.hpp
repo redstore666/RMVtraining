@@ -49,17 +49,22 @@ public:
     };
 
     // 加载 OpenVINO IR 模型（xml 路径，bin 同名换后缀自动查找）。
-    // input_size 为推理输入边长（须与模型实际尺寸一致；512 输入需先用
-    // tools/make_small_ir.py 生成 models/yolov5_512.xml）。
+    // input_width/input_height 为推理输入尺寸（须与模型实际尺寸一致；非 640x640
+    // 的模型需先用 tools/make_small_ir.py 生成，例如
+    // `make_small_ir.py models/yolov5.xml models/yolov5_640x480 640x480`）。
+    // 相机是 4:3，640x480 输入与 640x640 相比图像内容与缩放比例完全相同，只是
+    // 不再为 160 行黑边算卷积，计算量少 25%。input_height 传 0 表示正方形。
     // device 为推理设备（"CPU"/"GPU"/"AUTO"；非 CPU 设备编译失败时自动回退 CPU）。
     // 预处理（BGR->RGB、/255）由 OpenVINO PrePostProcessor 融合进模型，
     // detect() 直接投 u8 letterbox 图像，省去两次全图拷贝。
-    bool load(const std::string &xml_path, ModelKind kind, int input_size,
-              const std::string &device, std::string &error);
+    bool load(const std::string &xml_path, ModelKind kind, int input_width,
+              int input_height, const std::string &device, std::string &error);
 
     bool ready() const { return ready_; }
     ModelKind kind() const { return kind_; }
-    int input_size() const { return input_size_; }
+    int input_size() const { return input_width_; } // 兼容旧名字：返回宽度
+    int input_width() const { return input_width_; }
+    int input_height() const { return input_height_; }
     const std::string &device() const { return device_; }
 
     // 对一帧 BGR 图像推理。输入为空或模型未就绪时返回空。
@@ -75,7 +80,8 @@ private:
     ov::CompiledModel compiled_;
     ov::InferRequest infer_request_;
     ModelKind kind_{ModelKind::YOLOv5};
-    int input_size_{kInputSize};
+    int input_width_{kInputSize};
+    int input_height_{kInputSize};
     std::string device_{"CPU"};
     cv::Mat canvas_; // 复用的 letterbox 画布（单线程使用）
     bool ready_{false};

@@ -44,7 +44,8 @@ double percentile(std::vector<double> values, double ratio)
 
 // 与 ArmorDetectorNet::load 完全一致地把预处理融合进模型图：
 // u8 BGR NHWC 直投，模型内转 RGB + /255。
-std::shared_ptr<ov::Model> buildPreprocessedModel(const std::string &xml_path, int size)
+std::shared_ptr<ov::Model> buildPreprocessedModel(const std::string &xml_path, int width,
+                                                 int height)
 {
     std::shared_ptr<ov::Model> model = ov::Core{}.read_model(xml_path);
     ov::preprocess::PrePostProcessor ppp(model);
@@ -52,7 +53,7 @@ std::shared_ptr<ov::Model> buildPreprocessedModel(const std::string &xml_path, i
         .set_element_type(ov::element::u8)
         .set_layout("NHWC")
         .set_color_format(ov::preprocess::ColorFormat::BGR)
-        .set_shape({1, static_cast<size_t>(size), static_cast<size_t>(size), 3});
+        .set_shape({1, static_cast<std::int64_t>(height), static_cast<std::int64_t>(width), 3});
     ppp.input().model().set_layout("NCHW");
     ppp.input().preprocess()
         .convert_color(ov::preprocess::ColorFormat::RGB)
@@ -75,7 +76,7 @@ double minOf(const InferRow &row)
 }
 
 // 只测推理：同一个 letterbox 画布反复 infer，排除 resize/解码的干扰。
-InferRow benchmarkInfer(ov::Core &core, const std::string &xml_path, int size,
+InferRow benchmarkInfer(ov::Core &core, const std::string &xml_path, int width, int height,
                         ov::hint::PerformanceMode hint, int threads, int repeats)
 {
     InferRow row;
@@ -87,10 +88,11 @@ InferRow benchmarkInfer(ov::Core &core, const std::string &xml_path, int size,
     {
         properties.emplace(ov::inference_num_threads(threads));
     }
-    ov::CompiledModel compiled = core.compile_model(buildPreprocessedModel(xml_path, size), "CPU", properties);
+    ov::CompiledModel compiled =
+        core.compile_model(buildPreprocessedModel(xml_path, width, height), "CPU", properties);
     ov::InferRequest request = compiled.create_infer_request();
 
-    cv::Mat canvas(size, size, CV_8UC3, cv::Scalar(30, 30, 30));
+    cv::Mat canvas(height, width, CV_8UC3, cv::Scalar(30, 30, 30));
     ov::Tensor input = request.get_input_tensor();
     std::memcpy(input.data(), canvas.data, canvas.total() * canvas.elemSize());
 
@@ -117,7 +119,8 @@ struct ModelCase
 {
     std::string label;
     std::string xml;
-    int size;
+    int width;
+    int height;
     ArmorDetectorNet::ModelKind kind;
 };
 
@@ -146,11 +149,18 @@ int main(int argc, char **argv)
     std::printf("图片: %s  %dx%d  重复 %d 次（热身 10 次）\n\n", image_path.c_str(), frame.cols,
                 frame.rows, repeats);
 
+    // 640x480 是生产默认（相机 4:3，640x640 的 160 行黑边是白算的）
     const std::vector<ModelCase> cases{
-        {"yolov5@640", "models/yolov5.xml", 640, ArmorDetectorNet::ModelKind::YOLOv5},
-        {"yolov5_512@512", "models/yolov5_512.xml", 512, ArmorDetectorNet::ModelKind::YOLOv5},
-        {"yolo11@640", "models/yolo11.xml", 640, ArmorDetectorNet::ModelKind::YOLO11},
+        {"yolov5@640x480", "models/yolov5_640x480.xml", 640, 480,
+         ArmorDetectorNet::ModelKind::YOLOv5},
+        {"yolov5@640x640", "models/yolov5.xml", 640, 640, ArmorDetectorNet::ModelKind::YOLOv5},
+        {"yolov5@512x512", "models/yolov5_512.xml", 512, 512,
+         ArmorDetectorNet::ModelKind::YOLOv5},
+        {"yolo11@640x640", "models/yolo11.xml", 640, 640, ArmorDetectorNet::ModelKind::YOLO11},
     };
+    const std::string sweep_xml = "models/yolov5_640x480.xml";
+    const int sweep_width = 640;
+    const int sweep_height = 480;
 
     // ---- 一、生产路径的端到端耗时（detect() 全流程）----
     std::printf("== 一、detect() 端到端（生产路径）==\n");
@@ -161,7 +171,8 @@ int main(int argc, char **argv)
     {
         ArmorDetectorNet detector;
         std::string error;
-        if (!detector.load(model_case.xml, model_case.kind, model_case.size, "CPU", error))
+        if (!detector.load(model_case.xml, model_case.kind, model_case.width,
+                           model_case.height, "CPU", error))
         {
             std::printf("%-24s 加载失败: %s\n", model_case.xml.c_str(), error.substr(0, 60).c_str());
             continue;
@@ -180,7 +191,8 @@ int main(int argc, char **argv)
             detections = result.size();
         }
         // 同一模型只测推理一段，用于把端到端拆成三段
-        const InferRow infer = benchmarkInfer(core, model_case.xml, model_case.size,
+        const InferRow infer = benchmarkInfer(core, model_case.xml, model_case.width,
+                                              model_case.height,
                                               ov::hint::PerformanceMode::LATENCY, 0, repeats);
         std::printf("%-24s %8.2f %8.2f %10.2f %8zu %8.2f\n", model_case.label.c_str(),
                     percentile(samples, 0.0), percentile(samples, 0.5),
@@ -223,7 +235,7 @@ int main(int argc, char **argv)
     }
 
     // ---- 三、推理线程数与性能提示 ----
-    std::printf("\n== 三、推理配置对比（yolov5@640）==\n");
+    std::printf("\n== 三、推理配置对比（yolov5@640x480）==\n");
     std::printf("%-24s %8s %8s %8s\n", "配置", "最小ms", "中位ms", "p90ms");
     for (const auto &config :
          std::vector<std::pair<ov::hint::PerformanceMode, int>>{
@@ -232,9 +244,71 @@ int main(int argc, char **argv)
              {ov::hint::PerformanceMode::THROUGHPUT, 0}})
     {
         const InferRow row =
-            benchmarkInfer(core, "models/yolov5.xml", 640, config.first, config.second, repeats);
+            benchmarkInfer(core, sweep_xml, sweep_width, sweep_height, config.first,
+                           config.second, repeats);
         std::printf("%-24s %8.2f %8.2f %8.2f\n", row.label.c_str(), minOf(row), row.median_ms,
                     row.p90_ms);
+    }
+
+    // ---- 四、AB 交替对比（机器有负载时唯一可信的比法）----
+    // 两个模型在同一进程里轮流推理，负载漂移对两者影响相同，比值可用。
+    std::printf("\n== 四、AB 交替（同进程轮流推理，抵消负载漂移）==\n");
+    {
+        struct AbCase
+        {
+            const char *label;
+            const char *xml;
+            int w;
+            int h;
+        };
+        const AbCase ab[2] = {{"yolov5@640x480", "models/yolov5_640x480.xml", 640, 480},
+                              {"yolov5@640x640", "models/yolov5.xml", 640, 640}};
+        ov::InferRequest request[2];
+        bool ok[2] = {true, true};
+        for (int i = 0; i < 2; ++i)
+        {
+            try
+            {
+                ov::CompiledModel compiled = core.compile_model(
+                    buildPreprocessedModel(ab[i].xml, ab[i].w, ab[i].h), "CPU",
+                    ov::AnyMap{ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY)});
+                request[i] = compiled.create_infer_request();
+                cv::Mat canvas(ab[i].h, ab[i].w, CV_8UC3, cv::Scalar(30, 30, 30));
+                std::memcpy(request[i].get_input_tensor().data(), canvas.data,
+                            canvas.total() * canvas.elemSize());
+                request[i].infer();
+            }
+            catch (const std::exception &error)
+            {
+                std::printf("%s 加载失败: %s\n", ab[i].label, error.what());
+                ok[i] = false;
+            }
+        }
+        if (ok[0] && ok[1])
+        {
+            std::vector<double> samples[2];
+            for (int r = 0; r < repeats; ++r)
+            {
+                for (int i = 0; i < 2; ++i)
+                {
+                    const auto begin = std::chrono::steady_clock::now();
+                    request[i].infer();
+                    const auto end = std::chrono::steady_clock::now();
+                    samples[i].push_back(
+                        std::chrono::duration<double, std::milli>(end - begin).count());
+                }
+            }
+            std::printf("%-18s %8s %8s %8s %8s\n", "配置", "最小ms", "p10ms", "中位ms",
+                        "p90ms");
+            for (int i = 0; i < 2; ++i)
+            {
+                std::printf("%-18s %8.2f %8.2f %8.2f %8.2f\n", ab[i].label,
+                            percentile(samples[i], 0.0), percentile(samples[i], 0.1),
+                            percentile(samples[i], 0.5), percentile(samples[i], 0.9));
+            }
+            const double ratio = percentile(samples[0], 0.0) / percentile(samples[1], 0.0);
+            std::printf("640x480 / 640x640 最小耗时比 = %.3f（面积比 0.750）\n", ratio);
+        }
     }
 
     return 0;

@@ -98,12 +98,13 @@ ArmorSize classifySizeByGeometry(const std::array<cv::Point2f, 4> &c)
 } // namespace
 
 bool ArmorDetectorNet::load(const std::string &xml_path, ModelKind kind,
-                            int input_size, const std::string &device,
+                            int input_width, int input_h, const std::string &device,
                             std::string &error)
 {
     try
     {
-        input_size_ = input_size;
+        input_width_ = input_width;
+        input_height_ = input_h > 0 ? input_h : input_width;
         // OpenVINO 直接读 IR（bin 同名换后缀自动查找），LATENCY 模式，
         // 与 sp_vision_25 standard3 配置一致。
         std::shared_ptr<ov::Model> model = core_.read_model(xml_path);
@@ -114,8 +115,8 @@ bool ArmorDetectorNet::load(const std::string &xml_path, ModelKind kind,
             .set_element_type(ov::element::u8)
             .set_layout("NHWC")
             .set_color_format(ov::preprocess::ColorFormat::BGR)
-            .set_shape({1, static_cast<size_t>(input_size_),
-                        static_cast<size_t>(input_size_), 3});
+            .set_shape({1, static_cast<std::int64_t>(input_height_),
+                        static_cast<std::int64_t>(input_width_), 3});
         ppp.input().model().set_layout("NCHW");
         ppp.input().preprocess()
             .convert_color(ov::preprocess::ColorFormat::RGB)
@@ -175,13 +176,13 @@ std::vector<ArmorDetectorNet::Detection> ArmorDetectorNet::detect(const cv::Mat 
     // 预处理：等比缩放 + 左上对齐放入黑画布（letterbox，与 sp_vision_25 一致，
     // padding 在右下，还原坐标只需 /scale）。画布复用，每帧清零后写入。
     const double scale =
-        std::min(static_cast<double>(input_size_) / bgr.rows,
-                 static_cast<double>(input_size_) / bgr.cols);
+        std::min(static_cast<double>(input_height_) / bgr.rows,
+                 static_cast<double>(input_width_) / bgr.cols);
     const int w = static_cast<int>(bgr.cols * scale);
     const int h = static_cast<int>(bgr.rows * scale);
     if (canvas_.empty())
     {
-        canvas_ = cv::Mat(input_size_, input_size_, CV_8UC3);
+        canvas_ = cv::Mat(input_height_, input_width_, CV_8UC3);
     }
     canvas_.setTo(cv::Scalar(0, 0, 0));
     cv::resize(bgr, canvas_(cv::Rect(0, 0, w, h)), cv::Size(w, h));

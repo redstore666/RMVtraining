@@ -358,18 +358,33 @@ namespace
             std::string error;
             const char *model_env = std::getenv("RMV_DET_MODEL");
             const bool use_yolo11 = model_env != nullptr && std::string(model_env) == "yolo11";
-            // 推理输入边长：默认 640（yolov5 原始训练尺寸，远处定位最稳）；
-            // RMV_DET_SIZE=512 可切小尺寸提速 ~30%（需 models/yolov5_512.xml，
-            // 由 tools/make_small_ir.py 生成；远处 2m 左右角点抖动明显增大，
-            // 2026-10-14 用户验收后决定默认回 640）。缺模型文件自动回退 640。
-            int size = 640;
+            // 推理输入尺寸：默认 640x480。相机是 4:3，640x640 输入会把 1440x1080
+            // 等比缩到 640x480 后剩下的 160 行全是黑边——图像内容与缩放比例和
+            // 640x640 完全相同，但那 25% 的卷积是白算的。改成 640x480 输入后
+            // 计算量 -25%，角点分辨率一点没变（不像 RMV_DET_SIZE=512 那样整体降采样）。
+            // RMV_DET_SIZE=512 或 640x480 可覆盖；缺对应模型文件时回退 640x640。
+            int width = 640;
+            int height = 480;
             if (const char *size_env = std::getenv("RMV_DET_SIZE"))
             {
-                const int requested = std::atoi(size_env);
-                if (requested >= 320 && requested % 32 == 0)
+                int w = 0;
+                int h = 0;
+                if (std::sscanf(size_env, "%dx%d", &w, &h) == 2 && h > 0)
                 {
-                    size = requested;
+                    width = w;
+                    height = h;
                 }
+                else if (std::sscanf(size_env, "%d", &w) == 1 && w > 0)
+                {
+                    width = w;
+                    height = w;
+                }
+            }
+            const auto size_valid = [](int value) { return value >= 320 && value % 32 == 0; };
+            if (!size_valid(width) || !size_valid(height))
+            {
+                width = 640;
+                height = 480;
             }
             // 推理设备：RMV_DET_DEVICE=GPU/AUTO 可切（有 iGPU 渲染节点的机器可用；
             // 编译失败自动回退 CPU）。
@@ -382,31 +397,39 @@ namespace
             const ArmorDetectorNet::ModelKind kind =
                 use_yolo11 ? ArmorDetectorNet::ModelKind::YOLO11
                            : ArmorDetectorNet::ModelKind::YOLOv5;
-            std::string path = "models/" + base + ".xml";
-            if (size != 640)
+            const std::string default_path = "models/" + base + ".xml";
+            std::string path = default_path;
+            if (!(width == 640 && height == 640))
             {
-                const std::string sized = "models/" + base + "_" + std::to_string(size) + ".xml";
+                path = "models/" + base + "_" + std::to_string(width) + "x" +
+                       std::to_string(height) + ".xml";
+            }
+            if (width == 640 && height == 640)
+            {
+                load_ok = detector.load(path, kind, width, height, device, error);
+            }
+            else
+            {
                 std::string sized_error;
-                if (detector.load(sized, kind, size, device, sized_error))
+                if (detector.load(path, kind, width, height, device, sized_error))
                 {
                     load_ok = true;
                 }
                 else
                 {
-                    std::cerr << "未找到 " << sized << "（" << sized_error.substr(0, 80)
-                              << "），回退 640 输入\n";
+                    std::cerr << "未找到 " << path << "（" << sized_error.substr(0, 80)
+                              << "），回退 640x640 输入\n";
                     detector = ArmorDetectorNet{};
-                    load_ok = detector.load(path, kind, 640, device, error);
+                    width = 640;
+                    height = 640;
+                    path = default_path;
+                    load_ok = detector.load(path, kind, width, height, device, error);
                 }
-            }
-            else
-            {
-                load_ok = detector.load(path, kind, size, device, error);
             }
             if (load_ok)
             {
-                std::cout << "神经网络检测器就绪: " << base << " " << detector.input_size()
-                          << "x" << detector.input_size() << " device=" << detector.device()
+                std::cout << "神经网络检测器就绪: " << base << " " << detector.input_width()
+                          << "x" << detector.input_height() << " device=" << detector.device()
                           << "\n";
             }
             else
