@@ -11,6 +11,18 @@ namespace rotating_armor
 {
 namespace
 {
+const char *stable_reason(bool enough_updates, bool phase_ok, bool fresh, double age_s)
+{
+    if (!enough_updates)
+        return "few_updates";
+    if (!phase_ok)
+        return "phase";
+    if (!fresh)
+        return "stale";
+    if (age_s > 0.6)
+        return "timeout";
+    return "stable";
+}
 
 constexpr double kPi = 3.141592653589793238462643383279502884;
 // 四块装甲板 90 度对称：相位只有 mod pi/2 的可辨识性。
@@ -338,7 +350,7 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
             }
         }
         if (pick == nullptr ||
-            (!pick_handoff && handoff) ||
+            (pick_handoff && !handoff) ||
             (!pick_handoff && !handoff && std::fabs(delta) < std::fabs(wrapToPi(pick->yaw - last_yaw))))
         {
             pick = &observation;
@@ -851,9 +863,15 @@ PredictionResult RotatingArmorTracker::buildResult(const GimbalState &gimbal,
     }
     const State &state = ekf_.state();
 
+    // 新鲜度按"距上次被接收的更新多少秒"判，不按丢帧数：相机帧率变化时
+    // 帧数门限的含义会漂移（166fps 下 2 帧只有 12ms，实拍里会长期卡在 Unstable）。
+    const double stale_s = has_accept_ ? (timestamp_s - last_accept_s_) : 1e9;
+    const bool fresh_enough = has_accept_ && stale_s <= config_.stale_after_s;
+    diagnostics_.stability = stable_reason(consecutive_updates_ >= config_.stable_updates,
+                                             ekf_.phase_resolved(), fresh_enough,
+                                             timestamp_s - last_accept_s_);
     const bool stable = consecutive_updates_ >= config_.stable_updates &&
-                        ekf_.phase_resolved() &&
-                        missed_frames_ < config_.unstable_after_missed && has_accept_ &&
+                        ekf_.phase_resolved() && fresh_enough &&
                         (timestamp_s - last_accept_s_ <= config_.timeout_s);
     result.state = stable ? TrackingState::Stable : TrackingState::Unstable;
     result.target_id = static_cast<std::uint8_t>(std::min(std::max(target_id_, 0), 255));
@@ -1087,7 +1105,8 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
     }
     // 这个检查只为"声明了不转、其实在转"准备：转速明显不为 0 时它没有意义
     // （旋转目标本来就会让板面法向持续扫动），反而会把自己刚锁上的旋转目标打掉。
-    if (std::fabs(ekf_.state()(7)) < 3.0 && declarationContradicted(world, timestamp_seconds))
+    if (config_.contradiction_check && std::fabs(ekf_.state()(7)) < 3.0 &&
+        declarationContradicted(world, timestamp_seconds))
     {
         dropTarget("declaration_contradicted");
         return PredictionResult{};

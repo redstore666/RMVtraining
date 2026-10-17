@@ -196,6 +196,25 @@ P50≈8），不是拍脑袋。
 ./build/test_ekf_pipeline                 # 打印 crc 计数与逐帧协议字段
 ```
 
+真数据回放用 `tests/test_camera_playback`（不在 ctest 里，需要视频文件）：
+
+```bash
+./build/test_camera_playback tmp/v4.avi --red --ekf --headless                 # 汇总
+./build/test_camera_playback tmp/v4.avi --red --ekf --headless --only-id 3     # 只看某编号
+./build/test_camera_playback tmp/v4.avi --red --ekf --headless --trace         # 逐帧诊断
+./build/test_camera_playback tmp/v4.avi --red --ekf --csv build/v4.csv         # 导出观测/EKF
+```
+
+`--trace` 每帧打印 `phase`（0=Idle/1=Collecting/2=Tracking）、锁定编号、累计接收
+更新数、本帧拒绝数、丢帧数、重锁次数、状态量 `omega/R/yaw`、最近 NIS、
+`why`（最近一次拒绝原因）与 `stab`（本帧 `Stable/Unstable` 的判定理由：
+`stable`/`stale`/`few_updates`/`phase`）。调 EKF 时先看 `stability`，
+它比"板残差"更能指出问题在观测还是状态。
+
+几个与实拍相关的默认值（都在 `TrackerConfig`）：`bootstrap_updates=10`（锁定期前
+10 次更新不做 NIS 否决）、`stale_after_s=0.10`（新鲜度按秒判，不按帧数）、
+`contradiction_check=false`（声明反驳在真数据上会误杀，默认关）。
+
 三条从这个环节得到的教训（数值见 `docs/实验报告.md` §4.6）：
 
 1. **单帧拟合残差不能判收敛**。板残差 4~8 mm 时车体中心仍可能差 0.3~0.43 m，

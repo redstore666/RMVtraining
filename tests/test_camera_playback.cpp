@@ -115,6 +115,7 @@ namespace
         double bias_s{0.0};
         int dump_every{0};
         int only_id{0};
+        bool trace{false};
     };
 
     bool parseArgs(int argc, char **argv, Args &args)
@@ -157,6 +158,8 @@ namespace
                 args.csv_path = next("--csv");
             else if (arg == "--dump-every")
                 args.dump_every = std::max(0, std::atoi(next("--dump-every").c_str()));
+            else if (arg == "--trace")
+                args.trace = true;
             else if (arg == "--only-id")
                 args.only_id = std::atoi(next("--only-id").c_str());
             else if (arg == "--config")
@@ -452,6 +455,18 @@ int main(int argc, char **argv)
             prediction = tracker.step(poses, gimbal, time_s, 0.0);
             diagnostics = tracker.diagnostics();
             final_diagnostics = diagnostics;
+            if (args.trace)
+            {
+                const auto &st = tracker.ekf().state();
+                std::printf("[trace] f=%d t=%.3f det=%zu phase=%d id=%d ok=%llu rej=%d miss=%d "
+                            "relock=%d ls=%d omega=%.2f R=%.3f yaw=%.2f nis=%.1f why=%s stab=%s\n",
+                            frame_index, time_s, poses.size(),
+                            static_cast<int>(diagnostics.phase), diagnostics.target_id,
+                            static_cast<unsigned long long>(diagnostics.accepted_updates),
+                            diagnostics.rejected_this_frame, diagnostics.missed_frames,
+                            diagnostics.relock_count, diagnostics.lock_samples, st(7), st(8), st(6), diagnostics.last_nis,
+                            diagnostics.last_reject.c_str(), diagnostics.stability.c_str());
+            }
             final_prediction = prediction;
             ekf_accepted = static_cast<long>(diagnostics.accepted_updates);
             ekf_rejected += diagnostics.rejected_this_frame;

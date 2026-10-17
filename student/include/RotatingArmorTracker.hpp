@@ -45,8 +45,8 @@ struct TrackerConfig
     double normal_sigma_rad{0.35};
 
     // === 锁定 ===
-    int lock_min_samples{10};         // 至少攒到的帧数（只收带法向的观测）
-    double lock_min_span_s{0.30};     // 至少覆盖的时间跨度（短了圆拟合与转速都不可辨）
+    int lock_min_samples{8};         // 至少攒到的帧数（只收带法向的观测）
+    double lock_min_span_s{0.18};     // 至少覆盖的时间跨度（短了圆拟合与转速都不可辨）
     double lock_max_age_s{0.50};      // 更早的样本丢掉（目标可能已经换了）
     double radius_prior_m{0.25};      // 无数据先验：实车按底盘实测
     double radius_sigma_m{0.10};
@@ -57,13 +57,17 @@ struct TrackerConfig
 
     // === 关联 / 门限 ===
     double position_gate_m{0.60}; // 单板位置门限（含中心先验不确定的余量）
-    double nis_gate{11.34};
-    int bootstrap_updates{10}; // 锁定期头几次更新先放宽 NIS 门（初值靠单帧法向，偏差可比预想大）       // chi2(3 dof) 99.5%
+    double nis_gate{11.34};      // chi2(3 dof) 99.5%
+    int bootstrap_updates{10};   // 锁定期头几次更新先放宽 NIS 门（初值靠单帧法向，偏差可比预想大）
+    // 声明反驳检查：法向历史里混入相邻板样本时斜率会失真，实拍里会误杀，
+    // 默认关闭；需要时打开（合成夹具与 v4 的静止车都不需要它）。
+    bool contradiction_check{false};
     int max_updates_per_frame{2}; // 同一帧最多用几块板更新（防止病态约束）
 
     // === 状态机 ===
     int stable_updates{12};          // 连续接受多少帧才允许报 Stable
-    int unstable_after_missed{2};    // 连续丢多少帧降级为 Unstable
+    int unstable_after_missed{2};    // 仅供诊断：Stable 的降级判据已改为按秒（见 stale_after_s）
+    double stale_after_s{0.10};      // 距上次被接收更新超过此秒数即判 Unstable
     double timeout_s{0.60};          // 超过多久没有任何有效观测 -> 注销
 
     // === 声明校验（Static/Spinning 被数据反驳时重锁）===
@@ -110,6 +114,7 @@ struct TrackerDiagnostics
     int target_id{0};
     int relock_count{0};
     std::string last_reject;
+    std::string stability; // 本帧 Stable/Unstable 的判定理由
     // 本帧预测出的瞄准点（世界系），离线回放评估用：与同帧检测到的板心比距离。
     Eigen::Vector3d predicted_aim_world{0.0, 0.0, 0.0};
 };
