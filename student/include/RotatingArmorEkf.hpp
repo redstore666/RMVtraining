@@ -101,12 +101,18 @@ public:
     // 回到"未初始化"：状态与协方差清零，需要重新 initialize()。
     void reset();
 
+    // 掉线快照续接：把掉线前一刻的状态/协方差原样装回去（跳过重新收集样本）。
+    // 只用于"同一编号、间隔很短又出现"的情形，由上层判定是否该续接。
+    bool restore(const State &state, const Covariance &covariance, bool phase_resolved,
+                 bool spin_pinned);
+
     bool initialized() const { return initialized_; }
 
     // true 表示初相由板面法向确定，此后 yaw 的含义立即可以解释；
     // false 表示走的是降级路径（相位靠 omega 先验 + 后续观测收敛），
     // 此时 yaw 需要多帧才可信，调用方不应据此直接开火。
     bool phase_resolved() const { return phase_resolved_; }
+    bool spinPinned() const { return spin_pinned_; }
 
     // 首帧锁定。成功时状态正好与这一帧观测一致（残差为 0），
     // 因此不需要再补一次 update()。失败时不改变滤波器状态。

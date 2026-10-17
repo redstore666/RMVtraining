@@ -57,6 +57,19 @@ void RotatingArmorEkf::reset() {
     spin_pinned_ = false;
 }
 
+bool RotatingArmorEkf::restore(const State &state, const Covariance &covariance,
+                               bool phase_resolved, bool spin_pinned) {
+    if (!state.allFinite() || !covariance.allFinite() || !(state(8) > 0.0)) {
+        return false;
+    }
+    state_ = state;
+    covariance_ = covariance;
+    phase_resolved_ = phase_resolved;
+    spin_pinned_ = spin_pinned;
+    initialized_ = true;
+    return true;
+}
+
 EkfInitStatus RotatingArmorEkf::initialize(const ArmorObservation& observation,
                                            const EkfInitPrior& prior) {
     if (config_.plate_count <= 0 || prior.plate_slot < 0 ||

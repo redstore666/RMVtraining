@@ -174,6 +174,16 @@ void RotatingArmorTracker::reset()
 
 void RotatingArmorTracker::dropTarget(const char *reason)
 {
+    if (config_.relock_reuse_enabled && ekf_.initialized())
+    {
+        snapshot_state_ = ekf_.state();
+        snapshot_covariance_ = ekf_.covariance();
+        snapshot_s_ = state_timestamp_s_;
+        snapshot_id_ = target_id_;
+        snapshot_phase_resolved_ = ekf_.phase_resolved();
+        snapshot_spin_pinned_ = ekf_.spinPinned();
+        has_snapshot_ = true;
+    }
     reset();
     ++relock_count_;
     diagnostics_.relock_count = relock_count_;
@@ -777,6 +787,63 @@ void RotatingArmorTracker::updateRadiusFromPairs(const std::vector<WorldObservat
     }
 }
 
+// 掉线快照续接：注销后不久、同一编号又出现时，直接恢复掉线前的状态，
+// 跳过"重新收集 10 个样本 + 等跨度"的 Collecting。
+bool RotatingArmorTracker::tryRestoreSnapshot(const std::vector<WorldObservation> &world,
+                                              double timestamp_seconds)
+{
+    if (!config_.relock_reuse_enabled || !has_snapshot_ || snapshot_id_ == 0)
+    {
+        return false;
+    }
+    const double gap = timestamp_seconds - snapshot_s_;
+    if (!(gap >= 0.0) || gap > config_.relock_reuse_s)
+    {
+        return false;
+    }
+    bool present = false;
+    for (const WorldObservation &observation : world)
+    {
+        if (observation.target_id == snapshot_id_)
+        {
+            present = true;
+            break;
+        }
+    }
+    if (!present)
+    {
+        return false;
+    }
+    if (!ekf_.restore(snapshot_state_, snapshot_covariance_, snapshot_phase_resolved_,
+                      snapshot_spin_pinned_))
+    {
+        return false;
+    }
+    target_id_ = snapshot_id_;
+    // reset() 会把 diagnostics_ 清成默认值（target_id=0）；续接后必须把对外
+    // 可见的编号/相位补回去，否则上层会以为"还在收集"，指标也会漏掉这些帧。
+    diagnostics_.phase = LockPhase::Tracking;
+    diagnostics_.target_id = target_id_;
+    // 用真实间隔推进一次协方差（旋转目标在 gap 里可能转了几十度，滤波器的
+    // 外推至少把不确定性放大到位，真接不上就让门限拒掉、再走正常重锁）。
+    if (gap > 1.0e-9 && !ekf_.predict(gap))
+    {
+        ekf_.reset();
+        return false;
+    }
+    state_timestamp_s_ = timestamp_seconds;
+    // 续接帧不算"刚被观测"：新鲜度按真实空窗算（gap 内目标可能已经转过几十度），
+    // 所以 Unstable 是诚实的；但把连续更新数留到"再吃一次更新就 Stable"，
+    // 不然每次续接都要白等 10 帧。
+    has_accept_ = true;
+    last_accept_s_ = snapshot_s_;
+    consecutive_updates_ = std::max(0, config_.stable_updates - 1);
+    missed_frames_ = 0;
+    has_snapshot_ = false;
+    diagnostics_.last_reject = "snapshot_restore";
+    return true;
+}
+
 int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation> &world,
                                              double timestamp_s)
 {
@@ -1129,7 +1196,8 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
     if (!ekf_.initialized())
     {
         diagnostics_.phase = LockPhase::Collecting;
-        if (tryLock(world, timestamp_seconds, gimbal))
+        if (tryRestoreSnapshot(world, timestamp_seconds) ||
+            tryLock(world, timestamp_seconds, gimbal))
         {
             return buildResult(gimbal, timestamp_seconds);
         }

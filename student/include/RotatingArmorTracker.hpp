@@ -94,6 +94,15 @@ struct TrackerConfig
     double stale_min_frames{5.0};
     double stale_min_s{0.05};
     double timeout_s{0.60};          // 超过多久没有任何有效观测 -> 注销
+    // 掉线快照续接：注销时把状态留一份，同一编号在 relock_reuse_s 内又出现，
+    // 直接把旧状态装回去，省掉 10 个样本的重新收集。
+    // 默认关闭：实测（v4 --only-id 3 / v1）续接能多救回 10% 的帧、把 Collecting
+    // 从 319 帧压到 233 帧、p99 从 0.99 m 降到 0.58 m，但**中位残差变差**
+    // （99 -> 115 mm），因为救回来的那批帧本身就是"拿 0.25 s 前的状态外推"，
+    // 旋转目标在空窗里已经转过几十度。空窗越短越糟（0.10 s 时中位 1.35 m），
+    // 说明这类帧不是"续一下就好"，而是必须重新锁定。
+    bool relock_reuse_enabled{false};
+    double relock_reuse_s{0.25};
 
     // === 声明校验（Static/Spinning 被数据反驳时重锁）===
     int relock_frames{6};
@@ -152,6 +161,7 @@ public:
     explicit RotatingArmorTracker(TrackerConfig config = TrackerConfig{});
 
     void reset();
+
 
     // 与 ekf_predict 同签名：喂进本帧的全部装甲板位姿，返回本帧应该发出去的结果。
     // 没有目标、时间戳非法或跟踪失效时返回默认的 NoTarget 结果。
@@ -216,6 +226,8 @@ private:
     int associateAndUpdate(const std::vector<WorldObservation>& world, double timestamp_s);
     // 同帧双板弦长 -> 半径观测（见 .cpp 里的推导）。
     void updateRadiusFromPairs(const std::vector<WorldObservation> &world);
+    // 掉线快照续接（见 config_.relock_reuse_enabled）。
+    bool tryRestoreSnapshot(const std::vector<WorldObservation> &world, double timestamp_seconds);
 
     // 声明是否被观测反驳（Static/Spinning 判错、或目标转速突变）。
     bool declarationContradicted(const std::vector<WorldObservation>& world,
@@ -244,6 +256,14 @@ private:
     double last_accept_s_{0.0};
     double measured_latency_s_{0.0};
     bool has_accept_{false};
+    // 掉线快照（注销时留一份，短间隔内同编号再现就直接续上）。
+    bool has_snapshot_{false};
+    State snapshot_state_{State::Zero()};
+    Covariance snapshot_covariance_{Covariance::Zero()};
+    double snapshot_s_{0.0};
+    int snapshot_id_{0};
+    bool snapshot_phase_resolved_{false};
+    bool snapshot_spin_pinned_{false};
     int consecutive_updates_{0};
     int missed_frames_{0};
     int other_id_streak_{0};

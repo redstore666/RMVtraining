@@ -513,9 +513,9 @@ int main(int argc, char **argv)
             if (args.trace)
             {
                 const auto &st = tracker.ekf().state();
-                std::printf("[trace] f=%d t=%.3f det=%zu phase=%d id=%d ok=%llu rej=%d miss=%d "
+                std::printf("[trace] f=%d t=%.3f det=%zu init=%d phase=%d id=%d ok=%llu rej=%d miss=%d "
                             "relock=%d ls=%d omega=%.2f R=%.3f yaw=%.2f nis=%.1f why=%s stab=%s gd=%.2f gn=%.0f\n",
-                            frame_index, time_s, poses.size(),
+                            frame_index, time_s, poses.size(), static_cast<int>(tracker.initialized()),
                             static_cast<int>(diagnostics.phase), diagnostics.target_id,
                             static_cast<unsigned long long>(diagnostics.accepted_updates),
                             diagnostics.rejected_this_frame, diagnostics.missed_frames,
