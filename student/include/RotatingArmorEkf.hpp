@@ -71,6 +71,10 @@ struct EkfInitPrior {
     double yaw_sigma_rad{0.2};         // 仅"有板面法向"时生效；无相位先验时强制为 pi
     double yaw_rate_sigma_rad_s{3.0};  // spin == Spinning 时生效；Static 时强制为 0
     double radius_sigma_m{0.05};
+    // 把半径钉在 radius_m 上：单板观测下 (中心, 半径) 的退化会让位置更新把 R
+    // 一点点拉走（实拍 v4 旋转目标 R 从 0.25 漂到 0.147，中心随之跑 1.4 m），
+    // 所以默认不让位置更新动 R；需要在线估半径时用 updateRadius/pair 更新。
+    bool radius_fixed{false};
 };
 
 enum class EkfInitStatus : std::uint8_t {
@@ -155,6 +159,10 @@ public:
     // 只改 yaw 会把板挪走、再被位置更新拉回来，两个更新互相打架；
     // 改完 yaw 把中心平移回去、让那块板留在原地，等价于"沿可观方向更新"。
     void shiftCenter(const Eigen::Vector3d& delta) { state_.head<3>() += delta; }
+
+    // 把车体相位整体转 delta（换板重绑用）。这是状态空间沿 theta 轴的平移，
+    // 误差坐标不变，所以协方差不用动。
+    void rotatePhase(double delta) { state_(6) = wrapAngle(state_(6) + delta); }
     const Covariance& covariance() const { return covariance_; }
     const EkfConfig& config() const { return config_; }
 
@@ -163,6 +171,9 @@ private:
     State state_{State::Zero()};
     Covariance covariance_{Covariance::Zero()};
     bool initialized_{false};
+    // 半径钉死：位置更新不动 R（见 EkfInitPrior::radius_fixed 的说明）。
+    bool radius_fixed_{true};
+    double radius_prior_m_{0.0};
     bool phase_resolved_{false};
     // spin == Static 时置位：角速度的初始方差与过程噪声都被钉成 0，使它成为硬约束。
     bool spin_pinned_{false};

@@ -130,8 +130,11 @@ namespace
         double bias_s{0.0};
         int dump_every{0};
         int only_id{0};
+        double radius_prior{0.25};
         bool trace{false};
     bool phase_yaw{false};
+    double sigma_pos{0.03};
+    double handoff_scale{2.5};
     double phase_sigma{0.12};
     std::string dump_csv;
     };
@@ -178,6 +181,10 @@ namespace
                 args.dump_every = std::max(0, std::atoi(next("--dump-every").c_str()));
             else if (arg == "--trace")
                 args.trace = true;
+            else if (arg == "--sigma-pos")
+                args.sigma_pos = std::stod(next("--sigma-pos"));
+            else if (arg == "--handoff-scale")
+                args.handoff_scale = std::stod(next("--handoff-scale"));
             else if (arg == "--phase-yaw")
                 args.phase_yaw = true;
             else if (arg == "--phase-sigma")
@@ -186,6 +193,8 @@ namespace
                 args.dump_csv = next("--dump");
             else if (arg == "--only-id")
                 args.only_id = std::atoi(next("--only-id").c_str());
+            else if (arg == "--radius")
+                args.radius_prior = std::atof(next("--radius").c_str());
             else if (arg == "--config")
                 args.config_path = next("--config");
             else
@@ -329,6 +338,9 @@ int main(int argc, char **argv)
 
     // EKF 侧统计。
     rotating_armor::TrackerConfig tracker_config;
+    tracker_config.position_sigma_m = args.sigma_pos;
+    tracker_config.handoff_sigma_scale = args.handoff_scale;
+    tracker_config.radius_prior_m = args.radius_prior;
     if (args.phase_yaw)
     {
         tracker_config.phase_update_enabled = true;
@@ -573,6 +585,12 @@ int main(int argc, char **argv)
                             diagnostics.relock_count, diagnostics.lock_samples, st(7), st(8), st(6), diagnostics.last_nis,
                             diagnostics.last_reject.c_str(), diagnostics.stability.c_str(),
                             diagnostics.best_gate_distance_m, diagnostics.best_gate_nis);
+                        if (diagnostics.phase == rotating_armor::LockPhase::Tracking)
+                        {
+                            const auto &st = tracker.ekf().state();
+                            std::printf("   v=(%.2f,%.2f) c=(%.2f,%.2f)\n", st(1), st(3),
+                                        st(0), st(2));
+                        }
             }
             final_prediction = prediction;
             ekf_accepted = static_cast<long>(diagnostics.accepted_updates);
@@ -676,15 +694,23 @@ int main(int argc, char **argv)
                 std::vector<cv::Point2d> projected;
                 cv::projectPoints(model_points, cv::Vec3d(0, 0, 0), cv::Vec3d(0, 0, 0),
                                   camera.camera_matrix, cv::noArray(), projected);
+                // 只把"跟踪中的那块板"(aim slot) 画实：另外 3 块是模型外推到车体
+                // 背面的，本来就看不见，画出来会像"满天飞的点"，容易误判成状态错了。
                 for (int slot = 0; slot < 4; ++slot)
                 {
-                    const cv::Scalar color = (slot == diagnostics.aim_slot) ? cv::Scalar(0, 0, 255)
-                                                                          : cv::Scalar(0, 180, 255);
-                    cv::circle(frame, projected[slot], 9, color, 2);
-                    char tag[16];
-                    std::snprintf(tag, sizeof(tag), "M%d", slot);
-                    cv::putText(frame, tag, projected[slot] + cv::Point2d(10, -10),
-                                cv::FONT_HERSHEY_SIMPLEX, 0.6, color, 2);
+                    if (slot == diagnostics.aim_slot)
+                    {
+                        continue;
+                    }
+                    cv::drawMarker(frame, projected[slot], cv::Scalar(120, 120, 120),
+                                   cv::MARKER_TILTED_CROSS, 8, 1);
+                }
+                if (diagnostics.aim_slot >= 0 && diagnostics.aim_slot < 4)
+                {
+                    const cv::Point2d p = projected[diagnostics.aim_slot];
+                    cv::circle(frame, p, 9, cv::Scalar(255, 0, 255), 2);
+                    cv::putText(frame, "AIM", p + cv::Point2d(12, -12), cv::FONT_HERSHEY_SIMPLEX,
+                                0.6, cv::Scalar(255, 0, 255), 2);
                 }
                 // 车体中心
                 const Eigen::Vector3d c_world = ekf_state.head<3>();

@@ -180,8 +180,16 @@ struct Rig
     // 传给跟踪器的"本帧视觉处理延迟"，用于验证预测时域包含它。
     double latency_s{0.0};
 
+    // 合成场景要验证"半径从坏初值收敛"，所以默认关掉实时跟踪用的半径钉死。
+    static rotating_armor::TrackerConfig defaultConfig()
+    {
+        rotating_armor::TrackerConfig config;
+        config.freeze_radius = false;
+        return config;
+    }
+
     explicit Rig(const rotating_armor::State &initial_truth,
-                 rotating_armor::TrackerConfig config = {})
+                 rotating_armor::TrackerConfig config = defaultConfig())
         : truth(initial_truth), tracker(config)
     {
     }

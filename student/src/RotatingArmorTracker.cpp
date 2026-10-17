@@ -575,7 +575,7 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
     prior.spin = is_static ? SpinPriorKind::Static : SpinPriorKind::Spinning;
     prior.yaw_rate_prior_rad_s = is_static ? 0.0 : omega;
     prior.position_sigma_m = 0.15;
-    prior.velocity_sigma_m_s = 1.0;
+    prior.velocity_sigma_m_s = config_.velocity_sigma_m_s;
     // 首帧的相位来自单帧板面法向（实拍里小目标法向抖动可达 10 度以上），
     // 初值给宽容一点，让随后的更新把它拉正；给太紧会把 0.2-0.3m 的初值偏差
     // 全部判成离群，于是整段跟踪 0 次更新。
@@ -583,6 +583,7 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
     prior.yaw_rate_sigma_rad_s =
         is_static ? 0.0 : clampd(2.0 * slope_error, 0.8, 6.0);
     prior.radius_sigma_m = config_.radius_sigma_m;
+    prior.radius_fixed = config_.freeze_radius;
 
     ArmorObservation observation;
     observation.position = last.position;
@@ -591,6 +592,7 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
         // 双板解出的几何直接覆盖：半径来自两块板的弦长，中心来自射线交点。
         prior.radius_m = pair_radius;
         prior.radius_sigma_m = std::min(config_.radius_sigma_m, 0.05);
+        prior.radius_fixed = config_.freeze_radius;
         observation.position = pair_position;
     }
     observation.sigma_position_m = config_.position_sigma_m;
@@ -718,7 +720,7 @@ bool RotatingArmorTracker::reinitializeFromPair(const std::vector<WorldObservati
             prior.spin = SpinPriorKind::Spinning;
             prior.yaw_rate_prior_rad_s = ekf_.state()(7);
             prior.position_sigma_m = 0.10;
-            prior.velocity_sigma_m_s = 1.0;
+            prior.velocity_sigma_m_s = config_.velocity_sigma_m_s;
             prior.yaw_sigma_rad = 0.50;
             prior.yaw_rate_sigma_rad_s = 4.0;
             prior.radius_sigma_m = 0.05;
@@ -872,7 +874,8 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
             }
             ArmorObservation observation;
             observation.position = world[i].position;
-            observation.sigma_position_m = world[i].sigma_position_m;
+            observation.sigma_position_m =
+                std::hypot(world[i].sigma_position_m, config_.association_sigma_floor_m);
             for (int slot = 0; slot < plate_count; ++slot)
             {
                 const Eigen::Vector3d predicted = platePosition(ekf_.state(), slot, plate_count);
@@ -881,12 +884,11 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                 // 2*pi/N 的可辨识度，观测落到哪块板上本身带一个槽位的歧义。
                 // 不放大 R 的话，静止时把协方差压得很小的滤波器会把换板观测
                 // 全判成 NIS 离群（实拍 v4 旋转目标 416/718 帧就是这样丢的）。
-                ArmorObservation slot_observation = observation;
-                if (slot != aim_slot_)
-                {
-                    slot_observation.sigma_position_m =
-                        observation.sigma_position_m * config_.handoff_sigma_scale;
-                }
+                // 不再因为"换板"放大 sigma：观测已经分配给最近的预测板，
+                // 板编号的 2*pi/N 歧义已经在关联里消化掉了。放大 sigma 等于
+                // 告诉滤波器"这帧别信"，而实拍里单板可见时每帧都可能换板，
+                // 结果就是状态永远被弱更新拖着走、ω 学不上去。
+                const ArmorObservation &slot_observation = observation;
                 diagnostics_.best_gate_distance_m =
                     std::min(diagnostics_.best_gate_distance_m, distance);
                 if (!(distance <= config_.position_gate_m))
@@ -926,14 +928,19 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
         const WorldObservation &chosen = world[static_cast<std::size_t>(best_observation)];
         ArmorObservation observation;
         observation.position = chosen.position;
-        observation.sigma_position_m = chosen.sigma_position_m;
-        if (best_slot != aim_slot_)
-        {
-            observation.sigma_position_m *= config_.handoff_sigma_scale;
-        }
+        observation.sigma_position_m =
+            std::hypot(chosen.sigma_position_m, config_.association_sigma_floor_m);
         if (!ekf_.update(observation, best_slot))
         {
             break;
+        }
+        // 瞄准槽位跟着观测到的板走：4 块板物理上等价，把瞄准点绑在"刚看到
+        // 的那块"上误差最小；不重绑的话对外发布的瞄准点会指向模型外推 90 度
+        // 的另一块板，误差随相位漂移一起放大。
+        if (best_slot != aim_slot_)
+        {
+            aim_slot_ = best_slot;
+            diagnostics_.aim_slot = best_slot;
         }
         used[static_cast<std::size_t>(best_observation)] = true;
         ++accepted;

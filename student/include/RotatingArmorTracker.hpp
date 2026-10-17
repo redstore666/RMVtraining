@@ -41,6 +41,10 @@ struct TrackerConfig
     // 位置噪声（米）。单帧 PnP 的板心抖动实测约 1cm，这里取 3cm 留出
     // "倾斜角/四角点抖动"的余量；重投影误差大的观测再按比例放大。
     double position_sigma_m{0.03};
+    // 车体平动速度的先验：单板可见时"板在动"和"车在动"不可分，把速度放开
+    // 会让滤波器把旋转解释成平移、中心以 1 m/s 飞出去（实拍 v4 旋转目标
+    // 中心跑 1.4 m 后位置门全拒）。所以速度先验压到很小、基本钉在 0。
+    double velocity_sigma_m_s{0.05};
     // 板面法向 yaw 的噪声（弧度）。IPPE 孪生解会让 yaw 差 10~30°，取 0.35。
     double normal_sigma_rad{0.35};
 
@@ -50,6 +54,10 @@ struct TrackerConfig
     double lock_max_age_s{0.50};      // 更早的样本丢掉（目标可能已经换了）
     double radius_prior_m{0.25};      // 无数据先验：实车按底盘实测
     double radius_sigma_m{0.10};
+    // 锁定后是否把半径钉在锁定值：单板可见时 (中心, 半径) 退化，位置更新会
+    // 把 R 一点点拉走（实测 0.25 -> 0.147，中心随之跑 1.4 m）。实时跟踪按
+    // "半径由板型先验给出"处理，默认钉死；合成/离线场景想测半径收敛可以关掉。
+    bool freeze_radius{true};
     double radius_min_m{0.05};
     double radius_max_m{0.60};
     double phase_spread_for_radius_rad{0.30}; // 相位扫过小于它 -> 半径不可辨识
@@ -58,7 +66,11 @@ struct TrackerConfig
     // === 关联 / 门限 ===
     double position_gate_m{0.60}; // 单板位置门限（含中心先验不确定的余量）
     double nis_gate{11.34};      // chi2(3 dof) 99.5%
-    double handoff_sigma_scale{2.5}; // 更新换板槽位时把观测标准差放大这么多倍
+    double handoff_sigma_scale{2.5}; // 已废弃（仅保留字段）：换板不再放大 sigma
+    // 观测标准差的地板：单板预测的误差里有一块是"模型误差"（半径/相位/中心
+    // 的系统性偏差），不体现在 P 里。地板太小 → NIS 门把有信息的帧全拒了
+    // （实拍 v4 旋转目标 466/466 帧被拒）；地板太大 → 更新变钝。
+    double association_sigma_floor_m{0.06};
 
     // 同帧两块板同时可见时，弦长能直接量出半径：R = chord / |n_i - n_j|
     // （相邻两板 |Δn| = √2）。静止目标只露一块板时 R 不可辨识，这条观测是

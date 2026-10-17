@@ -124,6 +124,8 @@ EkfInitStatus RotatingArmorEkf::initialize(const ArmorObservation& observation,
     // Static 声明把角速度钉在 0；Spinning 用声明的先验值（上面已保证非零且有限）。
     x(7) = (prior.spin == SpinPriorKind::Spinning) ? prior.yaw_rate_prior_rad_s : 0.0;
     x(8) = prior.radius_m;
+    radius_prior_m_ = prior.radius_m;
+    radius_fixed_ = prior.radius_fixed;
 
     const double position_sigma =
         phase_from_yaw ? positiveOr(prior.position_sigma_m, 0.5)
@@ -188,8 +190,13 @@ bool RotatingArmorEkf::update(const ArmorObservation& observation, int plate_slo
     }
 
     const Measurement h = measurement(state_, plate_slot, config_.plate_count);
-    const MeasurementJacobian h_jacobian =
+    MeasurementJacobian h_jacobian =
         measurementJacobian(state_, plate_slot, config_.plate_count);
+    if (radius_fixed_) {
+        // 不让位置观测改半径：H 的第 8 列清零后，残差里"半径错了"这一项就
+        // 只能由中心/相位去解释，R 保持先验。
+        h_jacobian.col(8).setZero();
+    }
     const MeasurementCovariance r = observation.sigma_position_m *
                                      observation.sigma_position_m *
                                      MeasurementCovariance::Identity();
@@ -205,6 +212,13 @@ bool RotatingArmorEkf::update(const ArmorObservation& observation, int plate_slo
     // Joseph 形式：数值上比 (I - K H) P 更稳，且保持对称。
     const Covariance i_kh = Covariance::Identity() - k * h_jacobian;
     covariance_ = i_kh * covariance_ * i_kh.transpose() + k * r * k.transpose();
+
+    if (radius_fixed_) {
+        state_(8) = radius_prior_m_;
+        covariance_.row(8).setZero();
+        covariance_.col(8).setZero();
+        covariance_(8, 8) = 1e-9;
+    }
 
     if (!state_.allFinite() || !covariance_.allFinite()) {
         reset();
@@ -285,8 +299,11 @@ bool RotatingArmorEkf::innovationNis(const ArmorObservation& observation, int pl
         return false;
     }
     const Measurement h = measurement(state_, plate_slot, config_.plate_count);
-    const MeasurementJacobian h_jacobian =
+    MeasurementJacobian h_jacobian =
         measurementJacobian(state_, plate_slot, config_.plate_count);
+    if (radius_fixed_) {
+        h_jacobian.col(8).setZero();
+    }
     const MeasurementCovariance r = observation.sigma_position_m *
                                      observation.sigma_position_m *
                                      MeasurementCovariance::Identity();
