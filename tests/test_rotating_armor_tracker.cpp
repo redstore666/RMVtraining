@@ -344,6 +344,36 @@ void scenarioTargetSwitch()
     check(relocked >= 0, "E 重新锁定到新目标编号");
 }
 
+// ------------------------------------------------------------------ F
+void scenarioLatencyCompensation()
+{
+    std::printf("\n[F] 预测时域包含实测处理延迟\n");
+    // 静止不转、以 0.5m/s 平移的目标：延迟只应该把预测位置沿着速度方向推出去。
+    State truth;
+    truth << 3.00, 0.50, 0.40, 0.0, 0.35, 0.0, 0.0, 0.0, 0.25;
+    sim::Rig plain(truth);
+    sim::Rig delayed(truth);
+    plain.gimbal.snapTo(sim::nearestPlatePosition(plain.truth, plain.plate_count, 0.0));
+    delayed.gimbal = plain.gimbal;
+    delayed.latency_s = 0.10;
+    PredictionResult a;
+    PredictionResult b;
+    for (int frame = 0; frame < 120; ++frame)
+    {
+        a = plain.step(true, false);
+        b = delayed.step(true, false);
+    }
+    const double difference = static_cast<double>(b.distance_m) - static_cast<double>(a.distance_m);
+    std::printf("无延迟距离=%.3f 加 0.1s 延迟=%.3f 差=%.3f (期望约 %.3f)\n",
+                static_cast<double>(a.distance_m), static_cast<double>(b.distance_m), difference,
+                0.5 * 0.10);
+    check(std::fabs(difference - 0.05) <= 0.03, "F 预测位置随实测延迟前推");
+    check(a.state == TrackingState::Stable && b.state == TrackingState::Stable,
+          "F 两条路径都进入 Stable");
+    check(std::fabs(delayed.tracker.diagnostics().measured_latency_s - 0.10) < 1e-9,
+          "F 诊断里能看到实测延迟");
+}
+
 } // namespace
 
 int main()
@@ -353,6 +383,7 @@ int main()
     scenarioOcclusionAndTimeout();
     scenarioOutlierRejected();
     scenarioTargetSwitch();
+    scenarioLatencyCompensation();
     if (g_failures != 0)
     {
         std::printf("\n%d 项失败\n", g_failures);

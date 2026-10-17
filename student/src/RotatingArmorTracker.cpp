@@ -570,13 +570,19 @@ PredictionResult RotatingArmorTracker::buildResult(const GimbalState &gimbal,
     result.radius_1_m = static_cast<float>(state(8));
     result.radius_2_m = static_cast<float>(state(8));
 
-    // 预测到"子弹该对准的时刻"：控制器下发的预测时间偏置（秒）。
+    // 预测到"子弹该对准的时刻"：
+    //   控制器下发的预测时间偏置（秒）+ 本帧实际测得的视觉处理延迟（秒）。
+    // 两者是不同环节：bias 由电控给出（它知道弹道飞行时间与自身回路延迟），
+    // measured_latency_s 是"取到这一帧到算出结果"之间已经花掉的时间。
     const double bias = std::isfinite(gimbal.prediction_bias_s)
                             ? clampd(static_cast<double>(gimbal.prediction_bias_s), 0.0,
                                      config_.max_bias_s)
                             : 0.0;
+    const double latency = std::isfinite(measured_latency_s_)
+                               ? clampd(measured_latency_s_, 0.0, config_.max_latency_s)
+                               : 0.0;
     RotatingArmorEkf probe = ekf_;
-    if (!probe.predict(bias))
+    if (!probe.predict(bias + latency))
     {
         return PredictionResult{};
     }
@@ -654,10 +660,13 @@ PredictionResult RotatingArmorTracker::buildResult(const GimbalState &gimbal,
 
 PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observations,
                                             const GimbalState &gimbal,
-                                            double timestamp_seconds)
+                                            double timestamp_seconds,
+                                            double measured_latency_s)
 {
     diagnostics_.updates_this_frame = 0;
     diagnostics_.rejected_this_frame = 0;
+    measured_latency_s_ = measured_latency_s;
+    diagnostics_.measured_latency_s = measured_latency_s;
     if (!std::isfinite(timestamp_seconds) || !std::isfinite(gimbal.yaw) ||
         !std::isfinite(gimbal.pitch) || !std::isfinite(gimbal.roll))
     {

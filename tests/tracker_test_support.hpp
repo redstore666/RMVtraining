@@ -177,6 +177,8 @@ struct Rig
     int target_id{7};
     double bias_s{0.0};
     double sigma_position_m{0.01};
+    // 传给跟踪器的"本帧视觉处理延迟"，用于验证预测时域包含它。
+    double latency_s{0.0};
 
     explicit Rig(const rotating_armor::State &initial_truth,
                  rotating_armor::TrackerConfig config = {})
@@ -215,7 +217,7 @@ struct Rig
         {
             observations = observe(plates, gimbal_state, id, rng, sigma_position_m);
         }
-        return tracker.step(observations, gimbal_state, time_s);
+        return tracker.step(observations, gimbal_state, time_s, latency_s);
     }
 };
 

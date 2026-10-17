@@ -71,7 +71,9 @@ struct TrackerConfig
     double relock_min_span_s{0.18};
 
     // === 输出 ===
-    double max_bias_s{0.80};        // prediction_bias_s 的限幅
+    double max_bias_s{0.80};
+    // 本帧视觉侧处理延迟（取到帧 -> 算出结果）的允许上限。
+    double max_latency_s{0.30};        // prediction_bias_s 的限幅
     double fire_angle_error_rad{0.05}; // 云台已对准的阈值（Planner 的 fire_thresh）
     double fire_max_age_s{0.20};    // 最近一次有效观测距今多久内允许开火
     double min_distance_m{0.40};
@@ -100,6 +102,7 @@ struct TrackerDiagnostics
     int consecutive_updates{0};
     int missed_frames{0};
     int updates_this_frame{0};
+    double measured_latency_s{0.0};
     int rejected_this_frame{0};
     double last_nis{0.0};
     int aim_slot{-1};
@@ -117,8 +120,11 @@ public:
 
     // 与 ekf_predict 同签名：喂进本帧的全部装甲板位姿，返回本帧应该发出去的结果。
     // 没有目标、时间戳非法或跟踪失效时返回默认的 NoTarget 结果。
+    // measured_latency_s：本帧从取到图到调用本函数已经花掉的时间（秒），
+    // 会叠加到 prediction_bias_s 上一起作为预测时域。
     PredictionResult step(const std::vector<ArmorPose>& observations,
-                          const GimbalState& gimbal, double timestamp_seconds);
+                          const GimbalState& gimbal, double timestamp_seconds,
+                          double measured_latency_s = 0.0);
 
     bool initialized() const { return ekf_.initialized(); }
     const TrackerDiagnostics& diagnostics() const { return diagnostics_; }
@@ -181,6 +187,7 @@ private:
     int target_id_{0};
     int aim_slot_{-1};
     double last_accept_s_{0.0};
+    double measured_latency_s_{0.0};
     bool has_accept_{false};
     int consecutive_updates_{0};
     int missed_frames_{0};

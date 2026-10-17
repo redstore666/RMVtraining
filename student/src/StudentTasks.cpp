@@ -743,8 +743,25 @@ rotating_armor::RotatingArmorTracker &trackerInstance()
 PredictionResult ekf_predict(const std::vector<ArmorPose> &observations, const GimbalState &gimbal,
                              double timestamp_seconds)
 {
+    // 本帧视觉侧处理延迟：帧时间戳是取流时刻，这里补上"到现在为止"已经花掉的
+    // 时间（检测 + PnP + 调用开销）。电控下发的 prediction_bias_s 是另一个环节
+    // 的补偿，两者相加才是子弹到达时的总预测时域。
+    // 只有测到合理值（0 < delta < 0.3s）才采用，避免时钟口径不一致时误补偿。
+    double measured_latency_s = 0.0;
+    if (std::isfinite(timestamp_seconds))
+    {
+        const double now_s = std::chrono::duration<double>(
+                                 std::chrono::steady_clock::now().time_since_epoch())
+                                 .count();
+        const double elapsed = now_s - timestamp_seconds;
+        if (elapsed > 0.0 && elapsed < 0.3)
+        {
+            measured_latency_s = elapsed;
+        }
+    }
+
     // 观测关联/门限/状态机/输出映射都在 rotating_armor::RotatingArmorTracker 里：
     // 它负责把云台系观测转到世界系、攒样本锁定初相与角速度、逐帧预测与 NIS 门限更新、
     // 换板与瞄准板选择、开火许可，并在超时/声明被反驳时重锁。
-    return trackerInstance().step(observations, gimbal, timestamp_seconds);
+    return trackerInstance().step(observations, gimbal, timestamp_seconds, measured_latency_s);
 }
