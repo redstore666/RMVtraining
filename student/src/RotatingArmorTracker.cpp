@@ -733,6 +733,50 @@ bool RotatingArmorTracker::reinitializeFromPair(const std::vector<WorldObservati
     return false;
 }
 
+// 同帧双板弦长 -> 半径。两块板的法向差 Δψ 与弦长 chord 唯一确定半径：
+// |n_i - n_j| = 2 sin(Δψ/2)，而 chord = R |n_i - n_j|，所以 R = chord / (2 sin(Δψ/2))。
+// 每帧最多吃一条，避免同一帧两条配对观测重复约束同一维。
+void RotatingArmorTracker::updateRadiusFromPairs(const std::vector<WorldObservation> &world)
+{
+    if (!config_.pair_radius_update_enabled || target_id_ == 0 || !ekf_.initialized())
+    {
+        return;
+    }
+    for (size_t i = 0; i < world.size(); ++i)
+    {
+        if (world[i].target_id != target_id_ || !world[i].has_yaw)
+        {
+            continue;
+        }
+        for (size_t j = i + 1; j < world.size(); ++j)
+        {
+            if (world[j].target_id != target_id_ || !world[j].has_yaw)
+            {
+                continue;
+            }
+            const double dpsi = foldPeriod(world[j].yaw - world[i].yaw, 2.0 * kPi);
+            const double half = 0.5 * std::fabs(dpsi);
+            if (half < 0.35) // 同一块板被重复检出：弦长除噪会炸
+            {
+                continue;
+            }
+            const double chord = (world[j].position - world[i].position).norm();
+            if (!std::isfinite(chord) || chord < config_.radius_update_min_chord_m)
+            {
+                continue;
+            }
+            const double radius = chord / (2.0 * std::sin(half));
+            if (!std::isfinite(radius) || radius < config_.radius_min_m ||
+                radius > config_.radius_max_m)
+            {
+                continue;
+            }
+            ekf_.updateRadius(radius, config_.radius_update_sigma_m);
+            return;
+        }
+    }
+}
+
 int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation> &world,
                                              double timestamp_s)
 {
@@ -1128,6 +1172,7 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
     }
     state_timestamp_s_ = timestamp_seconds;
 
+    updateRadiusFromPairs(world);
     const int updates = associateAndUpdate(world, timestamp_seconds);
     diagnostics_.updates_this_frame = updates;
     if (updates > 0)

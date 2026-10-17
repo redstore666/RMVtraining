@@ -232,6 +232,35 @@ bool RotatingArmorEkf::updatePhase(double measured_world_yaw, double sigma_rad) 
     return true;
 }
 
+bool RotatingArmorEkf::updateRadius(double measured_radius, double sigma_radius) {
+    if (!initialized_ || !std::isfinite(measured_radius) || !std::isfinite(sigma_radius) ||
+        !(measured_radius > 0.0) || !(sigma_radius > 0.0)) {
+        return false;
+    }
+
+    // 只有半径这一维参与，H = e8。
+    const double s = covariance_(8, 8) + sigma_radius * sigma_radius;
+    if (!(s > 0.0)) {
+        return false;
+    }
+    const Eigen::Matrix<double, 9, 1> k = covariance_.col(8) / s;
+    const double residual = measured_radius - state_(8);
+    state_ = state_ + k * residual;
+    // 半径是物理量：更新后夹回正区间，避免一条噪声观测把它推到 0 或负数。
+    state_(8) = std::clamp(state_(8), 0.03, 0.80);
+
+    Eigen::Matrix<double, 9, 9> i_kh = Eigen::Matrix<double, 9, 9>::Identity();
+    i_kh.row(8) -= k.transpose();
+    covariance_ = i_kh * covariance_ * i_kh.transpose() +
+                  sigma_radius * sigma_radius * (k * k.transpose());
+
+    if (!state_.allFinite() || !covariance_.allFinite()) {
+        reset();
+        return false;
+    }
+    return true;
+}
+
 bool RotatingArmorEkf::innovationNis(const ArmorObservation& observation, int plate_slot,
                                      double& nis) const {
     if (!initialized_ || config_.plate_count <= 0 || plate_slot < 0 ||

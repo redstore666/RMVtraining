@@ -60,6 +60,17 @@ struct TrackerConfig
     double nis_gate{11.34};      // chi2(3 dof) 99.5%
     double handoff_sigma_scale{2.5}; // 更新换板槽位时把观测标准差放大这么多倍
 
+    // 同帧两块板同时可见时，弦长能直接量出半径：R = chord / |n_i - n_j|
+    // （相邻两板 |Δn| = √2）。静止目标只露一块板时 R 不可辨识，这条观测是
+    // 唯一能让 R 脱离先验的来源。
+    // 默认关闭：实测（多组 σ=0.02/0.06/50）对静止目标无改善（本来就 7.4 mm），
+    // 对旋转目标反而变差（99 -> 125~140 mm），v1 只从 412 降到 380 mm。
+    // 原因是锁定时已经用双板弦长定过 R（reinitializeFromPair），运行期再连续
+    // 拉 R 会跟位置更新抢"中心该往哪挪"，旋转目标的 yaw 噪声把 R 拖偏。
+    bool pair_radius_update_enabled{false};
+    double radius_update_sigma_m{0.06};
+    double radius_update_min_chord_m{0.08}; // 太近的两块板（法向几乎平行）弦长除噪会爆
+
     // 板面法向当"相位观测"塞进滤波器（折叠掉 2pi/N）。实拍小目标法向抖 0.05~0.15
     // rad，取 0.12；关掉它就退回"yaw 只靠位置间接约束"。
     // 默认关闭：合成 A 场景实测"打开后 yaw 抖动、半径被压到 0.18（真值 0.25）"，
@@ -203,6 +214,8 @@ private:
 
     // 关联 + 更新。返回本帧接受的更新数。
     int associateAndUpdate(const std::vector<WorldObservation>& world, double timestamp_s);
+    // 同帧双板弦长 -> 半径观测（见 .cpp 里的推导）。
+    void updateRadiusFromPairs(const std::vector<WorldObservation> &world);
 
     // 声明是否被观测反驳（Static/Spinning 判错、或目标转速突变）。
     bool declarationContradicted(const std::vector<WorldObservation>& world,

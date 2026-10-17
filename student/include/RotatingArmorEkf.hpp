@@ -130,6 +130,12 @@ public:
     // 所以位置关联出错也不会把相位带歪。sigma_rad 取值见上层配置。
     bool updatePhase(double measured_world_yaw, double sigma_rad);
 
+    // 用"同一帧两块板的弦长"直接观测半径：相邻两板 |n_i-n_j| = sqrt(2)，
+    // 弦长 = R*|n_i-n_j|，所以 R = chord / |n_i-n_j|，不需要圆拟合。
+    // 静止目标只露一块板时 R 不可辨识（中心会跟着 R 平移，观测依然自洽），
+    // 这条观测是"两块板同时可见"时唯一的 R 来源。
+    bool updateRadius(double measured_radius, double sigma_radius);
+
     // 该观测在当前先验下的新息平方和（马氏距离）NIS = r' S^-1 r，S = H P H' + R。
     // 上层用它做离群点拒绝：3 维观测下 NIS ~ chi2(3)，99.5% 分位约 11.34。
     // 未初始化、slot 非法或输入非有限时返回 false。
