@@ -1,5 +1,6 @@
 #include "StudentTasks.hpp"
 #include "ArmorDetectorNet.hpp"
+#include "RotatingArmorTracker.hpp"
 #include "MvCameraControl.h"
 
 #include <array>
@@ -695,16 +696,29 @@ std::vector<ArmorPose> armor_solve(const std::vector<ArmorDetection> &detections
             pose.position_gimbal_m = cv::Vec3d(p_gim_mat);
         }
 
-        // armor_yaw：板面法向相对光轴的水平偏角（弧度）。
+        // 板面法向：armor_yaw 与 normal_gimbal（都在云台系）。
         //   1) cv::Rodrigues(rvec, R_obj2cam) 把旋转向量变成 3x3 旋转矩阵
-        //   2) 板面法向在相机系：n = R_obj2cam * (0, 0, 1)
-        //   3) pose.armor_yaw = std::atan2(n.x, n.z)（合成图上应 ≈0；
-        //      符号约定用实拍/带 yaw 的场景实证校准，方法同 tilt_deg）
+        //   2) 物点建模时 z 轴是板面外法向，所以在相机系 n = R_obj2cam * (0,0,1)
+        //   3) 再乘外参旋转到云台系：n_gimbal = R_cam2gimbal * n_cam
+        //   4) armor_yaw = atan2(n_gimbal.y, n_gimbal.x)，与 position_gimbal_m 同一系
+        // 云台姿态补偿（gimbal -> 世界系）在 EKF 阶段做，这里只用外参。
         cv::Mat R_obj2cam;
-        cv::Rodrigues(rvec, R_obj2cam);                                          // 旋转向量 → 3x3 矩阵
-        const cv::Mat n = R_obj2cam * (cv::Mat_<double>(3, 1) << 0.0, 0.0, 1.0); // 板面法向转到相机系
-        // cv::Mat_<double>(3, 1) << 0.0, 0.0, 1.0是OpenCV 的逗号初始化语法,专门用来写小矩阵
-        pose.armor_yaw = std::atan2(n.at<double>(0), n.at<double>(2)); // n.x, n.z
+        cv::Rodrigues(rvec, R_obj2cam);
+        cv::Mat n_cam = R_obj2cam * (cv::Mat_<double>(3, 1) << 0.0, 0.0, 1.0);
+        cv::Mat n_gimbal = n_cam;
+        if (!camera.rotation_camera_to_gimbal.empty())
+        {
+            n_gimbal = camera.rotation_camera_to_gimbal * n_cam;
+        }
+        const double nx = n_gimbal.at<double>(0);
+        const double ny = n_gimbal.at<double>(1);
+        const double nz = n_gimbal.at<double>(2);
+        const double n_norm = std::sqrt(nx * nx + ny * ny + nz * nz);
+        if (n_norm > 1e-9)
+        {
+            pose.normal_gimbal = cv::Vec3d(nx / n_norm, ny / n_norm, nz / n_norm);
+            pose.armor_yaw = std::atan2(ny, nx);
+        }
 
         poses.push_back(pose);
     }
@@ -713,10 +727,24 @@ std::vector<ArmorPose> armor_solve(const std::vector<ArmorDetection> &detections
 
 // ==================== 任务 4：EKF 跟踪与预测 ====================
 
-PredictionResult ekf_predict(const std::vector<ArmorPose> &, const GimbalState &,
-                             double)
+namespace
 {
-    // tips：在未来状态预测前处理观测关联、初始化、角度归一化、离群点、
-    // 装甲板切换、短时丢失以及超时重置。
-    return {};
+
+// 跟踪器持有跨帧状态：锁定样本、EKF、瞄准槽位、丢失计时。
+// 处理线程是单线程顺序调用，所以这里不需要加锁。
+rotating_armor::RotatingArmorTracker &trackerInstance()
+{
+    static rotating_armor::RotatingArmorTracker instance;
+    return instance;
+}
+
+} // namespace
+
+PredictionResult ekf_predict(const std::vector<ArmorPose> &observations, const GimbalState &gimbal,
+                             double timestamp_seconds)
+{
+    // 观测关联/门限/状态机/输出映射都在 rotating_armor::RotatingArmorTracker 里：
+    // 它负责把云台系观测转到世界系、攒样本锁定初相与角速度、逐帧预测与 NIS 门限更新、
+    // 换板与瞄准板选择、开火许可，并在超时/声明被反驳时重锁。
+    return trackerInstance().step(observations, gimbal, timestamp_seconds);
 }

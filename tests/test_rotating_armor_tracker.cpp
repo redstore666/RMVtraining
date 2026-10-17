@@ -1,0 +1,363 @@
+// 任务 4 粘合层（RotatingArmorTracker）的验收测试：
+//   A 旋转目标的锁定/收敛/输出合法性（含装甲板随旋转切换）
+//   B 静止目标的锁定/开火许可
+//   C 短时遮挡的纯预测、超时清空
+//   D 离群观测被 NIS + 距离门限拒绝
+//   E 目标编号变化后的重锁
+#include "tracker_test_support.hpp"
+
+#include <cmath>
+#include <cstdio>
+#include <limits>
+
+namespace
+{
+using PredictionResult = ::PredictionResult;
+using rotating_armor::State;
+using TrackingState = ::TrackingState;
+
+int g_failures = 0;
+
+void check(bool condition, const char *what)
+{
+    std::printf("%s %s\n", condition ? "PASS" : "FAIL", what);
+    if (!condition)
+    {
+        ++g_failures;
+    }
+}
+
+bool finite(float value)
+{
+    return std::isfinite(value);
+}
+
+// 每一帧都必须满足的合法性与安全不变量。
+bool frameIsLegal(const PredictionResult &result)
+{
+    if (result.state == TrackingState::NoTarget)
+    {
+        return result.target_id == 0 && !result.fire_allowed;
+    }
+    if (!finite(result.center_x_m) || !finite(result.center_y_m) ||
+        !finite(result.center_velocity_x_m_s) || !finite(result.center_velocity_y_m_s) ||
+        !finite(result.body_yaw) || !finite(result.body_yaw_velocity) ||
+        !finite(result.radius_1_m) || !finite(result.radius_2_m) || !finite(result.distance_m) ||
+        !finite(result.target_yaw) || !finite(result.target_pitch) ||
+        !finite(result.target_yaw_velocity) || !finite(result.target_pitch_velocity))
+    {
+        return false;
+    }
+    if (result.target_id == 0 || result.radius_1_m <= 0.0F || result.distance_m <= 0.0F)
+    {
+        return false;
+    }
+    // 只有 Stable 才允许开火。
+    if (result.fire_allowed && result.state != TrackingState::Stable)
+    {
+        return false;
+    }
+    return true;
+}
+
+State spinningTruth()
+{
+    State truth;
+    // 车体中心 (3.0, 0.0)，低速平移；z=0.35m；以 2.5rad/s 自转；半径 0.25m。
+    truth << 3.00, 0.05, 0.00, 0.02, 0.35, 0.0, 0.30, 2.50, 0.25;
+    return truth;
+}
+
+State staticTruth()
+{
+    State truth;
+    // 静止目标：中心 (3.0, 0.40)，yaw=0，半径 0.25m（半径只能靠先验）。
+    truth << 3.00, 0.0, 0.40, 0.0, 0.35, 0.0, 0.0, 0.0, 0.25;
+    return truth;
+}
+
+double angleError(double a, double b)
+{
+    return std::fabs(rotating_armor::wrapToPi(a - b));
+}
+
+// ------------------------------------------------------------------ A
+void scenarioSpinning()
+{
+    std::printf("\n[A] 旋转目标：锁定 / 收敛 / 换板 / 输出合法性\n");
+    sim::Rig rig(spinningTruth());
+    // 云台不追板，固定在车体中心方向：装甲板会自己转进视场，最能压换板与关联。
+    rig.gimbal.yaw = rotating_armor::vectorYaw(Eigen::Vector3d(3.0, 0.0, 0.0));
+    rig.gimbal.pitch = rotating_armor::vectorPitch(Eigen::Vector3d(3.0, 0.0, 0.35));
+    rig.gimbal.rate_rad_s = 0.0;
+
+    int first_lock = -1;
+    int first_stable = -1;
+    int stable_frames = 0;
+    int fire_frames = 0;
+    bool legal = true;
+    PredictionResult last;
+    for (int frame = 0; frame < 360; ++frame)
+    {
+        last = rig.step(true, false);
+        if (first_lock < 0 && rig.tracker.initialized())
+        {
+            first_lock = frame;
+        }
+        if (first_stable < 0 && last.state == TrackingState::Stable)
+        {
+            first_stable = frame;
+        }
+        if (last.state == TrackingState::Stable)
+        {
+            ++stable_frames;
+        }
+        if (last.fire_allowed)
+        {
+            ++fire_frames;
+        }
+        legal = legal && frameIsLegal(last);
+    }
+    const State &estimate = rig.tracker.ekf().state();
+    const State &truth = rig.truth;
+    const double center_error = std::hypot(estimate(0) - truth(0), estimate(2) - truth(2));
+    const double radius_error = std::fabs(estimate(8) - truth(8));
+    const double rate_error = std::fabs(estimate(7) - truth(7));
+    // 车体 yaw 只能确定到 2*pi/N：4 块装甲板几何上完全相同，把相位整体平移
+    // 90 度得到的板位集合与真值完全一致，任何观测都分不出来。所以验收看
+    // "模 2*pi/N 的误差"，另外把绝对值也打出来（报告里要说明这条对称性）。
+    double yaw_error = angleError(estimate(6), truth(6));
+    const double spacing = 2.0 * sim::kPi / static_cast<double>(rig.plate_count);
+    for (int k = 0; k < rig.plate_count; ++k)
+    {
+        yaw_error = std::min(yaw_error, angleError(estimate(6) - spacing * k, truth(6)));
+    }
+    const auto &diagnostics = rig.tracker.diagnostics();
+    std::printf("锁定帧=%d 稳定帧=%d 稳定计数=%d 开火计数=%d 重锁=%d\n", first_lock, first_stable,
+                stable_frames, fire_frames, diagnostics.relock_count);
+    std::printf("末帧误差: 中心=%.4f m 半径=%.4f m 角速度=%.3f rad/s yaw(模%d度)=%.3f rad "
+                "yaw(绝对)=%.3f rad\n",
+                center_error, radius_error, rate_error,
+                static_cast<int>(360 / rig.plate_count), yaw_error,
+                angleError(estimate(6), truth(6)));
+    std::printf("锁定诊断: 半径来自数据=%d 相位翻转=%d 半径=%.3f 角速度=%.2f\n",
+                diagnostics.radius_from_data ? 1 : 0, diagnostics.phase_flipped ? 1 : 0,
+                diagnostics.locked_radius_m, diagnostics.locked_spin_rad_s);
+
+    check(frameIsLegal(last) && legal, "A 所有帧的合法性与安全不变量");
+    check(first_lock >= 0 && first_lock <= 90, "A 90 帧内完成锁定");
+    check(first_stable >= 0 && first_stable <= 200, "A 200 帧内进入 Stable");
+    check(stable_frames >= 200, "A 至少 200 帧处于 Stable");
+    check(center_error <= 0.10, "A 车体中心误差 <= 0.10 m");
+    check(radius_error <= 0.04, "A 旋转半径误差 <= 0.04 m");
+    check(rate_error <= 0.40, "A 角速度误差 <= 0.40 rad/s");
+    check(yaw_error <= 0.30, "A 车体 yaw 误差 <= 0.30 rad（模 2*pi/N）");
+    check(diagnostics.relock_count <= 3, "A 重锁次数 <= 3（没有抖动）");
+}
+
+// ------------------------------------------------------------------ B
+void scenarioStatic()
+{
+    std::printf("\n[B] 静止目标：锁定 / 声明静态 / 开火许可\n");
+    sim::Rig rig(staticTruth());
+    // 云台固定对准真值里离 yaw=0 最近的那块板（静止目标不会跑掉）。
+    rig.gimbal.snapTo(sim::nearestPlatePosition(rig.truth, rig.plate_count, 0.0));
+    int first_stable = -1;
+    int fire_frames = 0;
+    bool legal = true;
+    bool saw_no_target_after_lock = false;
+    PredictionResult last;
+
+    for (int frame = 0; frame < 240; ++frame)
+    {
+        last = rig.step(true, false);
+        if (first_stable < 0 && last.state == TrackingState::Stable)
+        {
+            first_stable = frame;
+        }
+        if (last.fire_allowed)
+        {
+            ++fire_frames;
+        }
+        if (rig.tracker.initialized() && last.state == TrackingState::NoTarget)
+        {
+            saw_no_target_after_lock = true;
+        }
+        legal = legal && frameIsLegal(last);
+    }
+    const auto &diagnostics = rig.tracker.diagnostics();
+    std::printf("稳定帧=%d 开火计数=%d 锁定角速度=%.3f 半径来自数据=%d\n", first_stable,
+                fire_frames, diagnostics.locked_spin_rad_s,
+                diagnostics.radius_from_data ? 1 : 0);
+    std::printf("末帧: yaw 指令=%.3f 云台 yaw=%.3f 距离=%.3f\n", last.target_yaw, rig.gimbal.yaw,
+                last.distance_m);
+
+    check(legal, "B 所有帧的合法性与安全不变量");
+    check(first_stable >= 0, "B 进入 Stable");
+    check(std::fabs(diagnostics.locked_spin_rad_s) < 1e-9, "B 判定为静止（角速度被钉住）");
+    check(fire_frames >= 30, "B 对准后允许开火（>=30 帧）");
+    check(!saw_no_target_after_lock, "B 锁定后没有掉成无目标");
+    check(angleError(last.target_yaw, rig.gimbal.yaw) <= 0.06, "B 目标 yaw 与云台 yaw 一致");
+    check(std::fabs(last.distance_m - 3.0) <= 0.35, "B 距离在真实距离附近");
+}
+
+// ------------------------------------------------------------------ C
+void scenarioOcclusionAndTimeout()
+{
+    std::printf("\n[C] 短时遮挡的纯预测 / 超时清空\n");
+    sim::Rig rig(spinningTruth());
+    rig.gimbal.yaw = rotating_armor::vectorYaw(Eigen::Vector3d(3.0, 0.0, 0.0));
+    rig.gimbal.pitch = rotating_armor::vectorPitch(Eigen::Vector3d(3.0, 0.0, 0.35));
+    for (int frame = 0; frame < 150; ++frame)
+    {
+        rig.step(true, false);
+    }
+    check(rig.tracker.initialized(), "C 遮挡前已锁定");
+
+    // 0.25 s 完全没有观测：必须继续预测，且不许开火。
+    bool predicted_through = true;
+    bool finite_state = true;
+    bool fire_during_occlusion = false;
+    bool saw_missed = false;
+    for (int frame = 0; frame < 15; ++frame)
+    {
+        const PredictionResult result = rig.step(false, false);
+        if (!frameIsLegal(result))
+        {
+            predicted_through = false;
+        }
+        if (result.state != TrackingState::NoTarget)
+        {
+            saw_missed = saw_missed || rig.tracker.diagnostics().missed_frames > 0;
+            finite_state = finite_state && std::isfinite(result.center_x_m) &&
+                           std::isfinite(result.target_yaw);
+        }
+        fire_during_occlusion = fire_during_occlusion || result.fire_allowed;
+    }
+    check(predicted_through, "C 遮挡期间仍输出合法预测（纯预测）");
+    check(finite_state, "C 遮挡期间状态保持有限");
+    check(!fire_during_occlusion, "C 遮挡期间禁止开火");
+    check(saw_missed, "C 遮挡被记为丢帧");
+
+    // 恢复观测后必须还能更新并重新稳定。
+    bool recovered = false;
+    for (int frame = 0; frame < 120; ++frame)
+    {
+        const PredictionResult result = rig.step(true, false);
+        if (result.state == TrackingState::Stable)
+        {
+            recovered = true;
+        }
+    }
+    check(recovered, "C 遮挡恢复后重新进入 Stable");
+
+    // 超过 timeout 的长时间丢失：必须清空成无目标。
+    PredictionResult last;
+    for (int frame = 0; frame < 60; ++frame)
+    {
+        last = rig.step(false, false);
+    }
+    std::printf("丢失 1s 后: state=%d target_id=%d\n", static_cast<int>(last.state),
+                static_cast<int>(last.target_id));
+    check(last.state == TrackingState::NoTarget, "C 超时后输出无目标");
+    check(!rig.tracker.initialized(), "C 超时后跟踪器被清空");
+}
+
+// ------------------------------------------------------------------ D
+void scenarioOutlierRejected()
+{
+    std::printf("\n[D] 离群观测被拒绝\n");
+    sim::Rig rig(spinningTruth());
+    rig.gimbal.yaw = rotating_armor::vectorYaw(Eigen::Vector3d(3.0, 0.0, 0.0));
+    rig.gimbal.pitch = rotating_armor::vectorPitch(Eigen::Vector3d(3.0, 0.0, 0.35));
+    for (int frame = 0; frame < 150; ++frame)
+    {
+        rig.step(true, false);
+    }
+    check(rig.tracker.initialized(), "D 越界前已锁定");
+    const State before = rig.tracker.ekf().state();
+
+    // 一帧里塞一个 1.5m 之外的假观测：它必须被距离门限 + NIS 拒绝。
+    rig.time_s += rig.dt;
+    rig.truth = rotating_armor::transition(rig.truth, rig.dt);
+    const auto plates = sim::platesAt(rig.truth, rig.plate_count);
+    const GimbalState gimbal_state = rig.gimbal.state(0.0);
+    std::vector<ArmorPose> observations = sim::observe(plates, gimbal_state, rig.target_id, rig.rng);
+    ArmorPose outlier;
+    outlier.detection.target_id = rig.target_id;
+    outlier.detection.size = ArmorSize::Small;
+    outlier.detection.confidence = 0.9F;
+    outlier.reprojection_error = 0.5;
+    outlier.position_camera_m = cv::Vec3d(3.6, 1.5, 0.35);
+    outlier.position_gimbal_m = cv::Vec3d(3.6, 1.5, 0.35);
+    outlier.normal_gimbal = cv::Vec3d(-1.0, 0.0, 0.0);
+    outlier.armor_yaw = 3.14159;
+    observations.push_back(outlier);
+
+    const PredictionResult result = rig.tracker.step(observations, gimbal_state, rig.time_s);
+    const auto &diagnostics = rig.tracker.diagnostics();
+    const State after = rig.tracker.ekf().state();
+    const double center_jump = std::hypot(after(0) - before(0), after(2) - before(2));
+    std::printf("本帧接受=%d 拒绝=%d 中心跳变=%.4f m\n", diagnostics.updates_this_frame,
+                diagnostics.rejected_this_frame, center_jump);
+    check(diagnostics.rejected_this_frame >= 1, "D 离群观测被计数为拒绝");
+    check(center_jump <= 0.05, "D 离群观测没有把状态拉走");
+    check(frameIsLegal(result), "D 该帧输出仍然合法");
+}
+
+// ------------------------------------------------------------------ E
+void scenarioTargetSwitch()
+{
+    std::printf("\n[E] 目标编号变化后重锁\n");
+    sim::Rig rig(spinningTruth());
+    rig.gimbal.yaw = rotating_armor::vectorYaw(Eigen::Vector3d(3.0, 0.0, 0.0));
+    rig.gimbal.pitch = rotating_armor::vectorPitch(Eigen::Vector3d(3.0, 0.0, 0.35));
+    for (int frame = 0; frame < 150; ++frame)
+    {
+        rig.step(true, false);
+    }
+    check(rig.tracker.initialized(), "E 切换前已锁定");
+
+    // 连续给 3 帧新编号：应触发丢弃并重新锁定到新目标。
+    bool dropped = false;
+    for (int frame = 0; frame < 3; ++frame)
+    {
+        const PredictionResult result = rig.step(true, false, 9);
+        if (result.state == TrackingState::NoTarget)
+        {
+            dropped = true;
+        }
+    }
+    check(dropped, "E 换目标时先输出无目标（不允许带着旧状态开火）");
+
+    int relocked = -1;
+    for (int frame = 0; frame < 120; ++frame)
+    {
+        const PredictionResult result = rig.step(true, false, 9);
+        if (result.state != TrackingState::NoTarget && result.target_id == 9)
+        {
+            relocked = frame;
+            break;
+        }
+    }
+    std::printf("重锁帧=%d 重锁次数=%d\n", relocked, rig.tracker.diagnostics().relock_count);
+    check(relocked >= 0, "E 重新锁定到新目标编号");
+}
+
+} // namespace
+
+int main()
+{
+    scenarioSpinning();
+    scenarioStatic();
+    scenarioOcclusionAndTimeout();
+    scenarioOutlierRejected();
+    scenarioTargetSwitch();
+    if (g_failures != 0)
+    {
+        std::printf("\n%d 项失败\n", g_failures);
+        return 1;
+    }
+    std::printf("\n全部通过\n");
+    return 0;
+}

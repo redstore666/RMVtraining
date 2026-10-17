@@ -33,6 +33,27 @@ add_library(algorithm_support STATIC
 target_include_directories(algorithm_support PUBLIC armor/include)
 target_link_libraries(algorithm_support PUBLIC Eigen3::Eigen)
 
+# 旋转车体运动模型（任务 4）：只依赖 Eigen，与相机/串口/OpenVINO 解耦，
+# 便于离线跑合成真值收敛测试。
+add_library(rotating_armor_model STATIC
+    student/src/RotatingArmorModel.cpp
+)
+target_include_directories(rotating_armor_model PUBLIC student/include)
+target_link_libraries(rotating_armor_model PUBLIC Eigen3::Eigen)
+
+# 生产 EKF（任务 4 第 2 步）：状态/协方差/生命周期 + 首帧锁定契约，
+# 数学公式全部来自 rotating_armor_model，本库不复制任何公式。
+add_library(rotating_armor_ekf STATIC
+    student/src/RotatingArmorEkf.cpp
+    student/src/RotatingArmorTracker.cpp
+    student/src/AimGeometry.cpp
+)
+target_include_directories(rotating_armor_ekf PUBLIC
+    student/include
+    ${CMAKE_SOURCE_DIR}/include
+)
+target_link_libraries(rotating_armor_ekf PUBLIC rotating_armor_model Eigen3::Eigen opencv_core)
+
 add_library(training_core STATIC
     src/AppSupport.cpp
     src/AutoAimTypes.cpp
@@ -50,6 +71,7 @@ target_include_directories(training_core
 target_link_libraries(training_core
     PUBLIC
     serialPort
+    rotating_armor_ekf # ← 新增：armor_solve 之后的 EKF 预测要用（含模型层）
     ${OpenCV_LIBS}
     openvino::runtime
     MvCameraControl # ← 新增：MVS SDK 库
@@ -102,6 +124,39 @@ if(BUILD_TESTING)
     set_target_properties(test_camera PROPERTIES
         BUILD_RPATH "/opt/MVS/lib/64")
     add_test(NAME camera_grab COMMAND test_camera)
+
+    # 旋转车体运动模型（任务 4）：
+    #   ekf_model_unit        —— F/H/Q 的自洽性（解析 Jacobian vs 有限差分）
+    #   ekf_model_convergence —— 合成真值收敛 + 默认 Q 防回退（生产 EKF）
+    #   ekf_init_contract     —— 首帧锁定契约：有/无板面法向、reset 与可观测性
+    #   ekf_aim_geometry     —— 云台/世界坐标系约定与互逆关系
+    #   ekf_tracker          —— 锁定/收敛/换板/遮挡/超时/离群/换目标
+    #   ekf_pipeline         —— 观测 -> ekf_predict -> applyPrediction -> 协议字段
+    add_executable(test_rotating_armor_model tests/test_rotating_armor_model.cpp)
+    target_link_libraries(test_rotating_armor_model PRIVATE rotating_armor_model)
+    add_test(NAME ekf_model_unit COMMAND test_rotating_armor_model)
+
+    add_executable(test_rotating_armor_convergence tests/test_rotating_armor_convergence.cpp)
+    target_link_libraries(test_rotating_armor_convergence PRIVATE rotating_armor_ekf)
+    add_test(NAME ekf_model_convergence COMMAND test_rotating_armor_convergence)
+
+    add_executable(test_rotating_armor_ekf_init tests/test_rotating_armor_ekf_init.cpp)
+    target_link_libraries(test_rotating_armor_ekf_init PRIVATE rotating_armor_ekf)
+    add_test(NAME ekf_init_contract COMMAND test_rotating_armor_ekf_init)
+
+    #   任务 4 粘合层与端到端管线。
+    add_executable(test_aim_geometry tests/test_aim_geometry.cpp)
+    target_link_libraries(test_aim_geometry PRIVATE rotating_armor_ekf)
+    add_test(NAME ekf_aim_geometry COMMAND test_aim_geometry)
+
+    add_executable(test_rotating_armor_tracker tests/test_rotating_armor_tracker.cpp)
+    target_link_libraries(test_rotating_armor_tracker PRIVATE rotating_armor_ekf)
+    add_test(NAME ekf_tracker COMMAND test_rotating_armor_tracker)
+
+    #   管线测试走真实的 ekf_predict + applyPrediction，所以必须链 training_core。
+    add_executable(test_ekf_pipeline tests/test_ekf_pipeline.cpp)
+    target_link_libraries(test_ekf_pipeline PRIVATE training_core)
+    add_test(NAME ekf_pipeline COMMAND test_ekf_pipeline)
 endif()
 
 # ============ 标定工具 ============

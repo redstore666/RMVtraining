@@ -63,11 +63,19 @@ struct ArmorDetection
 
 struct ArmorPose
 {
-    // 平移向量单位为米。armor_yaw 是云台坐标系中的偏航角（弧度），
-    // reprojection_error 是单个观测的重投影误差（像素）。
+    // 平移向量单位为米。armor_yaw 是板面法向在云台坐标系中的偏航角（弧度，
+    // atan2(n_y, n_x)，坐标约定前 x / 左 y / 上 z），reprojection_error 是单个
+    // 观测的重投影误差（像素）。
+    //
+    // 注意分工：armor_solve 只做 camera -> gimbal 这一层旋转；云台姿态补偿
+    // （gimbal -> 跟踪系/世界系）是 EKF 阶段的事，所以这两个字段都还是
+    // "随云台转"的量。normal_gimbal 是同一法向的完整单位向量（未解算时为
+    // (0,0,0)），EKF 用它加上云台姿态定初相——只靠 armor_yaw 这一个标量会丢掉
+    // 法向的俯仰分量，云台有 pitch 时算不准。
     ArmorDetection detection;
     cv::Vec3d position_camera_m{0.0, 0.0, 0.0};
     cv::Vec3d position_gimbal_m{0.0, 0.0, 0.0};
+    cv::Vec3d normal_gimbal{0.0, 0.0, 0.0};
     double armor_yaw{0.0};
     double reprojection_error{0.0};
 };
