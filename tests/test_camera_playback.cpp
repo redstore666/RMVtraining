@@ -751,7 +751,9 @@ int main(int argc, char **argv)
         if (args.ekf && !aim_errors_m.empty())
         {
             std::cout << "  预测命中评估: " << aim_errors_m.size() << " 帧，"
-                      << "|误差| 中位 " << percentile(aim_errors_m, 0.50) << " m，"
+                      << "|误差| p25 " << percentile(aim_errors_m, 0.25) << " 中位 "
+                      << percentile(aim_errors_m, 0.50) << " p75 "
+                      << percentile(aim_errors_m, 0.75) << " m，"
                       << "p90 " << percentile(aim_errors_m, 0.90) << " m，"
                       << "p99 " << percentile(aim_errors_m, 0.99) << " m，"
                       << "≤2cm " << 100.0 * fractionBelow(aim_errors_m, 0.02) << "% ，"
