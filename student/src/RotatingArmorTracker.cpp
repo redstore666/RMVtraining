@@ -361,15 +361,75 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
     {
         lock_samples_.pop_front();
     }
+
+    // 双板直解：同一帧里同编号的两块相邻板（法向差约 90 度）可以同时解出中心与半径。
+    //   p_i - p_j = R * (n_i - n_j)  =>  R = |p_i - p_j| / |n_i - n_j|，中心 = p_i - R*n_i
+    // 这比"单帧板面法向 + 半径先验"稳得多：实拍里小目标法向抖动 10 度以上，单帧定出
+    // 的中心会偏 ~R；而两块板是两条射线的交点，法向误差只会让交点沿径向轻微缩放。
+    const int pair_target_id = pick != nullptr
+                                   ? pick->target_id
+                                   : (lock_samples_.empty() ? 0 : lock_samples_.back().target_id);
+    Eigen::Vector3d pair_position(0.0, 0.0, 0.0);
+    Eigen::Vector2d pair_center(0.0, 0.0);
+    double pair_radius = 0.0;
+    double pair_yaw = 0.0;
+    bool pair_ok = false;
+    for (std::size_t i = 0; i < world.size() && !pair_ok; ++i)
+    {
+        if (world[i].target_id != pair_target_id)
+        {
+            continue;
+        }
+        for (std::size_t j = i + 1; j < world.size(); ++j)
+        {
+            if (world[j].target_id != pair_target_id)
+            {
+                continue;
+            }
+            const Eigen::Vector2d ni(std::cos(world[i].yaw), std::sin(world[i].yaw));
+            const Eigen::Vector2d nj(std::cos(world[j].yaw), std::sin(world[j].yaw));
+            const Eigen::Vector2d ndiff = ni - nj;
+            if (ndiff.norm() < 0.6)
+            {
+                continue; // 法向太接近：不是相邻槽位，解退化
+            }
+            const Eigen::Vector2d pi2(world[i].position.x(), world[i].position.y());
+            const Eigen::Vector2d pj2(world[j].position.x(), world[j].position.y());
+            const double candidate_radius = (pi2 - pj2).norm() / ndiff.norm();
+            if (candidate_radius < config_.radius_min_m ||
+                candidate_radius > config_.radius_max_m)
+            {
+                continue;
+            }
+            // 两块板解出的共同点：p_i + R*n_i = p_j + R*n_j。由"两块板都满足"
+            // 这件事本身可知 n 是从板指向车体中心的（内向），故中心 = p + R*n。
+            const Eigen::Vector2d candidate_center = pi2 + candidate_radius * ni;
+            if ((candidate_center - candidate_radius * nj - pj2).norm() > 0.10)
+            {
+                continue; // 两块板解出的中心不自洽
+            }
+            pair_position = world[i].position;
+            pair_center = candidate_center;
+            pair_radius = candidate_radius;
+            pair_yaw = std::atan2(pair_position.y() - pair_center.y(),
+                                  pair_position.x() - pair_center.x());
+            pair_ok = true;
+            break;
+        }
+    }
+
     diagnostics_.lock_samples = static_cast<int>(lock_samples_.size());
-    if (static_cast<int>(lock_samples_.size()) < std::max(config_.lock_min_samples, 6))
+    const int min_samples =
+        pair_ok ? 3 : std::max(config_.lock_min_samples, 6);
+    if (static_cast<int>(lock_samples_.size()) < min_samples)
     {
         diagnostics_.last_reject = "lock:waiting_samples";
         return false;
     }
     const double span =
         lock_samples_.back().timestamp_s - lock_samples_.front().timestamp_s;
-    if (span < config_.lock_min_span_s)
+    const double min_span = pair_ok ? 0.05 : config_.lock_min_span_s;
+    if (span < min_span)
     {
         diagnostics_.last_reject = "lock:waiting_span";
         return false;
@@ -501,6 +561,13 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
 
     ArmorObservation observation;
     observation.position = last.position;
+    if (pair_ok)
+    {
+        // 双板解出的几何直接覆盖：半径来自两块板的弦长，中心来自射线交点。
+        prior.radius_m = pair_radius;
+        prior.radius_sigma_m = std::min(config_.radius_sigma_m, 0.05);
+        observation.position = pair_position;
+    }
     observation.sigma_position_m = config_.position_sigma_m;
     observation.has_world_yaw = true;
     // initialize() 的约定：world_yaw_rad 是板面"外法向"，方向 = 从车体中心指向板。
@@ -508,7 +575,8 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
     // 这里曾经多加了 pi（把"朝外的法向"当成"朝里的法向"），于是车体中心被放到
     // 板的另一侧、差 2R。静止目标能自己收敛回去（板位置不变，只是 yaw 差 pi），
     // 旋转目标就完全跟不上：实测 v4 的 3 号板锁定后 104 次更新全被门限拒绝。
-    observation.world_yaw_rad = wrapToPi(phase_last + kPi);
+    observation.world_yaw_rad =
+        pair_ok ? wrapToPi(pair_yaw + kPi) : wrapToPi(phase_last + kPi);
     if (ekf_.initialize(observation, prior) != EkfInitStatus::Ok)
     {
         lock_samples_.clear();
@@ -565,6 +633,73 @@ void RotatingArmorTracker::pushNormalHistory(int plate_slot, double timestamp_s,
     {
         history.pop_front();
     }
+}
+
+
+bool RotatingArmorTracker::reinitializeFromPair(const std::vector<WorldObservation> &world)
+{
+    if (!ekf_.initialized() || target_id_ == 0)
+    {
+        return false;
+    }
+    for (std::size_t i = 0; i < world.size(); ++i)
+    {
+        if (world[i].target_id != target_id_)
+        {
+            continue;
+        }
+        for (std::size_t j = i + 1; j < world.size(); ++j)
+        {
+            if (world[j].target_id != target_id_)
+            {
+                continue;
+            }
+            const Eigen::Vector2d ni(std::cos(world[i].yaw), std::sin(world[i].yaw));
+            const Eigen::Vector2d nj(std::cos(world[j].yaw), std::sin(world[j].yaw));
+            const Eigen::Vector2d ndiff = ni - nj;
+            if (ndiff.norm() < 0.6)
+            {
+                continue;
+            }
+            const Eigen::Vector2d pi2(world[i].position.x(), world[i].position.y());
+            const Eigen::Vector2d pj2(world[j].position.x(), world[j].position.y());
+            const double radius = (pi2 - pj2).norm() / ndiff.norm();
+            if (radius < config_.radius_min_m || radius > config_.radius_max_m)
+            {
+                continue;
+            }
+            const Eigen::Vector2d center = pi2 + radius * ni;
+            if ((center - radius * nj - pj2).norm() > 0.10)
+            {
+                continue;
+            }
+            EkfInitPrior prior;
+            prior.radius_m = radius;
+            prior.plate_slot = 0;
+            prior.spin = SpinPriorKind::Spinning;
+            prior.yaw_rate_prior_rad_s = ekf_.state()(7);
+            prior.position_sigma_m = 0.10;
+            prior.velocity_sigma_m_s = 1.0;
+            prior.yaw_sigma_rad = 0.50;
+            prior.yaw_rate_sigma_rad_s = 4.0;
+            prior.radius_sigma_m = 0.05;
+            ArmorObservation observation;
+            observation.position = world[i].position;
+            observation.sigma_position_m = world[i].sigma_position_m;
+            observation.has_world_yaw = true;
+            observation.world_yaw_rad = wrapToPi(std::atan2(world[i].position.y() - center.y(),
+                                                          world[i].position.x() - center.x()) +
+                                                 kPi);
+            if (ekf_.initialize(observation, prior) != EkfInitStatus::Ok)
+            {
+                return false;
+            }
+            ++diagnostics_.relock_count;
+            diagnostics_.last_reject = "relock:pair";
+            return true;
+        }
+    }
+    return false;
 }
 
 int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation> &world,
@@ -933,6 +1068,14 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
     else
     {
         ++missed_frames_;
+        // 连续几帧都被拒、而当前帧恰好露出两块板：用双板几何重定中心与半径。
+        // 这是"锁定后 0 次更新"的唯一出路——单板初值偏 R 量级，靠更新拉不回来。
+        if (missed_frames_ >= 5 && reinitializeFromPair(world))
+        {
+            missed_frames_ = 0;
+            has_accept_ = true;
+            last_accept_s_ = timestamp_seconds;
+        }
     }
     diagnostics_.consecutive_updates = consecutive_updates_;
     diagnostics_.missed_frames = missed_frames_;
@@ -942,7 +1085,9 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
         dropTarget("timeout");
         return PredictionResult{};
     }
-    if (declarationContradicted(world, timestamp_seconds))
+    // 这个检查只为"声明了不转、其实在转"准备：转速明显不为 0 时它没有意义
+    // （旋转目标本来就会让板面法向持续扫动），反而会把自己刚锁上的旋转目标打掉。
+    if (std::fabs(ekf_.state()(7)) < 3.0 && declarationContradicted(world, timestamp_seconds))
     {
         dropTarget("declaration_contradicted");
         return PredictionResult{};

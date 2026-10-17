@@ -171,6 +171,9 @@ private:
                                   std::vector<WorldObservation>& out) const;
 
     // 攒样本；够了就尝试锁定。成功返回 true。
+    // 双板可见时用两块相邻板直接重定几何（p_i + R*n_i = p_j + R*n_j），
+    // 用于"锁定后更新持续被拒"的场合：单板定出的中心偏 ~R，靠更新拉不回来。
+    bool reinitializeFromPair(const std::vector<WorldObservation>& world);
     bool tryLock(const std::vector<WorldObservation>& world, double timestamp_s,
                  const GimbalState& gimbal);
 
