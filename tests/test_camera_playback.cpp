@@ -33,6 +33,8 @@
 #include "AutoAimTypes.hpp"
 #include "RotatingArmorTracker.hpp"
 #include "StudentTasks.hpp"
+#include <opencv2/calib3d.hpp>
+#include <filesystem>
 
 #include <algorithm>
 #include <chrono>
@@ -656,9 +658,51 @@ int main(int argc, char **argv)
             }
         }
 
+            // ---- 模型板投影：可视化验收的核心 ----
+            // 把 EKF 状态推出的 4 块板（世界系）转回相机系再投影到图像：
+            // 模型板压在真实板上 = 状态对；偏出去多少，眼睛直接量。
+            if (args.ekf && diagnostics.phase == rotating_armor::LockPhase::Tracking)
+            {
+                const auto &ekf_state = tracker.ekf().state();
+                std::vector<cv::Point3d> model_points;
+                for (int slot = 0; slot < 4; ++slot)
+                {
+                    const Eigen::Vector3d p_world = rotating_armor::platePosition(ekf_state, slot, 4);
+                    const Eigen::Vector3d p_gimbal = rotating_armor::toGimbal(gimbal, p_world);
+                    const cv::Vec3d p_camera = gimbalToCameraPoint(
+                        camera, cv::Vec3d(p_gimbal.x(), p_gimbal.y(), p_gimbal.z()));
+                    model_points.emplace_back(p_camera[0], p_camera[1], p_camera[2]);
+                }
+                std::vector<cv::Point2d> projected;
+                cv::projectPoints(model_points, cv::Vec3d(0, 0, 0), cv::Vec3d(0, 0, 0),
+                                  camera.camera_matrix, cv::noArray(), projected);
+                for (int slot = 0; slot < 4; ++slot)
+                {
+                    const cv::Scalar color = (slot == diagnostics.aim_slot) ? cv::Scalar(0, 0, 255)
+                                                                          : cv::Scalar(0, 180, 255);
+                    cv::circle(frame, projected[slot], 9, color, 2);
+                    char tag[16];
+                    std::snprintf(tag, sizeof(tag), "M%d", slot);
+                    cv::putText(frame, tag, projected[slot] + cv::Point2d(10, -10),
+                                cv::FONT_HERSHEY_SIMPLEX, 0.6, color, 2);
+                }
+                // 车体中心
+                const Eigen::Vector3d c_world = ekf_state.head<3>();
+                const Eigen::Vector3d c_gimbal = rotating_armor::toGimbal(gimbal, c_world);
+                const cv::Vec3d c_camera =
+                    gimbalToCameraPoint(camera, cv::Vec3d(c_gimbal.x(), c_gimbal.y(), c_gimbal.z()));
+                std::vector<cv::Point2d> c_proj;
+                cv::projectPoints(std::vector<cv::Point3d>{cv::Point3d(c_camera[0], c_camera[1],
+                                                                      c_camera[2])},
+                                  cv::Vec3d(0, 0, 0), cv::Vec3d(0, 0, 0), camera.camera_matrix,
+                                  cv::noArray(), c_proj);
+                cv::drawMarker(frame, c_proj[0], cv::Scalar(255, 0, 255), cv::MARKER_CROSS, 20, 2);
+            }
         // ---- 落盘标注帧（给报告/答辩留证据）----
         if (args.dump_every > 0 && frame_index % args.dump_every == 0)
         {
+            std::error_code mkdir_error;
+            std::filesystem::create_directories("build/replay_marks", mkdir_error);
             cv::Mat marked = frame.clone();
             drawDetections(marked, detections);
             char line[256];

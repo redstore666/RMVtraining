@@ -44,6 +44,11 @@ std::vector<ArmorDetection> armor_detect(const cv::Mat &pic, TeamColor enemy_col
 
 // 任务 3：使用已标定的相机内参进行位姿解算，再将观测从相机坐标系变换到云台坐标系。
 // 输出位置单位为米。
+// 云台系 -> 相机光学系（右/下/前），cameraToGimbalPoint 的逆变换。
+// 只给可视化用：把 EKF 状态推出的 3D 板位投回图像，眼睛直接对比
+// "模型板有没有压住真实板"。
+cv::Vec3d gimbalToCameraPoint(const CameraParameters &camera, const cv::Vec3d &p_gimbal);
+
 std::vector<ArmorPose> armor_solve(const std::vector<ArmorDetection> &detections,
                                    const CameraParameters &camera,
                                    const GimbalState &gimbal);

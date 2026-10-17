@@ -453,3 +453,34 @@ window = min(stale_after_s, max(stale_min_s, stale_min_frames × dt_median))
 中位降了 12%，尾巴却变差——板面法向本身的噪声（6 cm 板、3 m 外约 2~4°）
 足以把中心抖起来。因此仍默认关闭，但"反锚"这个写法留在 `updatePhase` 调用处：
 它至少把"相位更新与位置更新抢槽位"这个结构性问题解决了，剩下的是观测噪声。
+
+## 13. 可视化验收
+
+模型板直接投回图像——这是最省事、也最不会自欺的验收方式：
+
+```bash
+# 窗口实时看（需要显示器；esc/q 退出）
+./build/test_camera_playback tmp/v4.avi --red --only-id 3 --ekf
+
+# 无头落盘：每 N 帧存一张标注图到 build/replay_marks/
+./build/test_camera_playback tmp/v4.avi --red --only-id 3 --ekf --headless --dump-every 60
+```
+
+图中元素：
+
+| 记号 | 含义 |
+| --- | --- |
+| 绿框 + `ID=n S/B conf` | YOLO 检测 |
+| 橙/红圆圈 `M0…M3` | **EKF 状态推出的 4 块模型板**（红色 = 当前瞄准槽位 `aim_slot`） |
+| 品红十字 | 模型车体中心 `(cx, cy, z)` |
+
+判读标准：**模型板圆圈压住真实装甲板中心 = 状态对**。3 m 外 1° ≈ 25 px（1440 宽、
+约 60° 视场），所以：
+
+- 圆圈与板心差 **< 10 px** ≈ 残差 < 4 mm，等同静止目标水平；
+- 差 **40~50 px** ≈ 10 cm，就是旋转目标当前的中位残差；
+- 圆圈突然跳到另一块板上 = 换板/重锁帧，此时看 `EKF:` 行里的 `phase` 是否
+  `Tracking`（`Collecting` 表示还没锁定，画的仍是上一段状态）。
+
+配套的数字口径：跑完打印的 `预测命中评估: …` 一行（中位/p90/p99 就是上表的
+来源），需要逐帧排查时加 `--dump build/dump.csv` 导出 CSV。

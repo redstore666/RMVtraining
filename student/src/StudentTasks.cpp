@@ -688,6 +688,21 @@ namespace
 
 } // namespace
 
+cv::Vec3d gimbalToCameraPoint(const CameraParameters &camera, const cv::Vec3d &p_gimbal)
+{
+    // 与 cameraToGimbalPoint 严格互逆：R_c2g 的转置，再减掉平移。
+    cv::Vec3d p = cv::Vec3d(p_gimbal);
+    if (!extrinsicIsPlaceholder(camera) && !camera.translation_camera_to_gimbal.empty())
+    {
+        for (int i = 0; i < 3; ++i)
+        {
+            p[i] -= camera.translation_camera_to_gimbal.at<double>(i);
+        }
+    }
+    const cv::Mat p_camera = rotationCameraToGimbal(camera).t() * cv::Mat(p);
+    return cv::Vec3d(p_camera.at<double>(0), p_camera.at<double>(1), p_camera.at<double>(2));
+}
+
 std::vector<ArmorPose> armor_solve(const std::vector<ArmorDetection> &detections,
                                    const CameraParameters &camera,
                                    const GimbalState &gimbal)
