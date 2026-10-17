@@ -2,7 +2,7 @@
 ---
 # 此文件只定义填写格式，不含可用标定值。
 # 完成标定后复制为实际配置文件，填写全部矩阵，并将 calibrated 改为 1。
-calibrated: 0
+calibrated: 1
 
 # 标定图像分辨率，单位为 pixel；0 为无效占位值。
 image_width: 1440
@@ -36,7 +36,7 @@ rotation_camera_to_gimbal: !!opencv-matrix
   dt: d
   data: [ 1., 0., 0.,
           0., 1., 0.,
-          0., 0., 1. ]
+          0., 0., 1. ] #无数据，暂时占位
 
 # 相机原点在云台坐标系中的位置 t_gimbal_camera，
 # 即从云台原点指向相机原点的平移向量，单位为 m。
@@ -44,7 +44,7 @@ translation_camera_to_gimbal: !!opencv-matrix
   rows: 3
   cols: 1
   dt: d
-  data: [ 0., 0., 0. ]
+  data: [ 6.711e-02, 0., 5.150e-02  ]
 
 # 标定结果记录；负数为未填写占位值。
 # 来源：MATLAB Camera Calibrator 报告"总误差均值 0.07 像素"（新相机 2 号机）。

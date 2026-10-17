@@ -109,6 +109,11 @@ endif()
 
 if(BUILD_TESTING)
     enable_testing()
+    # 虚拟电控：用伪终端代替主控板，无硬件也能跑完整链路（见 tests/sim_controller.cpp）
+    add_executable(sim_controller tests/sim_controller.cpp)
+    target_include_directories(sim_controller PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/serialPort/include)
+    target_link_libraries(sim_controller PRIVATE util)
+
     add_executable(test_scaffold tests/test_scaffold.cpp)
     target_link_libraries(test_scaffold PRIVATE training_core)
     add_test(NAME scaffold_safety COMMAND test_scaffold)
