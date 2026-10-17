@@ -535,3 +535,10 @@ v4 里旋转车 4 块板共用 `id=3`，`--only-id 3` 把 4 块板全留下。�
 - 角速度仍常在 0 附近：`--only-id 3` 下可见的板不连续（遮挡），相位序列没有
   连续斜率可拟合；一旦连续锁定≥12 帧会自动切到 Spinning。
 - id3 仍有 ~25% 帧被 NIS 门拒（观测噪声 6 cm vs 预测 1 cm，属正常取舍）。
+
+### 14.6 一键回归
+
+```bash
+./tools/run_ekf_regression.sh                 # 三组数据，打印上表两行
+./tools/run_ekf_regression.sh --radius 0.25   # 额外参数透传给 playback
+```
