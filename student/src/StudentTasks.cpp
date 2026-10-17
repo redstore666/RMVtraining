@@ -380,7 +380,8 @@ namespace
                     height = w;
                 }
             }
-            const auto size_valid = [](int value) { return value >= 320 && value % 32 == 0; };
+            const auto size_valid = [](int value)
+            { return value >= 320 && value % 32 == 0; };
             if (!size_valid(width) || !size_valid(height))
             {
                 width = 640;
@@ -691,7 +692,8 @@ std::vector<ArmorPose> armor_solve(const std::vector<ArmorDetection> &detections
                                    const CameraParameters &camera,
                                    const GimbalState &gimbal)
 {
-    (void)gimbal; // 云台姿态补偿属于 EKF/预测阶段，此处不用
+    (void)gimbal; // 云台姿态补偿不在此层：armor_solve 输出云台系，
+                  // gimbal->world 由 RotatingArmorTracker::collectWorldObservations 完成
     std::vector<ArmorPose> poses;
 
     for (const ArmorDetection &det : detections)
@@ -802,45 +804,45 @@ std::vector<ArmorPose> armor_solve(const std::vector<ArmorDetection> &detections
 namespace
 {
 
-// 跟踪器持有跨帧状态：锁定样本、EKF、瞄准槽位、丢失计时。
-// 处理线程是单线程顺序调用，所以这里不需要加锁。
-rotating_armor::RotatingArmorTracker &trackerInstance()
-{
-    static rotating_armor::RotatingArmorTracker instance;
-    return instance;
-}
-
-// 锁定过程对现场调试是黑箱：只在"阶段 / 已攒样本 / 最近被拒原因 / 重锁次数"变化时
-// 打印一行，避免盯着 crc 从 0 跳到 1 干等（实机 CSV 里曾有连续 20s 一行输出都没有）。
-const char *lockPhaseName(rotating_armor::LockPhase phase)
-{
-    switch (phase)
+    // 跟踪器持有跨帧状态：锁定样本、EKF、瞄准槽位、丢失计时。
+    // 处理线程是单线程顺序调用，所以这里不需要加锁。
+    rotating_armor::RotatingArmorTracker &trackerInstance()
     {
-    case rotating_armor::LockPhase::Idle:
-        return "idle";
-    case rotating_armor::LockPhase::Collecting:
-        return "collecting";
-    case rotating_armor::LockPhase::Tracking:
-        return "tracking";
+        static rotating_armor::RotatingArmorTracker instance;
+        return instance;
     }
-    return "?";
-}
 
-void logTrackerDiagnostics(const rotating_armor::TrackerDiagnostics &diagnostics)
-{
-    static std::string last_key;
-    const std::string key = std::string(lockPhaseName(diagnostics.phase)) + "|" +
-                            diagnostics.last_reject + "|" +
-                            std::to_string(std::min(diagnostics.lock_samples, 6)) + "|" +
-                            std::to_string(diagnostics.relock_count);
-    if (key == last_key)
-        return;
-    last_key = key;
-    std::fprintf(stderr, "[ekf] phase=%s lock_samples=%d/%d relock=%d reject=%s\n",
-                 lockPhaseName(diagnostics.phase), diagnostics.lock_samples,
-                 trackerInstance().config().lock_min_samples,
-                 diagnostics.relock_count, diagnostics.last_reject.c_str());
-}
+    // 锁定过程对现场调试是黑箱：只在"阶段 / 已攒样本 / 最近被拒原因 / 重锁次数"变化时
+    // 打印一行，避免盯着 crc 从 0 跳到 1 干等（实机 CSV 里曾有连续 20s 一行输出都没有）。
+    const char *lockPhaseName(rotating_armor::LockPhase phase)
+    {
+        switch (phase)
+        {
+        case rotating_armor::LockPhase::Idle:
+            return "idle";
+        case rotating_armor::LockPhase::Collecting:
+            return "collecting";
+        case rotating_armor::LockPhase::Tracking:
+            return "tracking";
+        }
+        return "?";
+    }
+
+    void logTrackerDiagnostics(const rotating_armor::TrackerDiagnostics &diagnostics)
+    {
+        static std::string last_key;
+        const std::string key = std::string(lockPhaseName(diagnostics.phase)) + "|" +
+                                diagnostics.last_reject + "|" +
+                                std::to_string(std::min(diagnostics.lock_samples, 6)) + "|" +
+                                std::to_string(diagnostics.relock_count);
+        if (key == last_key)
+            return;
+        last_key = key;
+        std::fprintf(stderr, "[ekf] phase=%s lock_samples=%d/%d relock=%d reject=%s\n",
+                     lockPhaseName(diagnostics.phase), diagnostics.lock_samples,
+                     trackerInstance().config().lock_min_samples,
+                     diagnostics.relock_count, diagnostics.last_reject.c_str());
+    }
 
 } // namespace
 

@@ -13,8 +13,21 @@ namespace
 {
 
 constexpr double kPi = 3.141592653589793238462643383279502884;
+// 四块装甲板 90 度对称：相位只有 mod pi/2 的可辨识性。
+constexpr double kHalfPi = 0.5 * kPi;
 // 角速度用前向差分算，步长 1ms：比手推 d(atan2)/dt 不容易错，代价可忽略。
 constexpr double kVelocityDt = 1.0e-3;
+
+// 把角度折到 (-period/2, period/2]。
+double foldPeriod(double value, double period)
+{
+    double wrapped = std::fmod(value + 0.5 * period, period);
+    if (wrapped < 0.0)
+    {
+        wrapped += period;
+    }
+    return wrapped - 0.5 * period;
+}
 
 double clampd(double value, double low, double high)
 {
@@ -194,37 +207,146 @@ void RotatingArmorTracker::collectWorldObservations(
     }
 }
 
+RotatingArmorTracker::CircleFit
+RotatingArmorTracker::fitArmorCircle(const std::deque<LockSample> &samples)
+{
+    CircleFit fit;
+    if (samples.size() < 4)
+    {
+        return fit;
+    }
+    // 初值：位置均值当圆心、平均距离当半径。
+    double mx = 0.0;
+    double my = 0.0;
+    for (const LockSample &sample : samples)
+    {
+        mx += sample.position.x();
+        my += sample.position.y();
+    }
+    mx /= static_cast<double>(samples.size());
+    my /= static_cast<double>(samples.size());
+    double r = 0.0;
+    for (const LockSample &sample : samples)
+    {
+        r += std::hypot(sample.position.x() - mx, sample.position.y() - my);
+    }
+    r /= static_cast<double>(samples.size());
+    // Gauss-Newton：残差 = |p - c| - R，未知量 (cx, cy, R)。
+    for (int iter = 0; iter < 15; ++iter)
+    {
+        Eigen::Matrix3d normal = Eigen::Matrix3d::Zero();
+        Eigen::Vector3d rhs = Eigen::Vector3d::Zero();
+        for (const LockSample &sample : samples)
+        {
+            const double dx = sample.position.x() - mx;
+            const double dy = sample.position.y() - my;
+            const double d = std::hypot(dx, dy);
+            if (d < 1.0e-6)
+            {
+                continue;
+            }
+            const double residual = d - r;
+            const Eigen::Vector3d jacobian(-dx / d, -dy / d, -1.0);
+            normal += jacobian * jacobian.transpose();
+            rhs += jacobian * (-residual);
+        }
+        const Eigen::Vector3d step = normal.ldlt().solve(rhs);
+        if (!step.allFinite())
+        {
+            return fit;
+        }
+        mx += step(0);
+        my += step(1);
+        r += step(2);
+        if (step.norm() < 1.0e-9)
+        {
+            break;
+        }
+    }
+    double sum = 0.0;
+    for (const LockSample &sample : samples)
+    {
+        const double residual =
+            std::hypot(sample.position.x() - mx, sample.position.y() - my) - r;
+        sum += residual * residual;
+    }
+    fit.cx = mx;
+    fit.cy = my;
+    fit.radius = r;
+    fit.residual = std::sqrt(sum / static_cast<double>(samples.size()));
+    fit.ok = std::isfinite(fit.cx) && std::isfinite(fit.cy) &&
+             std::isfinite(fit.radius) && fit.radius > 0.0;
+    return fit;
+}
+
 bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
                                    double timestamp_s, const GimbalState &gimbal)
 {
     (void)gimbal;
 
-    // 1) 攒样本：只有"带板面法向 + 有编号 + 与上一帧连续"的观测才进缓冲区。
-    //    连续性检查是必须的：同一辆车其它装甲板的法向相差 2*pi*k/N，
-    //    混进来会让拟合出的角速度完全失真。
-    // 连续性优先于"哪块更准"：同一辆车的不同装甲板法向相差 2*pi*k/N，
-    // 一旦混进一个不连续的样本，后面解缠出来的角速度就完全失真。
+    // 1) 攒样本：只收"带板面法向 + 有编号"的观测，并且跟上一帧挂上关系。
+    //
+    //    两种关系都允许：
+    //    - 同板（法向差 <= 0.45 rad）：链上的正常一步；
+    //    - 换板（法向差接近 pi/2 的整数倍）：旋转车每转 90 度就换一块板露出来，
+    //      这时单板位置会跳、但车体相位是连续的。旧实现把换板直接丢掉，于是
+    //      旋转目标的链永远长不到 lock_min_span_s（实测卡在 10 个样本，
+    //      last_reject=lock:waiting_continuity），一次也锁不上。
+    //
+    //    换板的样本仍然保留（几何上它是另一块板的真实位置），但要打标记：
+    //    算角速度时必须跳过它，否则 90 度的跳变会被当成"转得飞快"。
     const WorldObservation *pick = nullptr;
+    bool pick_handoff = false;
     const bool have_last = !lock_samples_.empty();
     const double last_yaw = have_last ? lock_samples_.back().yaw : 0.0;
+    const int last_id = have_last ? lock_samples_.back().target_id : 0;
     for (const WorldObservation &observation : world)
     {
         if (observation.target_id == 0 || !observation.has_yaw)
         {
             continue;
         }
-        if (have_last && std::fabs(wrapToPi(observation.yaw - last_yaw)) > 0.45)
+        if (have_last && observation.target_id != last_id)
         {
             continue;
         }
-        if (pick == nullptr || observation.sigma_position_m < pick->sigma_position_m)
+        const double delta = wrapToPi(observation.yaw - last_yaw);
+        bool handoff = false;
+        if (have_last)
+        {
+            // 同板门限要比法向抖动宽：板面法向的单帧抖动在 0.05 rad 量级，
+            // 而合成夹具里故意放到了 0.35 rad，0.45 rad 的门限会把 ~18% 的
+            // 相邻帧判成"断链"，链永远长不到 10 个样本。1.2 rad 仍远小于
+            // pi/2 = 1.57，换板照样能区分。
+            if (std::fabs(delta) <= 1.2)
+            {
+                handoff = false;
+            }
+            else if (std::fabs(delta) < kHalfPi + 0.7)
+            {
+                const double residual =
+                    delta - std::round(delta / kHalfPi) * kHalfPi;
+                if (std::fabs(residual) > 0.6)
+                {
+                    continue; // 既不是同板也不是换板：多半是别的目标
+                }
+                handoff = true;
+            }
+            else
+            {
+                continue;
+            }
+        }
+        if (pick == nullptr ||
+            (!pick_handoff && handoff) ||
+            (!pick_handoff && !handoff && std::fabs(delta) < std::fabs(wrapToPi(pick->yaw - last_yaw))))
         {
             pick = &observation;
+            pick_handoff = handoff;
         }
     }
     if (pick == nullptr && have_last)
     {
-        // 本帧没有和上一帧连续的板：这一帧不加样本，等缓冲区自然过期后重开一条链。
         diagnostics_.lock_samples = static_cast<int>(lock_samples_.size());
         diagnostics_.last_reject = "lock:waiting_continuity";
         return false;
@@ -232,7 +354,7 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
     if (pick != nullptr)
     {
         lock_samples_.push_back(
-            LockSample{timestamp_s, pick->position, pick->yaw, pick->target_id});
+            LockSample{timestamp_s, pick->position, pick->yaw, pick->target_id, pick_handoff});
     }
     while (!lock_samples_.empty() &&
            timestamp_s - lock_samples_.front().timestamp_s > config_.lock_max_age_s)
@@ -253,51 +375,66 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
         return false;
     }
 
-    // 2) 板面法向 yaw 的序列（解缠）+ 最小二乘斜率 = 角速度。
+    // 2) 相位序列：按 wrapToPi 解缠（几何正确，换板带来的 90 度就是真实的
+    //    另一块板的位置）。角速度只用"同板步长"算，并对步长取中位数抗离群。
     const std::size_t count = lock_samples_.size();
     const double t_last = lock_samples_.back().timestamp_s;
+    // 2b) 角速度：把"换板跳变"从相位里减掉，得到车体的连续相位，再整段拟合。
+    //
+    //     换板那一步的法向跳变是 pi/2 的整数倍，把这个整数倍扣掉之后剩下的
+    //     才是车体真正转过的角度。扣完以后所有样本都能参与拟合（不必只挑一段
+    //     同板的），166fps 下单帧 0.03 rad 的弱信号也能靠 0.3-0.5 s 的基线
+    //     平均出来；否则一旦亮出来的板每几帧就换一次，最长同板段不足 5 个样本，
+    //     速率永远测不出来（合成夹具里就是这个现象：reject=lock:rate_ambiguous）。
     std::vector<double> times(count, 0.0);
     std::vector<double> phases(count, 0.0);
+    std::vector<double> body(count, 0.0);
     for (std::size_t i = 0; i < count; ++i)
     {
         times[i] = lock_samples_[i].timestamp_s - t_last;
-        phases[i] = (i == 0)
-                        ? lock_samples_[i].yaw
-                        : phases[i - 1] + wrapToPi(lock_samples_[i].yaw -
-                                                   lock_samples_[i - 1].yaw);
+        if (i == 0)
+        {
+            phases[0] = lock_samples_[0].yaw;
+            body[0] = 0.0;
+            continue;
+        }
+        const double delta = wrapToPi(lock_samples_[i].yaw - lock_samples_[i - 1].yaw);
+        phases[i] = phases[i - 1] + delta;
+        const double jump = lock_samples_[i].handoff
+                                ? std::round(delta / kHalfPi) * kHalfPi
+                                : 0.0;
+        body[i] = body[i - 1] + (delta - jump);
     }
-    const LinearFit fit = fitLinear(times, phases);
-    if (!fit.ok)
+    const LinearFit fit = fitLinear(times, body);
+    diagnostics_.last_reject = "lock:rate_ambiguous";
+    if (!fit.ok || count < 6)
     {
-        diagnostics_.last_reject = "lock:fit_failed";
         return false;
     }
     const double omega = fit.slope;
+    const double slope_error = fit.slope_error;
+
     double phase_spread = 0.0;
     for (std::size_t i = 0; i < count; ++i)
     {
-        phase_spread = std::max(phase_spread, std::fabs(phases[i] - fit.intercept));
+        phase_spread = std::max(phase_spread, std::fabs(body[i] - body[count - 1]));
     }
+
+    const LockSample last = lock_samples_.back();
+    double radius =
+        clampd(config_.radius_prior_m, config_.radius_min_m, config_.radius_max_m);
+    bool radius_from_data = false;
 
     // 3) 半径与"车体在板的哪一侧"：解线性最小二乘
     //      p_k = c + v*(t_k - t_last) - R*[cos(phi_k), sin(phi_k)]
     //    未知量 (cx, cy, vx, vy, R)。R 的符号直接回答法向是朝外还是朝内。
     //    目标不转（相位几乎不扫）时 R 与中心不可分辨，退回"车体在板背后"的
     //    几何先验 + 配置半径。
-    const LockSample last = lock_samples_.back();
-    double radius = clampd(config_.radius_prior_m, config_.radius_min_m, config_.radius_max_m);
-    bool radius_from_data = false;
-
-    // 相机只能看到装甲板正面，所以"车体中心在板背后"是可靠几何先验：
-    // 板面外法向 yaw 应背离视线方向，即模型相位 = yaw + pi。
     const double ray = std::atan2(last.position.y(), last.position.x());
     const double inside = std::fabs(wrapToPi(wrapToPi(last.yaw) - ray));
     const double outside = std::fabs(wrapToPi(wrapToPi(last.yaw + kPi) - ray));
-    bool flipped = outside < inside;
+    const bool flipped = outside < inside;
 
-    // 只有相位确实扫过一段（>=30度）且样本足够多，才敢让数据决定半径：
-    // 相位几乎不扫时 R 与车体中心在最小二乘里几乎共线，解出来的 R 符号会乱跳，
-    // 一旦把相位判断翻错，车体中心就会落到相机这一侧（偏差 2R）。
     if (phase_spread >= config_.phase_spread_for_radius_rad && count >= 12)
     {
         const int rows = static_cast<int>(count) * 2;
@@ -335,25 +472,42 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
     }
 
     const double phase_last = wrapToPi(last.yaw + (flipped ? kPi : 0.0));
+    // 声明"不转"必须有据：速率接近 0 且拟合标准误小。速率本身测不准时
+    // （噪声大、样本短）不能拿"static_rate_rad_s"兜底——那正是旧实现把
+    // 2-8 rad/s 的旋转目标全判成 Static、然后硬钉住、整段跟踪 0 次更新的原因。
+    // 转速接近 0 且满足下列任一条，才声明"不转"：
+    //   - 拟合标准误小（速率测得准）；
+    //   - 板面法向几乎没扫开（相位不动 ⇒ 车体没转，与速率估得准不准无关）。
+    // 第二条是给"法向抖动比转速还大"的场合兜底的：抖动大时速率估不准，但
+    // "压根没扫开"这个事实本身很强。
+    const double static_confidence = std::max(1.0, 0.5 * config_.static_rate_rad_s);
     const bool is_static =
-        std::fabs(omega) <= std::max(config_.static_rate_rad_s, 2.5 * fit.slope_error);
-
+        std::fabs(omega) <= config_.static_rate_rad_s &&
+        (slope_error <= static_confidence || phase_spread < 0.15);
     EkfInitPrior prior;
     prior.radius_m = radius;
     prior.plate_slot = 0; // 槽位基准任意：相对相位才是物理量
     prior.spin = is_static ? SpinPriorKind::Static : SpinPriorKind::Spinning;
     prior.yaw_rate_prior_rad_s = is_static ? 0.0 : omega;
-    prior.position_sigma_m = 0.06;
+    prior.position_sigma_m = 0.15;
     prior.velocity_sigma_m_s = 1.0;
-    prior.yaw_sigma_rad = std::max(config_.normal_sigma_rad, 0.15);
-    prior.yaw_rate_sigma_rad_s = is_static ? 0.0 : std::max(0.5, 2.0 * fit.slope_error);
+    // 首帧的相位来自单帧板面法向（实拍里小目标法向抖动可达 10 度以上），
+    // 初值给宽容一点，让随后的更新把它拉正；给太紧会把 0.2-0.3m 的初值偏差
+    // 全部判成离群，于是整段跟踪 0 次更新。
+    prior.yaw_sigma_rad = 0.80;
+    prior.yaw_rate_sigma_rad_s =
+        is_static ? 0.0 : clampd(2.0 * slope_error, 0.8, 6.0);
     prior.radius_sigma_m = config_.radius_sigma_m;
 
     ArmorObservation observation;
     observation.position = last.position;
     observation.sigma_position_m = config_.position_sigma_m;
     observation.has_world_yaw = true;
-    // initialize() 的约定：world_yaw_rad 是板面"外法向"（从车体中心指向板）。
+    // initialize() 的约定：world_yaw_rad 是板面"外法向"，方向 = 从车体中心指向板。
+    //
+    // 这里曾经多加了 pi（把"朝外的法向"当成"朝里的法向"），于是车体中心被放到
+    // 板的另一侧、差 2R。静止目标能自己收敛回去（板位置不变，只是 yaw 差 pi），
+    // 旋转目标就完全跟不上：实测 v4 的 3 号板锁定后 104 次更新全被门限拒绝。
     observation.world_yaw_rad = wrapToPi(phase_last + kPi);
     if (ekf_.initialize(observation, prior) != EkfInitStatus::Ok)
     {
@@ -453,7 +607,14 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                 {
                     continue;
                 }
-                if (nis > config_.nis_gate)
+                // 锁定的头几次更新只靠位置门：初值来自单帧板面法向，实拍里
+                // 小目标的法向抖 10 度以上，初值偏差常在 2R 量级，用 NIS 门
+                // 会把它们全部判成离群，于是"锁定后 0 次更新"。放行几次让滤波器
+                // 收敛，之后 NIS 门照常把关。
+                const bool bootstrapping =
+                    diagnostics_.accepted_updates <
+                    static_cast<std::uint64_t>(std::max(config_.bootstrap_updates, 0));
+                if (!bootstrapping && nis > config_.nis_gate)
                 {
                     continue;
                 }
@@ -597,6 +758,8 @@ PredictionResult RotatingArmorTracker::buildResult(const GimbalState &gimbal,
     double best_error = std::numeric_limits<double>::infinity();
     for (int slot = 0; slot < plate_count; ++slot)
     {
+        // 世界系本身就是控制器用的绝对角参考系（观测在 collectWorldObservations
+        // 里已按云台姿态转过一次），这里不能再转回去，否则会把云台角算两遍。
         const Eigen::Vector3d plate = platePosition(probe.state(), slot, plate_count);
         const double error =
             std::max(std::fabs(wrapToPi(vectorYaw(plate) - gimbal.yaw)),
@@ -616,6 +779,7 @@ PredictionResult RotatingArmorTracker::buildResult(const GimbalState &gimbal,
     diagnostics_.aim_slot = best_slot;
 
     const Eigen::Vector3d plate = platePosition(probe.state(), best_slot, plate_count);
+    diagnostics_.predicted_aim_world = plate;
     const double distance = plate.norm();
     if (!(distance > 1.0e-6))
     {
@@ -684,16 +848,28 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
     std::vector<WorldObservation> world;
     collectWorldObservations(observations, gimbal, world);
 
-    // 本帧观测里出现最多的非零编号：用于识别"换了目标车"。
+    // 本帧是否还有"锁定编号"的观测，以及本帧出现最多的非零编号（用于换目标）。
+    //
+    // 这里曾经用"本帧观测最多的编号"直接判换目标，在旋转车体上会误判：一台车
+    // 同时露出两块同编号装甲板时，票数会投给它，而另一台车只有一块——于是锁定
+    // 的车还在视野里却被判成"换了目标"，实测每 30 帧就重锁一次（见
+    // test_camera_playback 回放 tmp/v4.avi 的 target_switch 日志）。
+    // 改为：只有锁定编号连续两帧都检测不到、且本帧有其他编号时，才换目标。
+    bool locked_id_present = false;
     int frame_id = 0;
     {
         std::map<int, int> counts;
         for (const WorldObservation &observation : world)
         {
-            if (observation.target_id != 0)
+            if (observation.target_id == 0)
             {
-                ++counts[observation.target_id];
+                continue;
             }
+            if (observation.target_id == target_id_)
+            {
+                locked_id_present = true;
+            }
+            ++counts[observation.target_id];
         }
         int best = 0;
         for (const auto &entry : counts)
@@ -717,18 +893,18 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
     }
     diagnostics_.phase = LockPhase::Tracking;
 
-    // 目标切换：连续两帧都是别的编号才认，避免编号抖动导致频繁重锁。
-    if (frame_id != 0 && frame_id != target_id_)
+    // 目标切换：锁定编号连续两帧消失、且画面里有别的编号，才换目标。
+    if (locked_id_present)
+    {
+        other_id_streak_ = 0;
+    }
+    else if (frame_id != 0 && frame_id != target_id_)
     {
         if (++other_id_streak_ >= 2)
         {
             dropTarget("target_switch");
             return PredictionResult{};
         }
-    }
-    else
-    {
-        other_id_streak_ = 0;
     }
 
     const double dt = timestamp_seconds - state_timestamp_s_;

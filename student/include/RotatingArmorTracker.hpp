@@ -45,8 +45,8 @@ struct TrackerConfig
     double normal_sigma_rad{0.35};
 
     // === 锁定 ===
-    int lock_min_samples{6};          // 至少攒到的帧数（只收带法向的观测）
-    double lock_min_span_s{0.18};     // 至少覆盖的时间跨度
+    int lock_min_samples{10};         // 至少攒到的帧数（只收带法向的观测）
+    double lock_min_span_s{0.30};     // 至少覆盖的时间跨度（短了圆拟合与转速都不可辨）
     double lock_max_age_s{0.50};      // 更早的样本丢掉（目标可能已经换了）
     double radius_prior_m{0.25};      // 无数据先验：实车按底盘实测
     double radius_sigma_m{0.10};
@@ -57,7 +57,8 @@ struct TrackerConfig
 
     // === 关联 / 门限 ===
     double position_gate_m{0.60}; // 单板位置门限（含中心先验不确定的余量）
-    double nis_gate{11.34};       // chi2(3 dof) 99.5%
+    double nis_gate{11.34};
+    int bootstrap_updates{10}; // 锁定期头几次更新先放宽 NIS 门（初值靠单帧法向，偏差可比预想大）       // chi2(3 dof) 99.5%
     int max_updates_per_frame{2}; // 同一帧最多用几块板更新（防止病态约束）
 
     // === 状态机 ===
@@ -109,6 +110,8 @@ struct TrackerDiagnostics
     int target_id{0};
     int relock_count{0};
     std::string last_reject;
+    // 本帧预测出的瞄准点（世界系），离线回放评估用：与同帧检测到的板心比距离。
+    Eigen::Vector3d predicted_aim_world{0.0, 0.0, 0.0};
 };
 
 class RotatingArmorTracker
@@ -148,7 +151,19 @@ private:
         Eigen::Vector3d position{0.0, 0.0, 0.0};
         double yaw{0.0}; // 板面法向 yaw（世界系，mod pi 待定）
         int target_id{0};
+        bool handoff{false}; // 与上一个样本之间换了板（相差 pi/2 的整数倍）
     };
+
+    // 位置圆拟合（车体中心 + 半径），Gauss-Newton。
+    struct CircleFit
+    {
+        double cx{0.0};
+        double cy{0.0};
+        double radius{0.0};
+        double residual{0.0};
+        bool ok{false};
+    };
+    static CircleFit fitArmorCircle(const std::deque<LockSample>& samples);
 
     // 观测 -> 跟踪系（含剔除明显非法的观测）。
     void collectWorldObservations(const std::vector<ArmorPose>& observations,

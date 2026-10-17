@@ -340,7 +340,9 @@ void scenarioTargetSwitch()
             break;
         }
     }
-    std::printf("重锁帧=%d 重锁次数=%d\n", relocked, rig.tracker.diagnostics().relock_count);
+    std::printf("重锁帧=%d 重锁次数=%d samples=%d reject=%s\n", relocked,
+                rig.tracker.diagnostics().relock_count, rig.tracker.diagnostics().lock_samples,
+                rig.tracker.diagnostics().last_reject.c_str());
     check(relocked >= 0, "E 重新锁定到新目标编号");
 }
 
@@ -362,7 +364,20 @@ void scenarioLatencyCompensation()
     {
         a = plain.step(true, false);
         b = delayed.step(true, false);
+        if (frame % 20 == 0)
+        {
+            std::printf("  f=%d phase=%d samples=%d relock=%d reject=%s\n", frame,
+                        static_cast<int>(plain.tracker.diagnostics().phase),
+                        plain.tracker.diagnostics().lock_samples,
+                        plain.tracker.diagnostics().relock_count,
+                        plain.tracker.diagnostics().last_reject.c_str());
+        }
     }
+    std::printf("F 诊断: plain phase=%d samples=%d reject=%s | delayed reject=%s\n",
+                static_cast<int>(plain.tracker.diagnostics().phase),
+                plain.tracker.diagnostics().lock_samples,
+                plain.tracker.diagnostics().last_reject.c_str(),
+                delayed.tracker.diagnostics().last_reject.c_str());
     const double difference = static_cast<double>(b.distance_m) - static_cast<double>(a.distance_m);
     std::printf("无延迟距离=%.3f 加 0.1s 延迟=%.3f 差=%.3f (期望约 %.3f)\n",
                 static_cast<double>(a.distance_m), static_cast<double>(b.distance_m), difference,

@@ -201,6 +201,12 @@ add_executable(test_batch tests/test_batch.cpp)
 target_link_libraries(test_batch PRIVATE training_core ${OpenCV_LIBS})
 target_include_directories(test_batch PRIVATE ${OpenCV_INCLUDE_DIRS})
 
+# 离线回放：把录制的视频喂进完整链路（检测 -> PnP -> 可选 EKF），用于在没有
+# 相机现场时评估视觉识别质量，以及用真实序列做 EKF 关联/锁定/预测的离线调参。
+add_executable(test_camera_playback tests/test_camera_playback.cpp)
+target_link_libraries(test_camera_playback PRIVATE training_core ${OpenCV_LIBS})
+target_include_directories(test_camera_playback PRIVATE ${OpenCV_INCLUDE_DIRS})
+
 # 实时相机取流 + 装甲板检测（相机必须已连接）。
 add_executable(test_camera_live tests/test_camera_live.cpp)
 target_link_libraries(test_camera_live PRIVATE training_core ${OpenCV_LIBS})
