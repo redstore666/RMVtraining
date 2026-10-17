@@ -82,6 +82,7 @@ bool tightly_converged(const Error& e) {
 } // namespace
 
 int main() {
+    constexpr double kHalfPi = 0.5 * kPi;
     constexpr double kSigmaMeasurement = 0.01;
     constexpr double kSigmaYaw = 0.05;
 
@@ -89,6 +90,34 @@ int main() {
     const TruthRun degraded_truth = withoutWorldYaw(truth);
     const TruthRun static_truth =
         simulateTruth(staticTruthState(), kSigmaMeasurement, kSigmaYaw, 20240607u, true);
+
+    // ---- 相位观测（updatePhase）：按 2*pi/N 折叠，换板必须无副作用 ----
+    {
+        RotatingArmorEkf ekf;
+        EkfInitPrior prior = makePrior(SpinPriorKind::Spinning, 2.5);
+        ArmorObservation observation;
+        observation.position = rotating_armor::measurement(truth.states[0], kObservedSlot, kPlateCount);
+        observation.sigma_position_m = kSigmaMeasurement;
+        observation.has_world_yaw = true;
+        observation.world_yaw_rad = truthWorldYaw(truth.states[0], kObservedSlot);
+        ekf.initialize(observation, prior);
+        const double yaw0 = ekf.state()(6);
+        // 同一块板：残差为 0，状态不动
+        ekf.updatePhase(yaw0 + kPi, 0.12);
+        expect(std::fabs(rotating_armor::wrapAngle(ekf.state()(6) - yaw0)) < 0.02,
+               "相位观测：同板观测不应拉动 yaw");
+        // 换到相邻板：差 pi/2，折叠后仍为 0
+        ekf.updatePhase(yaw0 + kPi + kHalfPi, 0.12);
+        expect(std::fabs(rotating_armor::wrapAngle(ekf.state()(6) - yaw0)) < 0.05,
+               "相位观测：换板（差 pi/2）不应把 yaw 带偏");
+        // 真偏了 0.3 rad：应当被拉回
+        const double before = ekf.state()(6);
+        ekf.updatePhase(before + kPi + 0.30, 0.12);
+        expect(std::fabs(rotating_armor::wrapAngle(ekf.state()(6) - before)) < 0.30 &&
+                   std::fabs(rotating_armor::wrapAngle(ekf.state()(6) - before)) > 0.05,
+               "相位观测：偏差 0.3rad 时应朝观测方向修正一部分");
+        std::cout << "相位观测: 同板/换板/偏差三种情形行为符合预期\n";
+    }
 
     std::cout << std::fixed << std::setprecision(4);
     std::cout << "=== 首帧锁定契约测试 ===\n";

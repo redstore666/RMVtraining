@@ -829,6 +829,13 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
         diagnostics_.last_nis = best_nis;
         if (chosen.has_yaw)
         {
+            // 相位观测：板面法向直接约束车体 yaw（折叠掉 2pi/N 的换板歧义）。
+            // 它和位置观测吃的是同一帧的同一块板，但因为折叠，换板不会把
+            // 相位带歪——这正是位置关联最脆弱的地方。
+            if (config_.phase_update_enabled)
+            {
+                ekf_.updatePhase(chosen.yaw, config_.phase_update_sigma_rad);
+            }
             pushNormalHistory(best_slot, timestamp_s, chosen.yaw);
         }
     }
@@ -904,7 +911,8 @@ PredictionResult RotatingArmorTracker::buildResult(const GimbalState &gimbal,
     // 新鲜度按"距上次被接收的更新多少秒"判，不按丢帧数：相机帧率变化时
     // 帧数门限的含义会漂移（166fps 下 2 帧只有 12ms，实拍里会长期卡在 Unstable）。
     const double stale_s = has_accept_ ? (timestamp_s - last_accept_s_) : 1e9;
-    const bool fresh_enough = has_accept_ && stale_s <= config_.stale_after_s;
+    const double stale_window_s = staleWindowSeconds();
+    const bool fresh_enough = has_accept_ && stale_s <= stale_window_s;
     diagnostics_.stability = stable_reason(consecutive_updates_ >= config_.stable_updates,
                                              ekf_.phase_resolved(), fresh_enough,
                                              timestamp_s - last_accept_s_);
@@ -1100,6 +1108,14 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
     }
 
     const double dt = timestamp_seconds - state_timestamp_s_;
+    if (dt > 0.0 && dt < 1.0)
+    {
+        recent_dt_.push_back(dt);
+        while (recent_dt_.size() > 9)
+        {
+            recent_dt_.pop_front();
+        }
+    }
     if (!(dt >= 0.0) || dt > config_.timeout_s)
     {
         dropTarget("state_stale");
@@ -1151,6 +1167,21 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
         return PredictionResult{};
     }
     return buildResult(gimbal, timestamp_seconds);
+}
+
+double RotatingArmorTracker::staleWindowSeconds() const
+{
+    double window = config_.stale_after_s;
+    if (!recent_dt_.empty())
+    {
+        std::deque<double> sorted(recent_dt_);
+        std::sort(sorted.begin(), sorted.end());
+        const double dt_median = sorted[sorted.size() / 2];
+        const double by_frames =
+            std::max(config_.stale_min_s, config_.stale_min_frames * dt_median);
+        window = std::min(window, by_frames);
+    }
+    return window;
 }
 
 } // namespace rotating_armor

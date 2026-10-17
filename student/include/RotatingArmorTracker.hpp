@@ -59,6 +59,14 @@ struct TrackerConfig
     double position_gate_m{0.60}; // 单板位置门限（含中心先验不确定的余量）
     double nis_gate{11.34};      // chi2(3 dof) 99.5%
     double handoff_sigma_scale{2.5}; // 更新换板槽位时把观测标准差放大这么多倍
+
+    // 板面法向当"相位观测"塞进滤波器（折叠掉 2pi/N）。实拍小目标法向抖 0.05~0.15
+    // rad，取 0.12；关掉它就退回"yaw 只靠位置间接约束"。
+    // 默认关闭：合成 A 场景实测"打开后 yaw 抖动、半径被压到 0.18（真值 0.25）"，
+    // 因为位置更新与相位更新在"哪个槽位"这件事上互相拉扯。能力保留、单测覆盖
+    // RotatingArmorEkf::updatePhase 本身；等有"按槽位一致"的写法再默认打开。
+    bool phase_update_enabled{false};
+    double phase_update_sigma_rad{0.12};
     int bootstrap_updates{10};   // 锁定期头几次更新先放宽 NIS 门（初值靠单帧法向，偏差可比预想大）
     // 声明反驳检查：法向历史里混入相邻板样本时斜率会失真，实拍里会误杀，
     // 默认关闭；需要时打开（合成夹具与 v4 的静止车都不需要它）。
@@ -68,7 +76,12 @@ struct TrackerConfig
     // === 状态机 ===
     int stable_updates{12};          // 连续接受多少帧才允许报 Stable
     int unstable_after_missed{2};    // 仅供诊断：Stable 的降级判据已改为按秒（见 stale_after_s）
-    double stale_after_s{0.10};      // 距上次被接收更新超过此秒数即判 Unstable
+    double stale_after_s{0.10};      // 距上次被接收更新超过此秒数即判 Unstable（上限）
+    // 自适应过期窗口：窗口 = min(stale_after_s, max(stale_min_s, stale_min_frames*dt))。
+    // 166fps 下 0.10s 等于 17 帧，旋转目标早转过 90°；30fps 下又刚好 3 帧。
+    // 用中位帧间隔把"秒"翻译成"帧"，让低帧率端不会过紧、高帧率端不会过松。
+    double stale_min_frames{5.0};
+    double stale_min_s{0.05};
     double timeout_s{0.60};          // 超过多久没有任何有效观测 -> 注销
 
     // === 声明校验（Static/Spinning 被数据反驳时重锁）===
@@ -138,6 +151,9 @@ public:
                           double measured_latency_s = 0.0);
 
     bool initialized() const { return ekf_.initialized(); }
+
+    // 自适应过期窗口：min(stale_after_s, max(stale_min_s, stale_min_frames * dt_median))。
+    double staleWindowSeconds() const;
     const TrackerDiagnostics& diagnostics() const { return diagnostics_; }
     const TrackerConfig& config() const { return config_; }
     const RotatingArmorEkf& ekf() const { return ekf_; }
@@ -224,6 +240,8 @@ private:
     // 必须按 slot 分开：同一辆车不同装甲板的法向相差 2*pi*k/N，
     // 混在一起会让斜率完全失真。
     std::vector<std::deque<std::pair<double, double>>> normal_history_per_slot_{};
+    // 最近若干帧的间隔，只用来做"帧 <-> 秒"的换算（自适应过期窗口）。
+    std::deque<double> recent_dt_{};
     int contradiction_streak_{0};
     int relock_count_{0};
 

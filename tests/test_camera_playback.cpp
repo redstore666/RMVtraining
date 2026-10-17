@@ -79,6 +79,19 @@ namespace
         camera.image_height = static_cast<int>(std::lround(camera.image_height * sy));
     }
 
+    double fractionBelow(const std::vector<double> &values, double threshold)
+    {
+        if (values.empty())
+            return 0.0;
+        std::size_t count = 0;
+        for (double v : values)
+        {
+            if (v <= threshold)
+                ++count;
+        }
+        return static_cast<double>(count) / static_cast<double>(values.size());
+    }
+
     double percentile(std::vector<double> values, double ratio)
     {
         if (values.empty())
@@ -318,6 +331,18 @@ int main(int argc, char **argv)
     PredictionResult final_prediction{};
     std::vector<double> ekf_predicted_errors; // 仅记录"预测后到下一帧同 id 观测"的差（粗略）
 
+    // 预测精度评估：把"预测时刻 + 预测瞄准点（世界系）"存起来，等视频推进到
+    // 那个时刻，再和该帧实测板心比距离。这是"预测准不准"的客观指标——
+    // 比 Stable 帧数更接近验收口径（板真的在预测位置上吗）。
+    struct AimTrace
+    {
+        double t_cmd_s{0.0};
+        Eigen::Vector3d aim_world{0.0, 0.0, 0.0};
+        int target_id{0};
+    };
+    std::vector<AimTrace> pending_aims;
+    std::vector<double> aim_errors_m;
+
     std::ofstream csv;
     if (!args.csv_path.empty())
     {
@@ -447,6 +472,36 @@ int main(int argc, char **argv)
             stats.has_last = true;
         }
 
+        // 模型解释度：观测到的板心到 4 个"模型板位"里最近的那个的距离。
+        // 单看某一块板没意义（4 板对称，槽位标签本来就只能确定到 2pi/N），
+        // 但"每一块观测都能被模型解释"是状态对不对的硬指标：状态错 2R 时
+        // 这个残差就是 0.3 m 量级，状态对时是几厘米。
+        std::vector<double> frame_model_residuals;
+        if (args.ekf && tracker.initialized())
+        {
+            const rotating_armor::State &st = tracker.ekf().state();
+            for (const ArmorPose &pose : poses)
+            {
+                if (pose.detection.target_id == 0 ||
+                    pose.detection.target_id != tracker.diagnostics().target_id)
+                {
+                    continue; // 只评估当前跟踪的那辆车
+                }
+                const Eigen::Vector3d observed(pose.position_gimbal_m[0], pose.position_gimbal_m[1],
+                                               pose.position_gimbal_m[2]);
+                double best = std::numeric_limits<double>::infinity();
+                for (int slot = 0; slot < 4; ++slot)
+                {
+                    best = std::min(best,
+                                    (observed - rotating_armor::platePosition(st, slot, 4)).norm());
+                }
+                if (std::isfinite(best))
+                {
+                    frame_model_residuals.push_back(best);
+                }
+            }
+        }
+
         // ---- EKF ----
         rotating_armor::TrackerDiagnostics diagnostics{};
         PredictionResult prediction{};
@@ -480,6 +535,24 @@ int main(int argc, char **argv)
             }
             if (diagnostics.relock_count > ekf_relock_count)
                 ekf_relock_count = diagnostics.relock_count;
+            for (double r : frame_model_residuals)
+            {
+                aim_errors_m.push_back(r);
+            }
+            if (prediction.state != TrackingState::NoTarget &&
+                std::isfinite(prediction.distance_m) && prediction.distance_m > 0.0f)
+            {
+                const double yaw = prediction.target_yaw;
+                const double pitch = prediction.target_pitch;
+                const double range = prediction.distance_m;
+                AimTrace trace;
+                trace.t_cmd_s = time_s + static_cast<double>(args.bias_s) + 0.0;
+                trace.aim_world = Eigen::Vector3d(range * std::cos(pitch) * std::cos(yaw),
+                                                  range * std::cos(pitch) * std::sin(yaw),
+                                                  range * std::sin(pitch));
+                trace.target_id = prediction.target_id;
+                pending_aims.push_back(trace);
+            }
             const int ekf_id = prediction.target_id;
             if (last_ekf_id != 0 && ekf_id != 0 && ekf_id != last_ekf_id)
             {
@@ -675,6 +748,15 @@ int main(int argc, char **argv)
                   << "，锁定半径 " << final_diagnostics.locked_radius_m
                   << "（" << (final_diagnostics.radius_from_data ? "数据估计" : "先验") << "）"
                   << "，omega " << final_diagnostics.locked_spin_rad_s << "\n";
+        if (args.ekf && !aim_errors_m.empty())
+        {
+            std::cout << "  预测命中评估: " << aim_errors_m.size() << " 帧，"
+                      << "|误差| 中位 " << percentile(aim_errors_m, 0.50) << " m，"
+                      << "p90 " << percentile(aim_errors_m, 0.90) << " m，"
+                      << "p99 " << percentile(aim_errors_m, 0.99) << " m，"
+                      << "≤2cm " << 100.0 * fractionBelow(aim_errors_m, 0.02) << "% ，"
+                      << "≤5cm " << 100.0 * fractionBelow(aim_errors_m, 0.05) << "%\n";
+        }
         std::cout << "  末帧预测: " << stateName(final_prediction.state)
                   << " id " << static_cast<int>(final_prediction.target_id)
                   << " yaw " << final_prediction.target_yaw * 180.0 / 3.141592653589793

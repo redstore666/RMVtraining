@@ -18,6 +18,13 @@ double positiveOr(double value, double fallback) {
     return (std::isfinite(value) && value > 0.0) ? value : fallback;
 }
 
+// 把角度折叠到一个周期内（[-period/2, period/2)）。四板对称下 period = pi/2：
+// 换到相邻那块板差一个整周期，折叠后残差为 0，这正是"板面法向能直接约束
+// 车体 yaw"的数学形式。
+double foldPeriod(double value, double period) {
+    return std::remainder(value, period);
+}
+
 } // namespace
 
 const char* toString(EkfInitStatus status) noexcept {
@@ -185,6 +192,38 @@ bool RotatingArmorEkf::update(const ArmorObservation& observation, int plate_slo
     // Joseph 形式：数值上比 (I - K H) P 更稳，且保持对称。
     const Covariance i_kh = Covariance::Identity() - k * h_jacobian;
     covariance_ = i_kh * covariance_ * i_kh.transpose() + k * r * k.transpose();
+
+    if (!state_.allFinite() || !covariance_.allFinite()) {
+        reset();
+        return false;
+    }
+    return true;
+}
+
+bool RotatingArmorEkf::updatePhase(double measured_world_yaw, double sigma_rad) {
+    if (!initialized_ || !std::isfinite(measured_world_yaw) || !std::isfinite(sigma_rad) ||
+        !(sigma_rad > 0.0) || config_.plate_count <= 0) {
+        return false;
+    }
+
+    // 残差按 2pi/N 折叠：换到另一块板时差一个整周期，折叠后为 0。
+    const double period = 2.0 * kPi / static_cast<double>(config_.plate_count);
+    const double residual = foldPeriod(state_(6) - measured_world_yaw, period);
+
+    // 只有 yaw 这一维参与，H 是一个行向量 e6。
+    const double s = covariance_(6, 6) + sigma_rad * sigma_rad;
+    if (!(s > 0.0)) {
+        return false;
+    }
+    const Eigen::Matrix<double, 9, 1> k = covariance_.col(6) / s;
+
+    state_ = state_ + k * residual;
+    state_(6) = wrapAngle(state_(6));
+
+    // Joseph 形式（标量观测）：P = (I - k e6') P (I - k e6')' + k sigma^2 k'
+    Eigen::Matrix<double, 9, 9> i_kh = Eigen::Matrix<double, 9, 9>::Identity();
+    i_kh.row(6) -= k.transpose();
+    covariance_ = i_kh * covariance_ * i_kh.transpose() + sigma_rad * sigma_rad * (k * k.transpose());
 
     if (!state_.allFinite() || !covariance_.allFinite()) {
         reset();

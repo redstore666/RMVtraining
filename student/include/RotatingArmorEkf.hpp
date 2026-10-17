@@ -122,6 +122,14 @@ public:
     // 让调用方重新锁定，而不是继续把 NaN 传播出去。
     bool update(const ArmorObservation& observation, int plate_slot);
 
+    // 用"板面法向的世界朝角"直接观测车体 yaw 的一步更新。
+    //
+    // 四块板的法向相差 2pi/N，所以 yaw 只能确定到 2pi/N（4 板时 90°）；
+    // 这条观测就是把该周期折叠掉的残差 h = fold(theta - psi, 2pi/N) 送进滤波器。
+    // 好处：不依赖"这一帧看到的是哪一块板"——换板时折叠加起来永远是 0，
+    // 所以位置关联出错也不会把相位带歪。sigma_rad 取值见上层配置。
+    bool updatePhase(double measured_world_yaw, double sigma_rad);
+
     // 该观测在当前先验下的新息平方和（马氏距离）NIS = r' S^-1 r，S = H P H' + R。
     // 上层用它做离群点拒绝：3 维观测下 NIS ~ chi2(3)，99.5% 分位约 11.34。
     // 未初始化、slot 非法或输入非有限时返回 false。
