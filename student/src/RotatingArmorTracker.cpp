@@ -209,6 +209,7 @@ void RotatingArmorTracker::collectWorldObservations(
         WorldObservation observation;
         observation.position = rotation * p_gimbal;
         observation.target_id = pose.detection.target_id;
+        observation.size = pose.detection.size;
         // 重投影误差越大，位置越不可信：1x ~ 3x 的噪声缩放。
         const double scale = clampd(1.0 + pose.reprojection_error / 6.0, 1.0, 3.0);
         observation.sigma_position_m = config_.position_sigma_m * scale;
@@ -379,7 +380,8 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
     if (pick != nullptr)
     {
         lock_samples_.push_back(
-            LockSample{timestamp_s, pick->position, pick->yaw, pick->target_id, pick_handoff});
+            LockSample{timestamp_s, pick->position, pick->yaw, pick->target_id, pick->size,
+                       pick_handoff});
     }
     while (!lock_samples_.empty() &&
            timestamp_s - lock_samples_.front().timestamp_s > config_.lock_max_age_s)
@@ -570,6 +572,18 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
         std::fabs(omega) <= config_.static_rate_rad_s &&
         (slope_error <= static_confidence || phase_spread < 0.15);
     EkfInitPrior prior;
+    // 半径先验按板型选：小装甲车 0.20 m、大装甲车 0.25 m（实车 3 号是 0.197）。
+    if (config_.radius_prior_from_size && !radius_from_data)
+    {
+        if (last.size == ArmorSize::Large)
+        {
+            radius = config_.radius_prior_large_m;
+        }
+        else
+        {
+            radius = config_.radius_prior_small_m;
+        }
+    }
     prior.radius_m = radius;
     prior.plate_slot = 0; // 槽位基准任意：相对相位才是物理量
     prior.spin = is_static ? SpinPriorKind::Static : SpinPriorKind::Spinning;

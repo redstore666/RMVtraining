@@ -52,7 +52,13 @@ struct TrackerConfig
     int lock_min_samples{8};         // 至少攒到的帧数（只收带法向的观测）
     double lock_min_span_s{0.18};     // 至少覆盖的时间跨度（短了圆拟合与转速都不可辨）
     double lock_max_age_s{0.50};      // 更早的样本丢掉（目标可能已经换了）
-    double radius_prior_m{0.25};      // 无数据先验：实车按底盘实测
+    double radius_prior_m{0.25};      // 无板型信息时的兜底先验：实车按底盘实测
+    // 按板型给的半径先验（车体中心到装甲板面的距离）。实测 v4 的 3 号小装甲车
+    // 是 0.197 m，用 0.20 比 0.25 的残差中位从 114 mm 降到 87 mm。
+    double radius_prior_small_m{0.20};
+    double radius_prior_large_m{0.25};
+    // 是否按板型选半径先验。关掉（或用 --radius 显式给值）时一律用 radius_prior_m。
+    bool radius_prior_from_size{true};
     double radius_sigma_m{0.10};
     // 锁定后是否把半径钉在锁定值：单板可见时 (中心, 半径) 退化，位置更新会
     // 把 R 一点点拉走（实测 0.25 -> 0.147，中心随之跑 1.4 m）。实时跟踪按
@@ -199,6 +205,10 @@ private:
         bool has_yaw{false};
         double yaw{0.0};
         int target_id{0};
+        // 板型（大/小装甲）。车体半径先验按它选：小装甲车 0.20 m、大装甲车
+        // 0.25 m；没有板型信息时才退回 radius_prior_m。默认按小板处理（比赛里
+        // 绝大多数是 3 号/4 号这种小装甲车）。
+        ArmorSize size{ArmorSize::Small};
         double sigma_position_m{0.03};
     };
 
@@ -208,6 +218,7 @@ private:
         Eigen::Vector3d position{0.0, 0.0, 0.0};
         double yaw{0.0}; // 板面法向 yaw（世界系，mod pi 待定）
         int target_id{0};
+        ArmorSize size{ArmorSize::Small}; // 板型（选半径先验用）
         bool handoff{false}; // 与上一个样本之间换了板（相差 pi/2 的整数倍）
     };
 

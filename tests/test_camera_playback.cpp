@@ -131,6 +131,7 @@ namespace
         int dump_every{0};
         int only_id{0};
         double radius_prior{0.25};
+        bool radius_given{false};
         bool trace{false};
     bool phase_yaw{false};
     double sigma_pos{0.03};
@@ -194,7 +195,10 @@ namespace
             else if (arg == "--only-id")
                 args.only_id = std::atoi(next("--only-id").c_str());
             else if (arg == "--radius")
+            {
                 args.radius_prior = std::atof(next("--radius").c_str());
+                args.radius_given = true;
+            }
             else if (arg == "--config")
                 args.config_path = next("--config");
             else
@@ -341,6 +345,11 @@ int main(int argc, char **argv)
     tracker_config.position_sigma_m = args.sigma_pos;
     tracker_config.handoff_sigma_scale = args.handoff_scale;
     tracker_config.radius_prior_m = args.radius_prior;
+    // 显式 --radius 时以它为准（关掉按板型自动选），方便做 A/B。
+    if (args.radius_given)
+    {
+        tracker_config.radius_prior_from_size = false;
+    }
     if (args.phase_yaw)
     {
         tracker_config.phase_update_enabled = true;
