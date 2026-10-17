@@ -261,11 +261,13 @@ int main(int argc, char **argv)
             int w;
             int h;
         };
-        const AbCase ab[2] = {{"yolov5@640x480", "models/yolov5_640x480.xml", 640, 480},
+        const AbCase ab[3] = {{"yolov5@640x480", "models/yolov5_640x480.xml", 640, 480},
+                              {"yolov5@512x384", "models/yolov5_512x384.xml", 512, 384},
                               {"yolov5@640x640", "models/yolov5.xml", 640, 640}};
-        ov::InferRequest request[2];
-        bool ok[2] = {true, true};
-        for (int i = 0; i < 2; ++i)
+        const int ab_count = 3;
+        ov::InferRequest request[ab_count];
+        bool ok[ab_count] = {true, true, true};
+        for (int i = 0; i < ab_count; ++i)
         {
             try
             {
@@ -284,12 +286,17 @@ int main(int argc, char **argv)
                 ok[i] = false;
             }
         }
-        if (ok[0] && ok[1])
+        bool all_ok = true;
+        for (int i = 0; i < ab_count; ++i)
         {
-            std::vector<double> samples[2];
+            all_ok = all_ok && ok[i];
+        }
+        if (all_ok)
+        {
+            std::vector<double> samples[ab_count];
             for (int r = 0; r < repeats; ++r)
             {
-                for (int i = 0; i < 2; ++i)
+                for (int i = 0; i < ab_count; ++i)
                 {
                     const auto begin = std::chrono::steady_clock::now();
                     request[i].infer();
@@ -300,14 +307,20 @@ int main(int argc, char **argv)
             }
             std::printf("%-18s %8s %8s %8s %8s\n", "配置", "最小ms", "p10ms", "中位ms",
                         "p90ms");
-            for (int i = 0; i < 2; ++i)
+            for (int i = 0; i < ab_count; ++i)
             {
                 std::printf("%-18s %8.2f %8.2f %8.2f %8.2f\n", ab[i].label,
                             percentile(samples[i], 0.0), percentile(samples[i], 0.1),
                             percentile(samples[i], 0.5), percentile(samples[i], 0.9));
             }
-            const double ratio = percentile(samples[0], 0.0) / percentile(samples[1], 0.0);
-            std::printf("640x480 / 640x640 最小耗时比 = %.3f（面积比 0.750）\n", ratio);
+            const double base = percentile(samples[ab_count - 1], 0.0);
+            for (int i = 0; i < ab_count - 1; ++i)
+            {
+                std::printf("%s / 640x640 最小耗时比 = %.3f（像素面积比 %.3f）\n",
+                            ab[i].label,
+                            percentile(samples[i], 0.0) / base,
+                            static_cast<double>(ab[i].w) * ab[i].h / (640.0 * 640.0));
+            }
         }
     }
 
