@@ -46,8 +46,10 @@ cmake --build build -j
 ./build/rmv_training /dev/ttyACM0 115200 config/camera.yaml 8080
 ```
 
-Web Debug 在 `http://127.0.0.1:8080`。外参未标定前 `camera.yaml` 的
-`calibrated` 保持 0，程序拒绝占位外参，属预期行为。
+Web Debug 在 `http://127.0.0.1:8080`。相机→云台外参尚未标定，`camera.yaml` 里
+仍是占位单位阵；`armor_solve` 会按"相机光学系(右/下/前) → 云台系(前/左/上)"的固定
+旋转重排坐标轴并在首帧打印一条警告，因此相对几何（中心/半径/角速度）可用，但绝对
+瞄准角仍有系统偏差。标定后填入真实 `R/t` 即自动走 `R*p + t`（见 `docs/云台外参.md`）。
 
 ## 测试工具
 

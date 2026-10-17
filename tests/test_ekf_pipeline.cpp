@@ -9,9 +9,13 @@
 #include "StudentTasks.hpp"
 #include "tracker_test_support.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <vector>
+
+#include <opencv2/calib3d.hpp>
+#include <opencv2/core.hpp>
 
 namespace
 {
@@ -160,6 +164,88 @@ int main()
     check(first_stable > 0, "链路最终进入 crc=1");
     check(stable_frames >= 150, "稳定（crc=1）帧数 >= 150");
     check(crc_counts[0] >= 5, "早期未锁定时输出 crc=0");
+
+    // ---- 坐标系回归：占位外参必须补上"光学系 -> 云台系"的固定旋转 ----
+    // 2026-10-17 实跑 CSV 的根因：config/camera.yaml 的外参是单位阵占位值，
+    // 旧代码直接 p_gimbal = R*p_cam + t = p_cam，于是把 OpenCV 的"前(z)"当成云台的
+    // "上(z)"，EKF 世界模型整体错位（target_pitch≈1.15rad、半径塌到 0.09m、锁不住）。
+    {
+        CameraParameters camera;
+        camera.calibrated = true;
+        camera.image_width = 1440;
+        camera.image_height = 1080;
+        camera.camera_matrix = (cv::Mat_<double>(3, 3) << 1806.2, 0.0, 738.8, 0.0, 1804.7,
+                                526.3, 0.0, 0.0, 1.0);
+        camera.distortion_coefficients = cv::Mat::zeros(1, 5, CV_64F);
+        camera.rotation_camera_to_gimbal = cv::Mat::eye(3, 3, CV_64F);
+        camera.translation_camera_to_gimbal = cv::Mat::zeros(3, 1, CV_64F);
+        camera.mean_reprojection_error_px = 0.25;
+
+        // 合成一块小装甲板：物点顺序 TL/TR/BR/BL，135x57mm，板面 z=0
+        const double half_w = 0.135 / 2.0;
+        const double half_h = 0.057 / 2.0;
+        std::vector<cv::Point3f> object_points{
+            {-half_w, -half_h, 0.0F}, {half_w, -half_h, 0.0F}, {half_w, half_h, 0.0F}, {-half_w, half_h, 0.0F}};
+
+        // 真值位姿：板在相机前方 1.5m、右 0.3m、上 0.1m，绕竖直轴偏 20°
+        cv::Matx33d rotation_yaw(std::cos(0.35), 0.0, std::sin(0.35), 0.0, 1.0, 0.0,
+                                 -std::sin(0.35), 0.0, std::cos(0.35));
+        cv::Matx33d flip(1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, -1.0);
+        const cv::Matx33d truth_rotation = rotation_yaw * flip;
+        const cv::Vec3d truth_translation(0.30, -0.10, 1.50);
+        cv::Mat rvec_truth;
+        cv::Rodrigues(cv::Mat(truth_rotation), rvec_truth);
+
+        std::vector<cv::Point2f> corners;
+        cv::projectPoints(object_points, rvec_truth, cv::Mat(truth_translation), camera.camera_matrix,
+                          camera.distortion_coefficients, corners);
+        std::vector<ArmorDetection> detections(1);
+        detections[0].size = ArmorSize::Small;
+        detections[0].target_id = 7;
+        detections[0].confidence = 1.0F;
+        for (std::size_t i = 0; i < 4; ++i)
+        {
+            detections[0].corners[i] = corners[i];
+        }
+
+        const std::vector<ArmorPose> placeholder_poses = armor_solve(detections, camera, GimbalState{});
+        check(placeholder_poses.size() == 1, "占位外参下 armor_solve 仍输出观测");
+        if (placeholder_poses.size() == 1)
+        {
+            const cv::Vec3d &p_camera = placeholder_poses[0].position_camera_m;
+            const cv::Vec3d &p_gimbal = placeholder_poses[0].position_gimbal_m;
+            // 相机光学系(右/下/前) -> 云台系(前/左/上)：x_g=z_c, y_g=-x_c, z_g=-y_c
+            const double mapping_error = std::max({std::fabs(p_gimbal[0] - p_camera[2]),
+                                                   std::fabs(p_gimbal[1] + p_camera[0]),
+                                                   std::fabs(p_gimbal[2] + p_camera[1])});
+            check(mapping_error < 1e-6, "占位外参按光学系->云台系重排坐标轴（x 前 / y 左 / z 上）");
+            check(mapping_error < 1e-6 && p_gimbal[2] > 0.0,
+                  "占位外参下云台系的 z 是真实高度（不是相机的前向距离）");
+            check(std::fabs(cv::norm(p_gimbal) - cv::norm(p_camera)) < 1e-9,
+                  "坐标重排不改变距离（旋转保模长）");
+            check(std::isfinite(placeholder_poses[0].armor_yaw) &&
+                      std::fabs(cv::norm(placeholder_poses[0].normal_gimbal) - 1.0) < 1e-6,
+                  "板面法向已归一化且 yaw 有限");
+        }
+
+        // 真外参必须原样使用：p_gimbal = R * p_camera + t
+        camera.rotation_camera_to_gimbal = (cv::Mat_<double>(3, 3) << 0.98, 0.0, 0.17, 0.0, 1.0, 0.0,
+                                            -0.17, 0.0, 0.98);
+        camera.translation_camera_to_gimbal = (cv::Mat_<double>(3, 1) << 0.02, 0.0, 0.05);
+        const std::vector<ArmorPose> calibrated_poses = armor_solve(detections, camera, GimbalState{});
+        check(calibrated_poses.size() == 1, "真外参下 armor_solve 仍输出观测");
+        if (calibrated_poses.size() == 1)
+        {
+            const cv::Vec3d &p_camera = calibrated_poses[0].position_camera_m;
+            const cv::Mat expected = camera.rotation_camera_to_gimbal * cv::Mat(cv::Vec3d(p_camera)) +
+                                     camera.translation_camera_to_gimbal;
+            const cv::Vec3d p_gimbal = calibrated_poses[0].position_gimbal_m;
+            const double error = std::max({std::fabs(p_gimbal[0] - expected.at<double>(0)),
+                                           std::fabs(p_gimbal[1] - expected.at<double>(1)),
+                                           std::fabs(p_gimbal[2] - expected.at<double>(2))});
+            check(error < 1e-9, "非占位外参原样参与 p_gimbal = R*p_camera + t");
+        }
+    }
 
     if (g_failures != 0)
     {

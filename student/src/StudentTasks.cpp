@@ -5,9 +5,11 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <string>
 #include <utility>
 #include <algorithm>
 #include <chrono>
@@ -602,6 +604,64 @@ namespace
     constexpr double kMinDepthM = 0.05;       // 深度下限（近于 5cm 视为异常）
     constexpr double kMaxDepthM = 20.0;       // 深度上限
 
+    // 相机光学系（x 右 / y 下 / z 前，OpenCV 约定）→ 云台系（x 前 / y 左 / z 上）。
+    // 云台外参 R_gimbal_camera 本应是"光学系 → 云台系"的完整旋转，但仓库里的占位值是
+    // 单位阵（config/camera.yaml 注释写着"无数据，暂时占位"）。单位阵在物理上不可能成立：
+    // 相机光轴必然与云台前向对齐，二者至少差这 90° 的轴重排。占位值直接套用会把 OpenCV
+    // 的"前"当成云台的"上"，EKF 的世界模型随即整体错位——2026-10-17 实跑 CSV 里
+    // target_pitch≈1.15rad、半径塌到 0.09m、跟踪锁不住，根因就是这里。
+    // 所以显式识别占位值并补上这层固定旋转；真正标定后（R 已含光学系→云台系旋转）走原分支。
+    const cv::Matx33d kOpticalToGimbal(0.0, 0.0, 1.0,
+                                       -1.0, 0.0, 0.0,
+                                       0.0, -1.0, 0.0);
+
+    bool extrinsicIsPlaceholder(const CameraParameters &camera)
+    {
+        if (camera.rotation_camera_to_gimbal.empty() ||
+            camera.rotation_camera_to_gimbal.size() != cv::Size(3, 3))
+        {
+            return true; // 没有外参：同样只能按占位处理
+        }
+        const double rotation_deviation = cv::norm(
+            camera.rotation_camera_to_gimbal - cv::Mat::eye(3, 3, CV_64F), cv::NORM_INF);
+        double translation_norm = 0.0;
+        if (!camera.translation_camera_to_gimbal.empty())
+            translation_norm = cv::norm(camera.translation_camera_to_gimbal, cv::NORM_INF);
+        return rotation_deviation < 1e-6 && translation_norm < 1e-9;
+    }
+
+    // 相机系 → 云台系的旋转（占位外参时补上光学系→云台系的固定旋转）
+    cv::Mat rotationCameraToGimbal(const CameraParameters &camera)
+    {
+        if (extrinsicIsPlaceholder(camera))
+        {
+            static bool s_warned = false;
+            if (!s_warned)
+            {
+                s_warned = true;
+                std::fprintf(stderr,
+                             "[warn] 云台外参仍是占位单位阵：已按"
+                             "相机光学系(右/下/前)->云台系(前/左/上)的固定旋转处理。"
+                             "完成手眼标定后请用真实 R/t 替换 config/camera.yaml。\n");
+            }
+            return cv::Mat(kOpticalToGimbal);
+        }
+        return camera.rotation_camera_to_gimbal;
+    }
+
+    cv::Vec3d cameraToGimbalPoint(const CameraParameters &camera, const cv::Vec3d &p_camera)
+    {
+        const cv::Mat p_gimbal = rotationCameraToGimbal(camera) * cv::Mat(cv::Vec3d(p_camera));
+        cv::Vec3d result(p_gimbal.at<double>(0), p_gimbal.at<double>(1), p_gimbal.at<double>(2));
+        if (!extrinsicIsPlaceholder(camera) && !camera.translation_camera_to_gimbal.empty())
+        {
+            result[0] += camera.translation_camera_to_gimbal.at<double>(0);
+            result[1] += camera.translation_camera_to_gimbal.at<double>(1);
+            result[2] += camera.translation_camera_to_gimbal.at<double>(2);
+        }
+        return result;
+    }
+
 } // namespace
 
 std::vector<ArmorPose> armor_solve(const std::vector<ArmorDetection> &detections,
@@ -683,18 +743,11 @@ std::vector<ArmorPose> armor_solve(const std::vector<ArmorDetection> &detections
         pose.reprojection_error = reproj_error;
         pose.position_camera_m = cv::Vec3d(tvec); // tvec 即板心在相机系坐标（米）
 
-        // 外参变换：p_gimbal = R * p_camera + t（单位外参时两者相同）
-        if (camera.rotation_camera_to_gimbal.empty())
-        {
-            pose.position_gimbal_m = pose.position_camera_m; // 未标定外参的防御分支
-        }
-        else
-        {
-            const cv::Mat p_cam_mat(pose.position_camera_m);
-            const cv::Mat p_gim_mat = camera.rotation_camera_to_gimbal * p_cam_mat +
-                                      camera.translation_camera_to_gimbal;
-            pose.position_gimbal_m = cv::Vec3d(p_gim_mat);
-        }
+        // 外参变换：p_gimbal = R * p_camera + t
+        // 占位外参（单位阵）时按"相机光学系 → 云台系"的固定旋转处理，见
+        // rotationCameraToGimbal()。这不改变协议与 PredictionResult 语义，
+        // 只是把 p_camera 的 OpenCV 轴重排成云台系的前/左/上。
+        pose.position_gimbal_m = cameraToGimbalPoint(camera, pose.position_camera_m);
 
         // 板面法向：armor_yaw 与 normal_gimbal（都在云台系）。
         //   1) cv::Rodrigues(rvec, R_obj2cam) 把旋转向量变成 3x3 旋转矩阵
@@ -704,12 +757,8 @@ std::vector<ArmorPose> armor_solve(const std::vector<ArmorDetection> &detections
         // 云台姿态补偿（gimbal -> 世界系）在 EKF 阶段做，这里只用外参。
         cv::Mat R_obj2cam;
         cv::Rodrigues(rvec, R_obj2cam);
-        cv::Mat n_cam = R_obj2cam * (cv::Mat_<double>(3, 1) << 0.0, 0.0, 1.0);
-        cv::Mat n_gimbal = n_cam;
-        if (!camera.rotation_camera_to_gimbal.empty())
-        {
-            n_gimbal = camera.rotation_camera_to_gimbal * n_cam;
-        }
+        const cv::Mat n_cam = R_obj2cam * (cv::Mat_<double>(3, 1) << 0.0, 0.0, 1.0);
+        const cv::Mat n_gimbal = rotationCameraToGimbal(camera) * n_cam;
         const double nx = n_gimbal.at<double>(0);
         const double ny = n_gimbal.at<double>(1);
         const double nz = n_gimbal.at<double>(2);
@@ -738,6 +787,38 @@ rotating_armor::RotatingArmorTracker &trackerInstance()
     return instance;
 }
 
+// 锁定过程对现场调试是黑箱：只在"阶段 / 已攒样本 / 最近被拒原因 / 重锁次数"变化时
+// 打印一行，避免盯着 crc 从 0 跳到 1 干等（实机 CSV 里曾有连续 20s 一行输出都没有）。
+const char *lockPhaseName(rotating_armor::LockPhase phase)
+{
+    switch (phase)
+    {
+    case rotating_armor::LockPhase::Idle:
+        return "idle";
+    case rotating_armor::LockPhase::Collecting:
+        return "collecting";
+    case rotating_armor::LockPhase::Tracking:
+        return "tracking";
+    }
+    return "?";
+}
+
+void logTrackerDiagnostics(const rotating_armor::TrackerDiagnostics &diagnostics)
+{
+    static std::string last_key;
+    const std::string key = std::string(lockPhaseName(diagnostics.phase)) + "|" +
+                            diagnostics.last_reject + "|" +
+                            std::to_string(std::min(diagnostics.lock_samples, 6)) + "|" +
+                            std::to_string(diagnostics.relock_count);
+    if (key == last_key)
+        return;
+    last_key = key;
+    std::fprintf(stderr, "[ekf] phase=%s lock_samples=%d/%d relock=%d reject=%s\n",
+                 lockPhaseName(diagnostics.phase), diagnostics.lock_samples,
+                 trackerInstance().config().lock_min_samples,
+                 diagnostics.relock_count, diagnostics.last_reject.c_str());
+}
+
 } // namespace
 
 PredictionResult ekf_predict(const std::vector<ArmorPose> &observations, const GimbalState &gimbal,
@@ -763,5 +844,9 @@ PredictionResult ekf_predict(const std::vector<ArmorPose> &observations, const G
     // 观测关联/门限/状态机/输出映射都在 rotating_armor::RotatingArmorTracker 里：
     // 它负责把云台系观测转到世界系、攒样本锁定初相与角速度、逐帧预测与 NIS 门限更新、
     // 换板与瞄准板选择、开火许可，并在超时/声明被反驳时重锁。
-    return trackerInstance().step(observations, gimbal, timestamp_seconds, measured_latency_s);
+    rotating_armor::RotatingArmorTracker &tracker = trackerInstance();
+    const PredictionResult prediction =
+        tracker.step(observations, gimbal, timestamp_seconds, measured_latency_s);
+    logTrackerDiagnostics(tracker.diagnostics());
+    return prediction;
 }

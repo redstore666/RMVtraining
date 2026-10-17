@@ -116,8 +116,16 @@ radius_random_walk = 1e-6            (m^2/s)
 `armor_solve`（`student/src/StudentTasks.cpp:606`）产出 `ArmorPose`：
 
 * `position_gimbal_m`：板心在云台系的位置（米），
-  `p_gimbal = R_cam_to_gimbal * p_cam + t_cam_to_gimbal`；外参未标定（单位阵、
-  零平移）时与相机系数值相同。
+  `p_gimbal = R_cam_to_gimbal * p_cam + t_cam_to_gimbal`。**外参仍是占位单位阵时
+  （`config/camera.yaml` 现在是 `I` 且 `t=0`），代码会先补上"相机光学系
+  （x 右 / y 下 / z 前）→ 云台系（x 前 / y 左 / z 上）"的固定旋转
+  `kOpticalToGimbal`**（`StudentTasks.cpp` 的 `rotationCameraToGimbal()`，
+  `t` 同时按 0 处理，首次调用向 stderr 打印一条警告）。单位阵在物理上不可能成立：
+  相机光轴必然与云台前向对齐，两者至少差这 90° 的轴重排。直接套单位阵会把
+  OpenCV 的"前"当成云台的"上"，EKF 的世界模型整体错位（2026-10-17 实跑 CSV 里
+  `target_pitch≈1.15 rad`、半径塌到 `0.09 m`、全程锁不住，根因即此）。
+  填好真外参后该分支自动失效，走 `R*p + t`。回归测试在 `ekf_pipeline`
+  里（"占位外参按光学系->云台系重排坐标轴"）。
 * `normal_gimbal`、`armor_yaw`：板面法向（云台系）：先用 `Rodrigues(rvec)`
   取物体 `(0,0,1)` 轴，再乘 `R_cam_to_gimbal`，归一化后
   `armor_yaw = atan2(n_y, n_x)`。**只保留法向；逐帧观测仍只用 3 维位置**，
@@ -269,9 +277,10 @@ radius_random_walk = 1e-6            (m^2/s)
    用先验 `0.25 m`；若实际机器人半径偏离较多，中心估计会按先验偏差偏移。
 4. **只做最近邻关联**：同一编号下同时出现多辆同色车时无法区分（依赖
    `target_id`）。
-5. **外参未标定时的绝对精度**：`config/camera.yaml` 的 `calibrated: 0` 时
-   `position_gimbal_m` 与相机系同值，跟踪仍能工作，但绝对距离/半径会有系统
-   偏差；需按 `docs/云台外参.md` 完成外参后复测。
+5. **外参未标定时的绝对精度**：占位外参由
+   `rotationCameraToGimbal()` 补成"光学系 → 云台系"的固定旋转（见 §4），
+   所以相对几何（中心/半径/角速度）可用；但相机相对云台回转中心的平移 `t`
+   与安装倾斜仍未知，绝对瞄准角有系统偏差，需按 `docs/云台外参.md` 标定后复测。
 6. **预测偏置限幅 0.8 s**：更长的偏置会被截断（防止异常值把目标预测到几米外）。
 7. **不做弹道补偿**：`target_pitch` 输出几何仰角，重力/飞行时间补偿在电控侧。
    若要求视觉侧补，`armor/include/BulletModel.*` 提供了带空气阻力的迭代模型。
