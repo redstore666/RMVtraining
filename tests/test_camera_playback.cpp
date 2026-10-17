@@ -459,13 +459,14 @@ int main(int argc, char **argv)
             {
                 const auto &st = tracker.ekf().state();
                 std::printf("[trace] f=%d t=%.3f det=%zu phase=%d id=%d ok=%llu rej=%d miss=%d "
-                            "relock=%d ls=%d omega=%.2f R=%.3f yaw=%.2f nis=%.1f why=%s stab=%s\n",
+                            "relock=%d ls=%d omega=%.2f R=%.3f yaw=%.2f nis=%.1f why=%s stab=%s gd=%.2f gn=%.0f\n",
                             frame_index, time_s, poses.size(),
                             static_cast<int>(diagnostics.phase), diagnostics.target_id,
                             static_cast<unsigned long long>(diagnostics.accepted_updates),
                             diagnostics.rejected_this_frame, diagnostics.missed_frames,
                             diagnostics.relock_count, diagnostics.lock_samples, st(7), st(8), st(6), diagnostics.last_nis,
-                            diagnostics.last_reject.c_str(), diagnostics.stability.c_str());
+                            diagnostics.last_reject.c_str(), diagnostics.stability.c_str(),
+                            diagnostics.best_gate_distance_m, diagnostics.best_gate_nis);
             }
             final_prediction = prediction;
             ekf_accepted = static_cast<long>(diagnostics.accepted_updates);

@@ -165,6 +165,9 @@ void RotatingArmorTracker::reset()
     }
     locked_radius_m_ = 0.0;
     locked_spin_rad_s_ = 0.0;
+    has_pair_relock_ = false;
+    last_pair_relock_s_ = 0.0;
+    timestamp_s_ = 0.0;
     lock_radius_from_data_ = false;
     lock_phase_flipped_ = false;
 }
@@ -685,6 +688,20 @@ bool RotatingArmorTracker::reinitializeFromPair(const std::vector<WorldObservati
             {
                 continue;
             }
+            // 状态本来就和双板解一致时不要重定：长时间"没有可接收的更新"不等于
+            // "几何错了"，每帧重定会把协方差反复打回大值，后面的观测更进不来。
+            const Eigen::Vector2d state_center(ekf_.state()(0), ekf_.state()(2));
+            const double state_radius = ekf_.state()(8);
+            if ((state_center - center).norm() < 0.20 &&
+                std::fabs(state_radius - radius) < 0.08)
+            {
+                return false;
+            }
+            // 重定限频：0.5 s 内只允许一次，避免"重定 -> 观测仍被门限拒 -> 再重定"。
+            if (has_pair_relock_ && timestamp_s_ - last_pair_relock_s_ < 0.5)
+            {
+                return false;
+            }
             EkfInitPrior prior;
             prior.radius_m = radius;
             prior.plate_slot = 0;
@@ -706,6 +723,8 @@ bool RotatingArmorTracker::reinitializeFromPair(const std::vector<WorldObservati
             {
                 return false;
             }
+            has_pair_relock_ = true;
+            last_pair_relock_s_ = timestamp_s_;
             ++diagnostics_.relock_count;
             diagnostics_.last_reject = "relock:pair";
             return true;
@@ -725,6 +744,8 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
     int accepted = 0;
     std::vector<bool> used(world.size(), false);
     diagnostics_.rejected_this_frame = 0;
+    diagnostics_.best_gate_distance_m = std::numeric_limits<double>::infinity();
+    diagnostics_.best_gate_nis = std::numeric_limits<double>::infinity();
 
     while (accepted < std::max(config_.max_updates_per_frame, 1))
     {
@@ -745,12 +766,24 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
             {
                 const Eigen::Vector3d predicted = platePosition(ekf_.state(), slot, plate_count);
                 const double distance = (world[i].position - predicted).norm();
+                // 换板（更新的不是当前瞄准槽位）时观测更不可信：板编号只到
+                // 2*pi/N 的可辨识度，观测落到哪块板上本身带一个槽位的歧义。
+                // 不放大 R 的话，静止时把协方差压得很小的滤波器会把换板观测
+                // 全判成 NIS 离群（实拍 v4 旋转目标 416/718 帧就是这样丢的）。
+                ArmorObservation slot_observation = observation;
+                if (slot != aim_slot_)
+                {
+                    slot_observation.sigma_position_m =
+                        observation.sigma_position_m * config_.handoff_sigma_scale;
+                }
+                diagnostics_.best_gate_distance_m =
+                    std::min(diagnostics_.best_gate_distance_m, distance);
                 if (!(distance <= config_.position_gate_m))
                 {
                     continue;
                 }
                 double nis = 0.0;
-                if (!ekf_.innovationNis(observation, slot, nis))
+                if (!ekf_.innovationNis(slot_observation, slot, nis))
                 {
                     continue;
                 }
@@ -763,6 +796,7 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                     static_cast<std::uint64_t>(std::max(config_.bootstrap_updates, 0));
                 if (!bootstrapping && nis > config_.nis_gate)
                 {
+                    diagnostics_.best_gate_nis = std::min(diagnostics_.best_gate_nis, nis);
                     continue;
                 }
                 if (distance < best_distance)
@@ -782,6 +816,10 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
         ArmorObservation observation;
         observation.position = chosen.position;
         observation.sigma_position_m = chosen.sigma_position_m;
+        if (best_slot != aim_slot_)
+        {
+            observation.sigma_position_m *= config_.handoff_sigma_scale;
+        }
         if (!ekf_.update(observation, best_slot))
         {
             break;
@@ -984,6 +1022,7 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
     diagnostics_.rejected_this_frame = 0;
     measured_latency_s_ = measured_latency_s;
     diagnostics_.measured_latency_s = measured_latency_s;
+    timestamp_s_ = timestamp_seconds;
     if (!std::isfinite(timestamp_seconds) || !std::isfinite(gimbal.yaw) ||
         !std::isfinite(gimbal.pitch) || !std::isfinite(gimbal.roll))
     {

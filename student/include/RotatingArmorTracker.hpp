@@ -58,6 +58,7 @@ struct TrackerConfig
     // === 关联 / 门限 ===
     double position_gate_m{0.60}; // 单板位置门限（含中心先验不确定的余量）
     double nis_gate{11.34};      // chi2(3 dof) 99.5%
+    double handoff_sigma_scale{2.5}; // 更新换板槽位时把观测标准差放大这么多倍
     int bootstrap_updates{10};   // 锁定期头几次更新先放宽 NIS 门（初值靠单帧法向，偏差可比预想大）
     // 声明反驳检查：法向历史里混入相邻板样本时斜率会失真，实拍里会误杀，
     // 默认关闭；需要时打开（合成夹具与 v4 的静止车都不需要它）。
@@ -110,6 +111,8 @@ struct TrackerDiagnostics
     double measured_latency_s{0.0};
     int rejected_this_frame{0};
     double last_nis{0.0};
+    double best_gate_distance_m{0.0}; // 本帧所有(观测,槽位)对里最近的位置残差（诊断用）
+    double best_gate_nis{0.0};       // 本帧最小 NIS（诊断用）
     int aim_slot{-1};
     int target_id{0};
     int relock_count{0};
@@ -227,6 +230,9 @@ private:
     // 最近一次成功锁定用到的量（诊断/测试用）
     double locked_radius_m_{0.0};
     double locked_spin_rad_s_{0.0};
+    bool has_pair_relock_{false};
+    double last_pair_relock_s_{0.0};
+    double timestamp_s_{0.0};
     bool lock_radius_from_data_{false};
     bool lock_phase_flipped_{false};
 };
