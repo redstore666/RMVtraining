@@ -129,6 +129,9 @@ namespace
         int dump_every{0};
         int only_id{0};
         bool trace{false};
+    bool phase_yaw{false};
+    double phase_sigma{0.12};
+    std::string dump_csv;
     };
 
     bool parseArgs(int argc, char **argv, Args &args)
@@ -173,6 +176,12 @@ namespace
                 args.dump_every = std::max(0, std::atoi(next("--dump-every").c_str()));
             else if (arg == "--trace")
                 args.trace = true;
+            else if (arg == "--phase-yaw")
+                args.phase_yaw = true;
+            else if (arg == "--phase-sigma")
+                args.phase_sigma = std::stod(next("--phase-sigma"));
+            else if (arg == "--dump")
+                args.dump_csv = next("--dump");
             else if (arg == "--only-id")
                 args.only_id = std::atoi(next("--only-id").c_str());
             else if (arg == "--config")
@@ -317,7 +326,13 @@ int main(int argc, char **argv)
     cv::Mat previous_gray_small;
 
     // EKF 侧统计。
-    rotating_armor::RotatingArmorTracker tracker;
+    rotating_armor::TrackerConfig tracker_config;
+    if (args.phase_yaw)
+    {
+        tracker_config.phase_update_enabled = true;
+        tracker_config.phase_update_sigma_rad = args.phase_sigma;
+    }
+    rotating_armor::RotatingArmorTracker tracker(tracker_config);
     long ekf_first_stable_frame{-1};
     long ekf_stable_frames{0};
     long ekf_accepted{0};
@@ -354,6 +369,14 @@ int main(int argc, char **argv)
         }
         csv << "frame,time_s,id,size,conf,x,y,z,dist_m,yaw_deg,reproj_px,motion,"
                "ekf_phase,ekf_state,ekf_aim,ekf_id,ekf_yaw_deg,ekf_pitch_deg,ekf_dist_m,ekf_fire\n";
+    }
+
+    std::ofstream dump_stream;
+    if (!args.dump_csv.empty())
+    {
+        dump_stream.open(args.dump_csv);
+        dump_stream << "frame,t,det,target_id,aim_slot,obs_id,x,y,z,best_slot,best_dist,"
+                       "second_dist,cx,cy,cyaw,R\n";
     }
 
     const bool show = !args.headless;
@@ -487,13 +510,39 @@ int main(int argc, char **argv)
                 {
                     continue; // 只评估当前跟踪的那辆车
                 }
-                const Eigen::Vector3d observed(pose.position_gimbal_m[0], pose.position_gimbal_m[1],
-                                               pose.position_gimbal_m[2]);
+                // 观测是云台系的，模型板位是世界系的：必须先转过去再比，
+                // 否则残差里混进了"云台朝向"这一项（v4 里云台几乎朝正前，
+                // 只差 7 mm；换到侧向目标就会凭空多出几厘米）。
+                const Eigen::Vector3d observed =
+                    rotating_armor::gimbalToWorld(gimbal) *
+                    Eigen::Vector3d(pose.position_gimbal_m[0], pose.position_gimbal_m[1],
+                                    pose.position_gimbal_m[2]);
                 double best = std::numeric_limits<double>::infinity();
+                double second = std::numeric_limits<double>::infinity();
+                int best_slot = -1;
                 for (int slot = 0; slot < 4; ++slot)
                 {
-                    best = std::min(best,
-                                    (observed - rotating_armor::platePosition(st, slot, 4)).norm());
+                    const double d =
+                        (observed - rotating_armor::platePosition(st, slot, 4)).norm();
+                    if (d < best)
+                    {
+                        second = best;
+                        best = d;
+                        best_slot = slot;
+                    }
+                    else if (d < second)
+                    {
+                        second = d;
+                    }
+                }
+                if (dump_stream.is_open())
+                {
+                    dump_stream << frame_index << ',' << time_s << ',' << poses.size() << ','
+                                << tracker.diagnostics().target_id << ','
+                                << tracker.diagnostics().aim_slot << ',' << pose.detection.target_id
+                                << ',' << observed.x() << ',' << observed.y() << ',' << observed.z()
+                                << ',' << best_slot << ',' << best << ',' << second << ','
+                                << st(0) << ',' << st(2) << ',' << st(6) << ',' << st(8) << '\n';
                 }
                 if (std::isfinite(best))
                 {

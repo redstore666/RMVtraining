@@ -149,6 +149,12 @@ public:
                        double& nis) const;
 
     const State& state() const { return state_; }
+
+    // 直接平移车体中心：用于"相位更新后把中心反锚回去"。
+    // 单块板可见时 (center, yaw) 有一个规范自由度（绕着板心转），
+    // 只改 yaw 会把板挪走、再被位置更新拉回来，两个更新互相打架；
+    // 改完 yaw 把中心平移回去、让那块板留在原地，等价于"沿可观方向更新"。
+    void shiftCenter(const Eigen::Vector3d& delta) { state_.head<3>() += delta; }
     const Covariance& covariance() const { return covariance_; }
     const EkfConfig& config() const { return config_; }
 

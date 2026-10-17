@@ -945,7 +945,19 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
             // 相位带歪——这正是位置关联最脆弱的地方。
             if (config_.phase_update_enabled)
             {
-                ekf_.updatePhase(chosen.yaw, config_.phase_update_sigma_rad);
+                // 反锚：先记下这块板在模型里的位置，改完 yaw 再把中心平移回去，
+                // 让板留在观测到的位置。单板可见时 (center, yaw) 是规范自由度，
+                // 不反锚就是"yaw 更新把板挪走、位置更新再拉回来"互相打架。
+                const Eigen::Vector3d plate_before =
+                    rotating_armor::platePosition(ekf_.state(), best_slot,
+                                                  ekf_.config().plate_count);
+                if (ekf_.updatePhase(chosen.yaw, config_.phase_update_sigma_rad))
+                {
+                    const Eigen::Vector3d plate_after =
+                        rotating_armor::platePosition(ekf_.state(), best_slot,
+                                                      ekf_.config().plate_count);
+                    ekf_.shiftCenter(plate_before - plate_after);
+                }
             }
             pushNormalHistory(best_slot, timestamp_s, chosen.yaw);
         }
