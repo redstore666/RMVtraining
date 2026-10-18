@@ -163,6 +163,8 @@ void RotatingArmorTracker::reset()
     target_id_ = 0;
     aim_slot_ = -1;
     last_seen_s_.fill(-1.0);
+    aim_smoothed_valid_ = false;
+    aim_smoothed_s_ = -1.0;
     last_accept_s_ = 0.0;
     has_accept_ = false;
     consecutive_updates_ = 0;
@@ -1298,6 +1300,33 @@ PredictionResult RotatingArmorTracker::buildResult(const GimbalState &gimbal,
                                                  s_ * relative.x() + c * relative.y(),
                                                  relative.z());
             }
+            // 运动补偿后的一阶平滑：先把上一次的平滑结果按同样规则推进到现在，
+            // 再和新观测混合。旋转是刚体运动，推进是精确的，所以 α 只牺牲噪声、
+            // 不引入相位滞后。
+            if (config_.aim_smoothing_alpha > 0.0 && aim_smoothed_valid_ &&
+                aim_smoothed_s_ >= 0.0 && timestamp_s > aim_smoothed_s_ &&
+                timestamp_s - aim_smoothed_s_ <= 0.10 &&
+                aim_smoothed_world_.allFinite())
+            {
+                const double step = timestamp_s - aim_smoothed_s_;
+                Eigen::Vector3d previous = aim_smoothed_world_;
+                if (std::isfinite(omega) && std::fabs(omega) > 1.0e-3)
+                {
+                    const Eigen::Vector3d relative_previous = previous - center;
+                    const double angle_previous = omega * step;
+                    const double cp = std::cos(angle_previous);
+                    const double sp = std::sin(angle_previous);
+                    previous = center + Eigen::Vector3d(
+                                            cp * relative_previous.x() - sp * relative_previous.y(),
+                                            sp * relative_previous.x() + cp * relative_previous.y(),
+                                            relative_previous.z());
+                }
+                const double alpha = config_.aim_smoothing_alpha;
+                plate = (1.0 - alpha) * previous + alpha * plate;
+            }
+            aim_smoothed_world_ = plate;
+            aim_smoothed_s_ = timestamp_s;
+            aim_smoothed_valid_ = true;
         }
     }
     diagnostics_.predicted_aim_world = plate;

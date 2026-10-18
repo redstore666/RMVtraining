@@ -136,6 +136,7 @@ namespace
         double sigma_floor{0.06};
         bool phase_anchor{true};
         double aim_obs{0.012};
+        double aim_alpha{0.0};
         double switch_margin{0.10};
         double lock_span{0.18};
         double lock_age{0.50};
@@ -222,6 +223,10 @@ namespace
             {
                 args.radius_prior = std::atof(next("--radius").c_str());
                 args.radius_given = true;
+            }
+            else if (arg == "--aim-alpha")
+            {
+                args.aim_alpha = std::atof(next("--aim-alpha").c_str());
             }
             else if (arg == "--aim-obs")
             {
@@ -416,6 +421,7 @@ int main(int argc, char **argv)
         tracker_config.phase_update_sigma_rad = args.phase_sigma;
     }
     tracker_config.aim_observation_hold_s = args.aim_obs;
+    tracker_config.aim_smoothing_alpha = args.aim_alpha;
     rotating_armor::RotatingArmorTracker tracker(tracker_config);
     long ekf_first_stable_frame{-1};
     long ekf_stable_frames{0};

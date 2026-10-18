@@ -156,6 +156,9 @@ struct TrackerConfig
     double aim_visible_hold_s{0.30};
     // 瞄准点直接用"最近一次观测到的板心"的时间窗（秒）。0 = 关闭，退回 EKF。
     double aim_observation_hold_s{0.012};
+    // 瞄准点的一阶平滑系数（0 = 不平滑）。观测有 ~35 mm 的帧间抖动，直接送
+    // 云台会抖；按 omega 做运动补偿后再做一阶平滑，不引入相位滞后。
+    double aim_smoothing_alpha{0.0};
     // 目标选择：自瞄应瞄"正压在准星上"的那台车。两台车同时在场时，另一台车的板
     // 连续 relock_frames 帧都比当前目标更靠近准星（多出 target_switch_margin_rad
     // 的迟滞），就丢目标重锁到它。
@@ -289,6 +292,9 @@ private:
     // 每个槽位最近一次被接受到的世界系板心。零延迟时它就是"此刻板在哪"
     // 的最好答案；EKF 只负责给没有新鲜观测的槽位做外推。
     std::array<Eigen::Vector3d, 8> last_seen_position_{};
+    Eigen::Vector3d aim_smoothed_world_{};
+    double aim_smoothed_s_{-1.0};
+    bool aim_smoothed_valid_{false};
     // 同帧双板弦长 -> 半径观测（见 .cpp 里的推导）。
     void updateRadiusFromPairs(const std::vector<WorldObservation> &world);
     // 掉线快照续接（见 config_.relock_reuse_enabled）。
