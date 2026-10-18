@@ -46,6 +46,15 @@ double clampd(double value, double low, double high)
     return std::min(std::max(value, low), high);
 }
 
+// 某块板相对云台准星（光轴）的角距离：yaw 与 pitch 里取大的那个。
+// 用来回答"现在准星压在谁身上"——自瞄应该瞄准星上的车，而不是检测列表里
+// 碰巧排第一的那台（实拍 v4 两台车同时在画面里，旧逻辑会永远锁在右边那台）。
+double boresightAngle(const Eigen::Vector3d &position, const GimbalState &gimbal)
+{
+    return std::max(std::fabs(wrapToPi(vectorYaw(position) - static_cast<double>(gimbal.yaw))),
+                    std::fabs(vectorPitch(position) - static_cast<double>(gimbal.pitch)));
+}
+
 struct LinearFit
 {
     double slope{0.0};
@@ -157,6 +166,7 @@ void RotatingArmorTracker::reset()
     consecutive_updates_ = 0;
     missed_frames_ = 0;
     other_id_streak_ = 0;
+    centered_streak_ = 0;
     contradiction_streak_ = 0;
     relock_count_ = 0;
     lock_samples_.clear();
@@ -310,8 +320,6 @@ RotatingArmorTracker::fitArmorCircle(const std::deque<LockSample> &samples)
 bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
                                    double timestamp_s, const GimbalState &gimbal)
 {
-    (void)gimbal;
-
     // 1) 攒样本：只收"带板面法向 + 有编号"的观测，并且跟上一帧挂上关系。
     //
     //    两种关系都允许：
@@ -325,6 +333,7 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
     //    算角速度时必须跳过它，否则 90 度的跳变会被当成"转得飞快"。
     const WorldObservation *pick = nullptr;
     bool pick_handoff = false;
+    double best_angle = std::numeric_limits<double>::infinity();
     const bool have_last = !lock_samples_.empty();
     const double last_yaw = have_last ? lock_samples_.back().yaw : 0.0;
     const int last_id = have_last ? lock_samples_.back().target_id : 0;
@@ -365,9 +374,23 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
                 continue;
             }
         }
-        if (pick == nullptr ||
-            (pick_handoff && !handoff) ||
-            (!pick_handoff && !handoff && std::fabs(delta) < std::fabs(wrapToPi(pick->yaw - last_yaw))))
+        if (!have_last)
+        {
+            // 链还没开始：选"离准星最近"的那块板。自瞄的语义是"瞄我现在正对着的
+            // 那台车"，不是"瞄检测列表里排第一的那台"（实拍 v4 两台车同框时，
+            // 旧实现永远锁到列表里的第一台，左边那台自转车根本没被看过）。
+            const double angle = boresightAngle(observation.position, gimbal);
+            if (pick == nullptr || angle < best_angle)
+            {
+                pick = &observation;
+                pick_handoff = handoff;
+                best_angle = angle;
+            }
+        }
+        else if (pick == nullptr ||
+                 (pick_handoff && !handoff) ||
+                 (!pick_handoff && !handoff &&
+                  std::fabs(delta) < std::fabs(wrapToPi(pick->yaw - last_yaw))))
         {
             pick = &observation;
             pick_handoff = handoff;
@@ -1323,6 +1346,50 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
                 best = entry.second;
                 frame_id = entry.first;
             }
+        }
+    }
+
+    // 目标选择优先级：正压在准星上的那头。
+    //
+    // 旧逻辑只在"锁定编号连续两帧消失"时才换目标，于是两台车同时在场时，
+    // 谁先被检测列表排到前面就永远锁谁（实拍 v4：右边静止车锁了 1385 帧，
+    // 左边自转车一次都没被瞄准）。这里改成：另一台车的板连续 relock_frames 帧
+    // 都比当前目标更靠近准星（带 switch_margin 迟滞），就主动丢目标重新锁，
+    // 下一帧的 tryLock 会选准星最近的那块。
+    if (config_.prefer_centered_target && ekf_.initialized() && !world.empty() &&
+        target_id_ != 0)
+    {
+        double ours = std::numeric_limits<double>::infinity();
+        double other_best = std::numeric_limits<double>::infinity();
+        for (const WorldObservation &observation : world)
+        {
+            if (observation.target_id == 0)
+            {
+                continue;
+            }
+            const double angle = boresightAngle(observation.position, gimbal);
+            if (observation.target_id == target_id_)
+            {
+                ours = std::min(ours, angle);
+            }
+            else
+            {
+                other_best = std::min(other_best, angle);
+            }
+        }
+        if (std::isfinite(ours) && std::isfinite(other_best) &&
+            other_best + config_.target_switch_margin_rad < ours)
+        {
+            if (++centered_streak_ >= config_.relock_frames)
+            {
+                centered_streak_ = 0;
+                dropTarget("target_switch_centered");
+                return PredictionResult{};
+            }
+        }
+        else
+        {
+            centered_streak_ = 0;
         }
     }
 

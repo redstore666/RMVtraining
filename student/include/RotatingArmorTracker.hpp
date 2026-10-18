@@ -150,6 +150,11 @@ struct TrackerConfig
     // 1384 帧全aim=3、看见的是 slot 0，瞄准点画到板外 0.35 m）。这个时间窗内
     // 见过的板才算候选，窗内的板里再挑离云台最近的。
     double aim_visible_hold_s{0.30};
+    // 目标选择：自瞄应瞄"正压在准星上"的那台车。两台车同时在场时，另一台车的板
+    // 连续 relock_frames 帧都比当前目标更靠近准星（多出 target_switch_margin_rad
+    // 的迟滞），就丢目标重锁到它。
+    bool prefer_centered_target{true};
+    double target_switch_margin_rad{0.10};
 };
 
 enum class LockPhase : std::uint8_t
@@ -318,6 +323,7 @@ private:
     int consecutive_updates_{0};
     int missed_frames_{0};
     int other_id_streak_{0};
+    int centered_streak_{0};
 
     std::deque<LockSample> lock_samples_{};
     // 每个 slot 一份：(timestamp, 解缠后的法向 yaw)，用于估计观测到的角速度。
