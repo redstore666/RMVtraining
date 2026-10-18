@@ -136,6 +136,8 @@ namespace
         bool omega_given{false};
         double q_scale{1.0};
         bool led_yaw{false};
+        bool roi_retry{false};
+        int roi_size{240};
         double led_sigma{0.08};
         double score{0.7};
         bool score_given{false};
@@ -252,6 +254,14 @@ namespace
                 args.centered_switch = false;
             else if (arg == "--switch-margin")
                 args.switch_margin = std::atof(next("--switch-margin").c_str());
+            else if (arg == "--roi-retry")
+            {
+                args.roi_retry = true;
+            }
+            else if (arg == "--roi-size")
+            {
+                args.roi_size = std::atoi(next("--roi-size").c_str());
+            }
             else if (arg == "--led-yaw")
             {
                 args.led_yaw = true;
@@ -537,6 +547,7 @@ int main(int argc, char **argv)
         cv::namedWindow(window, cv::WINDOW_NORMAL);
 
     int led_yaw_updates = 0;
+    int roi_recovered = 0;
     bool paused = false;
     int frame_index = range_start;
     cv::Mat frame;
@@ -570,15 +581,84 @@ int main(int argc, char **argv)
 
         const auto t0 = std::chrono::steady_clock::now();
         std::vector<ArmorDetection> detections = armor_detect(frame, args.enemy);
+
+        const auto t1 = std::chrono::steady_clock::now();
+        GimbalState gimbal{};
+        gimbal.prediction_bias_s = static_cast<float>(args.bias_s);
+        // ---- ROI 跟踪式复检 ----
+        // 网络整帧没出框时（小板侧视/贴画面边缘），用上一帧的预测板位裁一小块、
+        // 放大后再过一遍同一个网络。复检到的角点只当"普通检测"用，后面走同一条
+        // armor_solve -> WorldObservation -> tracker.step 流水线。
+        if (args.roi_retry && tracker.initialized() && tracker.diagnostics().phase == rotating_armor::LockPhase::Tracking &&
+            tracker.diagnostics().target_id != 0)
+        {
+            bool already = false;
+            for (const ArmorDetection &det : detections)
+            {
+                if (det.target_id == tracker.diagnostics().target_id)
+                {
+                    already = true;
+                    break;
+                }
+            }
+            if (!already && camera.valid() && !camera.camera_matrix.empty())
+            {
+                const auto &st = tracker.ekf().state();
+                const int slot = tracker.diagnostics().aim_slot >= 0 ? tracker.diagnostics().aim_slot : 0;
+                const Eigen::Vector3d p_world = rotating_armor::platePosition(st, slot, 4);
+                const Eigen::Vector3d p_gimbal = rotating_armor::toGimbal(gimbal, p_world);
+                const cv::Vec3d p_camera = gimbalToCameraPoint(camera, cv::Vec3d(p_gimbal.x(), p_gimbal.y(), p_gimbal.z()));
+                if (p_camera[2] > 0.4)
+                {
+                    std::vector<cv::Point3d> one{cv::Point3d(p_camera[0], p_camera[1], p_camera[2])};
+                    std::vector<cv::Point2d> px;
+                    cv::projectPoints(one, cv::Vec3d(0, 0, 0), cv::Vec3d(0, 0, 0),
+                                      camera.camera_matrix, cv::noArray(), px);
+                    const int half = std::max(40, args.roi_size / 2);
+                    int x0 = static_cast<int>(px[0].x) - half;
+                    int y0 = static_cast<int>(px[0].y) - half;
+                    x0 = std::max(0, std::min(x0, frame.cols - 2 * half));
+                    y0 = std::max(0, std::min(y0, frame.rows - 2 * half));
+                    if (x0 + 2 * half <= frame.cols && y0 + 2 * half <= frame.rows)
+                    {
+                        const cv::Rect roi_rect(x0, y0, 2 * half, 2 * half);
+                        cv::Mat crop = frame(roi_rect).clone();
+                        cv::Mat upscaled;
+                        cv::resize(crop, upscaled, cv::Size(), 2.0, 2.0, cv::INTER_LINEAR);
+                        const std::vector<ArmorDetection> roi_detections = armor_detect(upscaled, args.enemy);
+                        if (std::getenv("RMV_ROI_DBG") != nullptr)
+                        {
+                            std::fprintf(stderr, "[roi] f=%d rect=%d,%d px=%.0f,%.0f dets=%zu\n",
+                                         frame_index, x0, y0, px[0].x, px[0].y, roi_detections.size());
+                            for (const ArmorDetection &d : roi_detections)
+                            {
+                                std::fprintf(stderr, "      id=%d conf=%.2f\n", d.target_id, d.confidence);
+                            }
+                        }
+                        for (ArmorDetection det : roi_detections)
+                        {
+                            if (det.target_id != tracker.diagnostics().target_id)
+                            {
+                                continue;
+                            }
+                            for (cv::Point2f &corner : det.corners)
+                            {
+                                corner.x = corner.x * 0.5F + static_cast<float>(x0);
+                                corner.y = corner.y * 0.5F + static_cast<float>(y0);
+                            }
+                            detections.push_back(det);
+                            ++roi_recovered;
+                        }
+                    }
+                }
+            }
+        }
         if (args.refine_corners && !detections.empty())
         {
             cv::Mat gray;
             cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
             refine_count += refineArmorCorners(gray, detections);
         }
-        const auto t1 = std::chrono::steady_clock::now();
-        GimbalState gimbal{};
-        gimbal.prediction_bias_s = static_cast<float>(args.bias_s);
         std::vector<ArmorPose> poses = armor_solve(detections, camera, gimbal);
         if (args.only_id != 0)
         {
