@@ -603,6 +603,11 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
     // 法向序列给出的速率"可用"的判据：斜率和标准误同量级时不可信。
     const bool yaw_rate_reliable =
         std::fabs(omega) > 1.0e-3 && slope_error < 0.5 * std::fabs(omega) + 0.05;
+    // 但"法向序列可靠"只能说明它自己一致，不代表它能看见高速自转：板面法向
+    // 每 90° 复位一次，10 rad/s 在 31 个样本的窗口里会被折回成 0.2~0.5 rad/s
+    // 的假斜率（实测 v4 自转车锁定时刻法向斜率 -0.244，真实转速 10.4）。所以
+    // 法向速率只有大到"不可能是折返"时才算数，否则让位置圆拟合说了算。
+    const bool yaw_sees_fast_spin = yaw_rate_reliable && std::fabs(omega) >= 1.0;
 
     double phase_spread = 0.0;
     for (std::size_t i = 0; i < count; ++i)
@@ -733,21 +738,41 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
         const double used_ratio =
             total_steps > 0 ? static_cast<double>(used_steps) / total_steps : 0.0;
         circle_step_ratio = used_ratio;
-        if (!spin_from_positions && span_ok && !yaw_rate_reliable && used_steps >= 5 &&
-            sum_dt > 0.0 && used_ratio >= config_.lock_circle_trusted_ratio)
+        if (!spin_from_positions && span_ok && used_steps >= 5 && sum_dt > 0.0 &&
+            used_ratio >= config_.lock_circle_trusted_ratio)
         {
             const double omega_positions = sum_dtheta / sum_dt;
-            const double mean_dtheta = sum_dtheta / static_cast<double>(used_steps);
-            const double variance = std::max(
-                0.0, sum_dtheta2 / static_cast<double>(used_steps) - mean_dtheta * mean_dtheta);
-            // 单步角增量的散布折算到"速率标准误"：omega 的不确定度 ~ std/dsqrt(N)*dt
-            const double mean_dt = sum_dt / static_cast<double>(used_steps);
-            slope_error = std::sqrt(variance) / (std::max(1, used_steps) * mean_dt);
-            omega = omega_positions;
-            spin_from_positions = true;
-            circle_phase_last = std::atan2(
-                lock_samples_.back().position.y() - circle.cy,
-                lock_samples_.back().position.x() - circle.cx);
+            // 采信位置圆拟合的条件：
+            //   0) 圆本身合理（平移目标拟合出来的圆半径会是几十米，不能拿它
+            //      定相位/内外侧）：R 在板型先验附近；
+            //   1) 法向序列本身不可靠；或
+            //   2) 位置说"很快"（>3 rad/s 且是法向估计两倍以上）——这是 90°
+            //      折返的典型症状（法向每 90° 复位，10 rad/s 在 31 样本窗口里
+            //      会折成 0.2~0.5 rad/s 的假斜率）。
+            const bool circle_plausible =
+                std::isfinite(circle.radius) &&
+                circle.radius >= 0.5 * config_.radius_min_m &&
+                circle.radius <= 2.0 * config_.radius_max_m;
+            const bool positions_win =
+                circle_plausible &&
+                (!yaw_rate_reliable ||
+                 (std::fabs(omega_positions) > 3.0 &&
+                  std::fabs(omega_positions) > 2.0 * std::fabs(omega)));
+            if (positions_win)
+            {
+                const double mean_dtheta = sum_dtheta / static_cast<double>(used_steps);
+                const double variance = std::max(
+                    0.0,
+                    sum_dtheta2 / static_cast<double>(used_steps) - mean_dtheta * mean_dtheta);
+                // 单步角增量的散布折算到"速率标准误"
+                const double mean_dt = sum_dt / static_cast<double>(used_steps);
+                slope_error = std::sqrt(variance) / (std::max(1, used_steps) * mean_dt);
+                omega = omega_positions;
+                spin_from_positions = true;
+                circle_phase_last = std::atan2(
+                    lock_samples_.back().position.y() - circle.cy,
+                    lock_samples_.back().position.x() - circle.cx);
+            }
         }
     }
 
