@@ -21,6 +21,7 @@
 #include "AutoAimTypes.hpp"
 #include "RotatingArmorEkf.hpp"
 
+#include <array>
 #include <cstdint>
 #include <deque>
 #include <string>
@@ -144,6 +145,11 @@ struct TrackerConfig
     double min_distance_m{0.40};
     double max_distance_m{12.0};
     double switch_margin_rad{0.06}; // 换板迟滞：别的板要明显更好才换
+    // 瞄准点只允许落在"最近真的被看见过"的板上：四块板里总有一两块朝向车体
+    // 背面（几何上真实存在、但检测不到），按角度挑会挑到它们身上（实拍 v4 静止
+    // 1384 帧全aim=3、看见的是 slot 0，瞄准点画到板外 0.35 m）。这个时间窗内
+    // 见过的板才算候选，窗内的板里再挑离云台最近的。
+    double aim_visible_hold_s{0.30};
 };
 
 enum class LockPhase : std::uint8_t
@@ -268,6 +274,7 @@ private:
         double timestamp_s{0.0};
     };
     ObservationSmoother smoother_;
+    std::array<double, 8> last_seen_s_{{-1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0}};
     // 同帧双板弦长 -> 半径观测（见 .cpp 里的推导）。
     void updateRadiusFromPairs(const std::vector<WorldObservation> &world);
     // 掉线快照续接（见 config_.relock_reuse_enabled）。

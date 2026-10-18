@@ -420,6 +420,7 @@ int main(int argc, char **argv)
     };
     std::vector<AimTrace> pending_aims;
     std::vector<double> aim_errors_m;
+    std::vector<double> aim_slot_errors_m;
 
     std::ofstream csv;
     if (!args.csv_path.empty())
@@ -569,6 +570,7 @@ int main(int argc, char **argv)
         // 但"每一块观测都能被模型解释"是状态对不对的硬指标：状态错 2R 时
         // 这个残差就是 0.3 m 量级，状态对时是几厘米。
         std::vector<double> frame_model_residuals;
+        std::vector<double> frame_aim_residuals;
         if (args.ekf && tracker.initialized())
         {
             const rotating_armor::State &st = tracker.ekf().state();
@@ -617,6 +619,15 @@ int main(int argc, char **argv)
                 {
                     frame_model_residuals.push_back(best);
                 }
+                // 只对"当前瞄准的那块板"算残差。min-over-4 对相位转 90 度完全
+                // 不敏感（四块板转到另一块板的位置上，集合不变），所以它看不出
+                // "瞄准点跑到别的板上去了"；要验收瞄准，必须单独看 aim 板。
+                const int aim_slot = tracker.diagnostics().aim_slot;
+                if (aim_slot >= 0 && aim_slot < 4)
+                {
+                    frame_aim_residuals.push_back(
+                        (observed - rotating_armor::platePosition(st, aim_slot, 4)).norm());
+                }
             }
         }
 
@@ -662,6 +673,10 @@ int main(int argc, char **argv)
             for (double r : frame_model_residuals)
             {
                 aim_errors_m.push_back(r);
+            }
+            for (double r : frame_aim_residuals)
+            {
+                aim_slot_errors_m.push_back(r);
             }
             if (prediction.state != TrackingState::NoTarget &&
                 std::isfinite(prediction.distance_m) && prediction.distance_m > 0.0f)
@@ -768,7 +783,9 @@ int main(int argc, char **argv)
                                 0.6, cv::Scalar(255, 0, 255), 2);
                 }
                 // 车体中心
-                const Eigen::Vector3d c_world = ekf_state.head<3>();
+                // 状态排布是 [x, vx, y, vy, z, vz, theta, omega, R]，中心是 (0,2,4)。
+                // 之前取 head<3>() 等于拿 (x, vx, y) 当中心，十字会画到图像下方去。
+                const Eigen::Vector3d c_world(ekf_state(0), ekf_state(2), ekf_state(4));
                 const Eigen::Vector3d c_gimbal = rotating_armor::toGimbal(gimbal, c_world);
                 const cv::Vec3d c_camera =
                     gimbalToCameraPoint(camera, cv::Vec3d(c_gimbal.x(), c_gimbal.y(), c_gimbal.z()));
@@ -932,6 +949,14 @@ int main(int argc, char **argv)
                       << "p99 " << percentile(aim_errors_m, 0.99) << " m，"
                       << "≤2cm " << 100.0 * fractionBelow(aim_errors_m, 0.02) << "% ，"
                       << "≤5cm " << 100.0 * fractionBelow(aim_errors_m, 0.05) << "%\n";
+        }
+        if (args.ekf && !aim_slot_errors_m.empty())
+        {
+            std::cout << "  瞄准板残差: " << aim_slot_errors_m.size() << " 帧，中位 "
+                      << percentile(aim_slot_errors_m, 0.50) << " m，p90 "
+                      << percentile(aim_slot_errors_m, 0.90) << " m，≤2cm "
+                      << 100.0 * fractionBelow(aim_slot_errors_m, 0.02) << "% ，≤5cm "
+                      << 100.0 * fractionBelow(aim_slot_errors_m, 0.05) << "%\n";
         }
         std::cout << "  末帧预测: " << stateName(final_prediction.state)
                   << " id " << static_cast<int>(final_prediction.target_id)

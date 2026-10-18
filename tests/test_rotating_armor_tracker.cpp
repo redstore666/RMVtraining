@@ -171,6 +171,14 @@ void scenarioStatic()
     for (int frame = 0; frame < 240; ++frame)
     {
         last = rig.step(true, false);
+        if (last.state == TrackingState::Stable)
+        {
+            // 云台伺服：跟踪器说瞄准点在哪个方向，炮塔就转到哪（无延迟理想伺服）。
+            // 之前这里把云台死死钉在"离 yaw=0 最近的那块板"上，等于要求跟踪器
+            // 必须瞄那一块；改成伺服后，测的是"开火许可与瞄准点是否自洽"。
+            rig.gimbal.yaw = last.target_yaw;
+            rig.gimbal.pitch = last.target_pitch;
+        }
         if (first_stable < 0 && last.state == TrackingState::Stable)
         {
             first_stable = frame;

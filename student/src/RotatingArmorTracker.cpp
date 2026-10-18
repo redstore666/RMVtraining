@@ -151,6 +151,7 @@ void RotatingArmorTracker::reset()
     initialized_ = false;
     target_id_ = 0;
     aim_slot_ = -1;
+    last_seen_s_.fill(-1.0);
     last_accept_s_ = 0.0;
     has_accept_ = false;
     consecutive_updates_ = 0;
@@ -995,6 +996,13 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
         {
             break;
         }
+        // "看见过"=这块板真的被用来更新了（或者观测就落在这块板的预测位置上）。
+        // 只按位置门判定会把相邻板也算成看见：四块板相距 0.35 m，位置门 0.6 m，
+        // 于是"没看见的板"也进了瞄准候选，又挑回离云台最近的那块去了。
+        if (best_slot >= 0 && best_slot < static_cast<int>(last_seen_s_.size()))
+        {
+            last_seen_s_[static_cast<std::size_t>(best_slot)] = timestamp_s;
+        }
         // 瞄准槽位跟着观测到的板走：4 块板物理上等价，把瞄准点绑在"刚看到
         // 的那块"上误差最小；不重绑的话对外发布的瞄准点会指向模型外推 90 度
         // 的另一块板，误差随相位漂移一起放大。
@@ -1144,21 +1152,52 @@ PredictionResult RotatingArmorTracker::buildResult(const GimbalState &gimbal,
     }
 
     // 选瞄准的装甲板：预测时刻上"离当前云台指向最近"的那块，换板带迟滞。
+    //
+    // 但"离云台最近"只能用来兜底：四块板在 2.5 m 外只差几度，按角度挑+迟滞
+    // 会永久锁在相邻那块上（实拍 v4 静止 1384 帧全部 aim=3，而每一帧被看到的
+    // 都是 slot 0 —— 瞄准点因此画在板外 0.35 m 处，正是"紫圈跑到板外面"）。
+    // 正确的瞄准点是"最近一次被接受更新关联上的那块板"在未来时刻的位置：
+    // 同一块板按 ω 外推，换板由关联结果驱动（update 里 aim_slot_ = best_slot）。
     int best_slot = -1;
-    double best_error = std::numeric_limits<double>::infinity();
-    for (int slot = 0; slot < plate_count; ++slot)
     {
-        // 世界系本身就是控制器用的绝对角参考系（观测在 collectWorldObservations
-        // 里已按云台姿态转过一次），这里不能再转回去，否则会把云台角算两遍。
-        const Eigen::Vector3d plate = platePosition(probe.state(), slot, plate_count);
-        const double error =
-            std::max(std::fabs(wrapToPi(vectorYaw(plate) - gimbal.yaw)),
-                     std::fabs(vectorPitch(plate) - gimbal.pitch));
-        const double biased = (slot == aim_slot_) ? error - config_.switch_margin_rad : error;
-        if (biased < best_error)
+        double best_error = std::numeric_limits<double>::infinity();
+        for (int slot = 0; slot < plate_count && slot < static_cast<int>(last_seen_s_.size());
+             ++slot)
         {
-            best_error = biased;
-            best_slot = slot;
+            const double seen = last_seen_s_[static_cast<std::size_t>(slot)];
+            if (seen < 0.0 || timestamp_s - seen > config_.aim_visible_hold_s)
+            {
+                continue; // 最近没见过这块板，不能拿它当瞄准点
+            }
+            const Eigen::Vector3d candidate = platePosition(probe.state(), slot, plate_count);
+            const double error =
+                std::max(std::fabs(wrapToPi(vectorYaw(candidate) - gimbal.yaw)),
+                         std::fabs(vectorPitch(candidate) - gimbal.pitch));
+            if (error < best_error)
+            {
+                best_error = error;
+                best_slot = slot;
+            }
+        }
+    }
+    if (best_slot < 0 && aim_slot_ >= 0 && aim_slot_ < plate_count)
+    {
+        best_slot = aim_slot_;
+    }
+    if (best_slot < 0)
+    {
+        double best_error = std::numeric_limits<double>::infinity();
+        for (int slot = 0; slot < plate_count; ++slot)
+        {
+            const Eigen::Vector3d candidate = platePosition(probe.state(), slot, plate_count);
+            const double error =
+                std::max(std::fabs(wrapToPi(vectorYaw(candidate) - gimbal.yaw)),
+                         std::fabs(vectorPitch(candidate) - gimbal.pitch));
+            if (error < best_error)
+            {
+                best_error = error;
+                best_slot = slot;
+            }
         }
     }
     if (best_slot < 0)
