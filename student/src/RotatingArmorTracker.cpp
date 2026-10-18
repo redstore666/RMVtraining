@@ -1027,6 +1027,7 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
         if (best_slot >= 0 && best_slot < static_cast<int>(last_seen_s_.size()))
         {
             last_seen_s_[static_cast<std::size_t>(best_slot)] = timestamp_s;
+            last_seen_position_[static_cast<std::size_t>(best_slot)] = chosen.position;
         }
         // 瞄准槽位跟着观测到的板走：4 块板物理上等价，把瞄准点绑在"刚看到
         // 的那块"上误差最小；不重绑的话对外发布的瞄准点会指向模型外推 90 度
@@ -1057,7 +1058,10 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                     const Eigen::Vector3d plate_after =
                         rotating_armor::platePosition(ekf_.state(), best_slot,
                                                       ekf_.config().plate_count);
-                    ekf_.shiftCenter(plate_before - plate_after);
+                    if (config_.phase_anti_anchor)
+                    {
+                        ekf_.shiftCenter(plate_before - plate_after);
+                    }
                 }
             }
             pushNormalHistory(best_slot, timestamp_s, chosen.yaw);
@@ -1262,7 +1266,40 @@ PredictionResult RotatingArmorTracker::buildResult(const GimbalState &gimbal,
     aim_slot_ = best_slot;
     diagnostics_.aim_slot = best_slot;
 
-    const Eigen::Vector3d plate = platePosition(probe.state(), best_slot, plate_count);
+    Eigen::Vector3d plate = platePosition(probe.state(), best_slot, plate_count);
+    // 只有当结果不向前预测（零延迟、零 bias）时才直接用观测板心：一旦要外推
+    // bias+latency，EKF 的四板模型相位比"把观测绕中心转一圈"更可靠（合成场景 G
+    // 里 8 rad/s、50 ms 延迟下，观测外推 5 cm，EKF 8 mm）。
+    const double prediction_horizon = bias + latency;
+    if (config_.aim_observation_hold_s > 0.0 && prediction_horizon <= 0.002 &&
+        best_slot < static_cast<int>(last_seen_s_.size()))
+    {
+        const std::size_t slot_index = static_cast<std::size_t>(best_slot);
+        const double seen = last_seen_s_[slot_index];
+        if (seen >= 0.0 && timestamp_s - seen <= config_.aim_observation_hold_s &&
+            last_seen_position_[slot_index].allFinite())
+        {
+            // 用观测到的板心，并按 omega 沿圆周外推到当前时刻：外推是绕
+            // 中心刚体旋转的严格解（中心不动时板心只转不缩），零延迟时
+            // 外推量接近 0，有 10~30 ms 检测延迟时正好补掉。
+            plate = last_seen_position_[slot_index];
+            // 观测是在 seen 时刻量的，而结果要送到 bias+latency 之后的"开火时刻"，
+            // 两段都要按 omega 补：只补 lag 会在有处理延迟时系统性落后半个身位。
+            const double horizon = bias + latency + (timestamp_s - seen);
+            const Eigen::Vector3d center(probe.state()(0), probe.state()(2), probe.state()(4));
+            const double omega = probe.state()(7);
+            if (horizon > 0.0 && std::isfinite(omega) && std::fabs(omega) > 1.0e-3)
+            {
+                const Eigen::Vector3d relative = plate - center;
+                const double angle = omega * horizon;
+                const double c = std::cos(angle);
+                const double s_ = std::sin(angle);
+                plate = center + Eigen::Vector3d(c * relative.x() - s_ * relative.y(),
+                                                 s_ * relative.x() + c * relative.y(),
+                                                 relative.z());
+            }
+        }
+    }
     diagnostics_.predicted_aim_world = plate;
     const double distance = plate.norm();
     if (!(distance > 1.0e-6))

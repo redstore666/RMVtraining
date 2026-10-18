@@ -134,6 +134,8 @@ namespace
         double v_sigma{0.05};
         bool centered_switch{true};
         double sigma_floor{0.06};
+        bool phase_anchor{true};
+        double aim_obs{0.012};
         double switch_margin{0.10};
         double lock_span{0.18};
         double lock_age{0.50};
@@ -221,6 +223,12 @@ namespace
                 args.radius_prior = std::atof(next("--radius").c_str());
                 args.radius_given = true;
             }
+            else if (arg == "--aim-obs")
+            {
+                args.aim_obs = std::atof(next("--aim-obs").c_str());
+            }
+            else if (arg == "--no-phase-anchor")
+                args.phase_anchor = false;
             else if (arg == "--sigma-floor")
                 args.sigma_floor = std::atof(next("--sigma-floor").c_str());
             else if (arg == "--no-centered-switch")
@@ -404,8 +412,10 @@ int main(int argc, char **argv)
     if (args.phase_yaw)
     {
         tracker_config.phase_update_enabled = true;
+        tracker_config.phase_anti_anchor = args.phase_anchor;
         tracker_config.phase_update_sigma_rad = args.phase_sigma;
     }
+    tracker_config.aim_observation_hold_s = args.aim_obs;
     rotating_armor::RotatingArmorTracker tracker(tracker_config);
     long ekf_first_stable_frame{-1};
     long ekf_stable_frames{0};
@@ -452,7 +462,7 @@ int main(int argc, char **argv)
     {
         dump_stream.open(args.dump_csv);
         dump_stream << "frame,t,det,target_id,aim_slot,obs_id,x,y,z,best_slot,best_dist,"
-                       "second_dist,cx,cy,cyaw,R\n";
+                       "second_dist,cx,cy,cz,cyaw,R,oyaw\n";
     }
 
     const bool show = !args.headless;
@@ -625,7 +635,11 @@ int main(int argc, char **argv)
                                 << tracker.diagnostics().aim_slot << ',' << pose.detection.target_id
                                 << ',' << observed.x() << ',' << observed.y() << ',' << observed.z()
                                 << ',' << best_slot << ',' << best << ',' << second << ','
-                                << st(0) << ',' << st(2) << ',' << st(6) << ',' << st(8) << '\n';
+                                << st(0) << ',' << st(2) << ',' << st(4) << ','
+                                << st(6) << ',' << st(8) << ','
+                                << rotating_armor::wrapToPi(static_cast<double>(pose.armor_yaw) +
+                                                            static_cast<double>(gimbal.yaw))
+                                << '\n';
                 }
                 if (std::isfinite(best))
                 {
@@ -634,11 +648,13 @@ int main(int argc, char **argv)
                 // 只对"当前瞄准的那块板"算残差。min-over-4 对相位转 90 度完全
                 // 不敏感（四块板转到另一块板的位置上，集合不变），所以它看不出
                 // "瞄准点跑到别的板上去了"；要验收瞄准，必须单独看 aim 板。
-                const int aim_slot = tracker.diagnostics().aim_slot;
-                if (aim_slot >= 0 && aim_slot < 4)
+                // 用"实际发布出去的瞄准点"（diagnostics().predicted_aim_world），
+                // 而不是再用 EKF 状态重算一遍：后者会把 buildResult 里的
+                // 瞄准点后处理（观测直用 / 可见性窗口）全部绕过。
+                const Eigen::Vector3d &aim_world = tracker.diagnostics().predicted_aim_world;
+                if (aim_world.allFinite() && aim_world.squaredNorm() > 1.0e-6)
                 {
-                    frame_aim_residuals.push_back(
-                        (observed - rotating_armor::platePosition(st, aim_slot, 4)).norm());
+                    frame_aim_residuals.push_back((observed - aim_world).norm());
                 }
             }
         }

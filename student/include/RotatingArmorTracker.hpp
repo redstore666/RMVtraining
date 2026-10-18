@@ -105,6 +105,10 @@ struct TrackerConfig
     // RotatingArmorEkf::updatePhase 本身；等有"按槽位一致"的写法再默认打开。
     bool phase_update_enabled{false};
     double phase_update_sigma_rad{0.12};
+    // 相位更新后是否"反锚"（把中心平移回去、让板留在原地）。单板可见时
+    // (中心, 相位) 是规范自由度；但中心已经由位置更新约束住时，反锚会把
+    // 相位修正变成中心漂移。两种做法都保留，A/B 用。
+    bool phase_anti_anchor{true};
     int bootstrap_updates{10};   // 锁定期头几次更新先放宽 NIS 门（初值靠单帧法向，偏差可比预想大）
     // 声明反驳检查：法向历史里混入相邻板样本时斜率会失真，实拍里会误杀，
     // 默认关闭；需要时打开（合成夹具与 v4 的静止车都不需要它）。
@@ -150,6 +154,8 @@ struct TrackerConfig
     // 1384 帧全aim=3、看见的是 slot 0，瞄准点画到板外 0.35 m）。这个时间窗内
     // 见过的板才算候选，窗内的板里再挑离云台最近的。
     double aim_visible_hold_s{0.30};
+    // 瞄准点直接用"最近一次观测到的板心"的时间窗（秒）。0 = 关闭，退回 EKF。
+    double aim_observation_hold_s{0.012};
     // 目标选择：自瞄应瞄"正压在准星上"的那台车。两台车同时在场时，另一台车的板
     // 连续 relock_frames 帧都比当前目标更靠近准星（多出 target_switch_margin_rad
     // 的迟滞），就丢目标重锁到它。
@@ -280,6 +286,9 @@ private:
     };
     ObservationSmoother smoother_;
     std::array<double, 8> last_seen_s_{{-1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0}};
+    // 每个槽位最近一次被接受到的世界系板心。零延迟时它就是"此刻板在哪"
+    // 的最好答案；EKF 只负责给没有新鲜观测的槽位做外推。
+    std::array<Eigen::Vector3d, 8> last_seen_position_{};
     // 同帧双板弦长 -> 半径观测（见 .cpp 里的推导）。
     void updateRadiusFromPairs(const std::vector<WorldObservation> &world);
     // 掉线快照续接（见 config_.relock_reuse_enabled）。
