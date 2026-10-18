@@ -131,7 +131,12 @@ namespace
         int dump_every{0};
         int only_id{0};
         double radius_prior{0.25};
+        double v_sigma{0.05};
+        double lock_span{0.18};
+        double lock_age{0.50};
         bool radius_given{false};
+        bool smooth{false};
+        int smooth_window{4};
         bool trace{false};
     bool phase_yaw{false};
     double sigma_pos{0.03};
@@ -194,9 +199,25 @@ namespace
                 args.dump_csv = next("--dump");
             else if (arg == "--only-id")
                 args.only_id = std::atoi(next("--only-id").c_str());
+            else if (arg == "--smooth")
+                args.smooth = true;
+            else if (arg == "--smooth-window")
+                args.smooth_window = std::max(1, std::atoi(next("--smooth-window").c_str()));
             else if (arg == "--radius")
             {
                 args.radius_prior = std::atof(next("--radius").c_str());
+            }
+            else if (arg == "--v-sigma")
+            {
+                args.v_sigma = std::atof(next("--v-sigma").c_str());
+            }
+            else if (arg == "--lock-span")
+            {
+                args.lock_span = std::atof(next("--lock-span").c_str());
+            }
+            else if (arg == "--lock-age")
+            {
+                args.lock_age = std::atof(next("--lock-age").c_str());
                 args.radius_given = true;
             }
             else if (arg == "--config")
@@ -345,6 +366,11 @@ int main(int argc, char **argv)
     tracker_config.position_sigma_m = args.sigma_pos;
     tracker_config.handoff_sigma_scale = args.handoff_scale;
     tracker_config.radius_prior_m = args.radius_prior;
+    tracker_config.velocity_sigma_m_s = args.v_sigma;
+    tracker_config.lock_min_span_s = args.lock_span;
+    tracker_config.lock_max_age_s = args.lock_age;
+    tracker_config.observation_smoothing_enabled = args.smooth;
+    tracker_config.smoothing_window = args.smooth_window;
     // 显式 --radius 时以它为准（关掉按板型自动选），方便做 A/B。
     if (args.radius_given)
     {

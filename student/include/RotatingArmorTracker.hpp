@@ -77,6 +77,14 @@ struct TrackerConfig
     // 的系统性偏差），不体现在 P 里。地板太小 → NIS 门把有信息的帧全拒了
     // （实拍 v4 旋转目标 466/466 帧被拒）；地板太大 → 更新变钝。
     double association_sigma_floor_m{0.06};
+    // 观测平滑：同一槽位连续命中时，对世界系位置做指数平均后再喂滤波器。
+    // 单帧检测抖动（实测 v4 旋转目标相邻帧位移中位 52 mm、静止 3.8 mm）是
+    // 白噪声，平均 N 帧能压到 1/sqrt(N)；换板/换 id/超时立即重置，避免把
+    // 不同板的点混在一起（那会引入 0.4 m 假跳变）。
+    bool observation_smoothing_enabled{false};
+    int smoothing_window{4};            // 参与平均的最大帧数
+    double smoothing_max_spread_m{0.12}; // 新观测离均值超过它 -> 重置而不是并入
+    double smoothing_max_gap_s{0.10};    // 与上次命中的间隔超过它 -> 重置
 
     // 同帧两块板同时可见时，弦长能直接量出半径：R = chord / |n_i - n_j|
     // （相邻两板 |Δn| = √2）。静止目标只露一块板时 R 不可辨识，这条观测是
@@ -247,6 +255,19 @@ private:
 
     // 关联 + 更新。返回本帧接受的更新数。
     int associateAndUpdate(const std::vector<WorldObservation>& world, double timestamp_s);
+    // 观测平滑（见 TrackerConfig::observation_smoothing_enabled）：返回 true 时
+    // out 是平滑后的观测，否则调用方用原始观测。
+    bool smoothObservation(const WorldObservation& observation, int slot,
+                           double timestamp_s, ArmorObservation& out);
+    struct ObservationSmoother
+    {
+        Eigen::Vector3d mean{Eigen::Vector3d::Zero()};
+        int slot{-1};
+        int target_id{-1};
+        int count{0};
+        double timestamp_s{0.0};
+    };
+    ObservationSmoother smoother_;
     // 同帧双板弦长 -> 半径观测（见 .cpp 里的推导）。
     void updateRadiusFromPairs(const std::vector<WorldObservation> &world);
     // 掉线快照续接（见 config_.relock_reuse_enabled）。

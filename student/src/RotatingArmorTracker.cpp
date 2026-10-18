@@ -170,6 +170,7 @@ void RotatingArmorTracker::reset()
     timestamp_s_ = 0.0;
     lock_radius_from_data_ = false;
     lock_phase_flipped_ = false;
+    smoother_ = ObservationSmoother{};
 }
 
 void RotatingArmorTracker::dropTarget(const char *reason)
@@ -860,6 +861,49 @@ bool RotatingArmorTracker::tryRestoreSnapshot(const std::vector<WorldObservation
     return true;
 }
 
+bool RotatingArmorTracker::smoothObservation(const WorldObservation &observation, int slot,
+                                              double timestamp_s, ArmorObservation &out)
+{
+    if (!config_.observation_smoothing_enabled)
+    {
+        return false;
+    }
+    // 换板、换目标、间隔太久都说明"上一段均值"不再代表这块板，重置。
+    const bool same_plate = smoother_.slot == slot && smoother_.target_id == observation.target_id;
+    const bool fresh_gap = timestamp_s - smoother_.timestamp_s > config_.smoothing_max_gap_s;
+    if (!same_plate || fresh_gap || smoother_.count <= 0)
+    {
+        smoother_.mean = observation.position;
+        smoother_.slot = slot;
+        smoother_.target_id = observation.target_id;
+        smoother_.count = 1;
+        smoother_.timestamp_s = timestamp_s;
+        return false; // 只有一帧时平滑没有意义，走原始观测
+    }
+    // 观测离均值太远：可能是同一槽位上的真实跳变（重锁/外推偏了），重置。
+    const double spread_m = (observation.position - smoother_.mean).norm();
+    const bool too_far = !(spread_m <= config_.smoothing_max_spread_m);
+    if (too_far)
+    {
+        smoother_.mean = observation.position;
+        smoother_.count = 1;
+        smoother_.timestamp_s = timestamp_s;
+        return false;
+    }
+    const int window = std::max(config_.smoothing_window, 1);
+    const double alpha = 1.0 / static_cast<double>(std::min(smoother_.count + 1, window));
+    smoother_.mean += alpha * (observation.position - smoother_.mean);
+    smoother_.count = std::min(smoother_.count + 1, window);
+    smoother_.timestamp_s = timestamp_s;
+
+    out.position = smoother_.mean;
+    // 平均 N 帧把白噪声压到 1/sqrt(N)，但公共系统误差（半径/相位偏差）不会
+    // 被平均掉，所以地板项保留。
+    const double averaged = observation.sigma_position_m / std::sqrt(static_cast<double>(smoother_.count));
+    out.sigma_position_m = std::hypot(averaged, config_.association_sigma_floor_m);
+    return true;
+}
+
 int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation> &world,
                                              double timestamp_s)
 {
@@ -941,9 +985,12 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
         }
         const WorldObservation &chosen = world[static_cast<std::size_t>(best_observation)];
         ArmorObservation observation;
-        observation.position = chosen.position;
-        observation.sigma_position_m =
-            std::hypot(chosen.sigma_position_m, config_.association_sigma_floor_m);
+        if (!smoothObservation(chosen, best_slot, timestamp_s, observation))
+        {
+            observation.position = chosen.position;
+            observation.sigma_position_m =
+                std::hypot(chosen.sigma_position_m, config_.association_sigma_floor_m);
+        }
         if (!ekf_.update(observation, best_slot))
         {
             break;
