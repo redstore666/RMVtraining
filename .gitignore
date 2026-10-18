@@ -45,3 +45,6 @@ __pycache__/
 
 # 本地备份（tar 快照，勿提交）
 /backups/
+
+# 回放视频备份（tmp/ 可能被清理，这里留一份；体积大不入库）
+data/replay/
