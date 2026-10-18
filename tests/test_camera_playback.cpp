@@ -136,6 +136,9 @@ namespace
         double lock_age{0.50};
         bool radius_given{false};
         bool refine_corners{false};
+        double nis_gate{11.34};
+        int max_updates{2};
+        bool nis_gate_given{false};
         bool smooth{false};
         int smooth_window{4};
         bool trace{false};
@@ -204,6 +207,10 @@ namespace
                 args.smooth = true;
             else if (arg == "--refine-corners")
                 args.refine_corners = true;
+            else if (arg == "--max-updates" && i + 1 < argc)
+                args.max_updates = std::atoi(argv[++i]);
+            else if (arg == "--nis-gate" && i + 1 < argc)
+                args.nis_gate = std::atof(argv[++i]), args.nis_gate_given = true;
             else if (arg == "--smooth-window")
                 args.smooth_window = std::max(1, std::atoi(next("--smooth-window").c_str()));
             else if (arg == "--radius")
@@ -370,6 +377,9 @@ int main(int argc, char **argv)
     tracker_config.handoff_sigma_scale = args.handoff_scale;
     tracker_config.radius_prior_m = args.radius_prior;
     tracker_config.velocity_sigma_m_s = args.v_sigma;
+    tracker_config.max_updates_per_frame = args.max_updates;
+    if (args.nis_gate_given)
+        tracker_config.nis_gate = args.nis_gate;
     tracker_config.lock_min_span_s = args.lock_span;
     tracker_config.lock_max_age_s = args.lock_age;
     tracker_config.observation_smoothing_enabled = args.smooth;
