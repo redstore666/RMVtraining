@@ -33,6 +33,7 @@
 #include "AutoAimTypes.hpp"
 #include "RotatingArmorTracker.hpp"
 #include "StudentTasks.hpp"
+#include "WebLogger.hpp"
 #include <opencv2/calib3d.hpp>
 #include <filesystem>
 
@@ -135,6 +136,9 @@ namespace
         double omega{0.0};
         bool omega_given{false};
         double q_scale{1.0};
+    bool web{false};
+    int web_port{8080};
+    double web_hold_s{0.0};
         bool led_yaw{false};
         bool roi_retry{false};
         int roi_size{240};
@@ -297,6 +301,18 @@ namespace
             {
                 args.q_scale = std::atof(next("--q-scale").c_str());
             }
+            else if (arg == "--web")
+            {
+                args.web = true;
+            }
+            else if (arg == "--web-port")
+            {
+                args.web_port = std::atoi(next("--web-port").c_str());
+            }
+            else if (arg == "--web-hold")
+            {
+                args.web_hold_s = std::atof(next("--web-hold").c_str());
+            }
             else if (arg == "--score")
             {
                 args.score = std::atof(next("--score").c_str());
@@ -394,6 +410,13 @@ int main(int argc, char **argv)
         }
         camera.rotation_camera_to_gimbal = opticalToWorldRotation();
         camera.translation_camera_to_gimbal = cv::Mat::zeros(3, 1, CV_64F);
+    }
+
+    if (args.web)
+    {
+        START_WEB_SERVER(args.web_port);
+        std::cout << "[web] 曲线页面 http://127.0.0.1:" << args.web_port
+                  << "/  （回放结束后保持 " << args.web_hold_s << " s）\n";
     }
 
     // 2. 打开视频。
@@ -770,6 +793,20 @@ int main(int argc, char **argv)
             prediction = tracker.step(poses, gimbal, time_s, 0.0);
             diagnostics = tracker.diagnostics();
             final_diagnostics = diagnostics;
+            if (args.web)
+            {
+                const auto &st = tracker.ekf().state();
+                WEB_LOG("frame", static_cast<double>(frame_index));
+                WEB_LOG("phase", static_cast<double>(static_cast<int>(diagnostics.phase)));
+                WEB_LOG("tracking", diagnostics.phase == rotating_armor::LockPhase::Tracking ? 1.0 : 0.0);
+                WEB_LOG("omega", st(7));
+                WEB_LOG("radius", st(8));
+                WEB_LOG("nis", diagnostics.last_nis);
+                WEB_LOG("updates", static_cast<double>(diagnostics.updates_this_frame));
+                WEB_LOG("missed", static_cast<double>(diagnostics.missed_frames));
+                WEB_LOG("cx", st(0));
+                WEB_LOG("cy", st(2));
+            }
             if (args.trace)
             {
                 const auto &st = tracker.ekf().state();
@@ -919,6 +956,10 @@ int main(int argc, char **argv)
                 const double best_aim =
                     *std::min_element(frame_aim_candidates.begin(), frame_aim_candidates.end());
                 frame_aim_residuals.push_back(best_aim);
+                if (args.web)
+                {
+                    WEB_LOG("aim_err_mm", best_aim * 1000.0);
+                }
                 const std::size_t measured = tracker.diagnostics().updates_this_frame > 0 ? 0 : 1;
                 aim_slot_by_measurement[measured].push_back(best_aim);
                 ++aim_frames_by_measurement[measured];
@@ -1137,10 +1178,28 @@ int main(int argc, char **argv)
                 }
                 if (diagnostics.aim_slot >= 0 && diagnostics.aim_slot < 4)
                 {
+                    // 瞄准点用颜色区分可信度：
+                    //   绿实心 = 锁定且本帧刚用真实观测更新过（稳）；
+                    //   橙空心 = 锁定但本帧没有观测，靠模型外推（预测）；
+                    //   灰     = 未锁定/刚起步，只有先验，别当真。
+                    const bool tracking = diagnostics.phase == rotating_armor::LockPhase::Tracking;
+                    const bool measured = tracking && diagnostics.updates_this_frame > 0;
+                    cv::Scalar color(150, 150, 150);
+                    const char *label = "PRED";
+                    if (measured)
+                    {
+                        color = cv::Scalar(0, 255, 0);
+                        label = "AIM";
+                    }
+                    else if (tracking)
+                    {
+                        color = cv::Scalar(0, 170, 255);
+                        label = "AIM-P";
+                    }
                     const cv::Point2d p = projected[diagnostics.aim_slot];
-                    cv::circle(frame, p, 9, cv::Scalar(255, 0, 255), 2);
-                    cv::putText(frame, "AIM", p + cv::Point2d(12, -12), cv::FONT_HERSHEY_SIMPLEX,
-                                0.6, cv::Scalar(255, 0, 255), 2);
+                    cv::circle(frame, p, 10, color, measured ? -1 : 2);
+                    cv::putText(frame, label, p + cv::Point2d(13, -13), cv::FONT_HERSHEY_SIMPLEX,
+                                0.6, color, 2);
                 }
                 // 车体中心
                 // 状态排布是 [x, vx, y, vy, z, vz, theta, omega, R]，中心是 (0,2,4)。
@@ -1388,6 +1447,16 @@ int main(int argc, char **argv)
     {
         csv.close();
         std::cout << "\nCSV 已写入 " << args.csv_path << "\n";
+    }
+    if (args.web)
+    {
+        if (args.web_hold_s > 0.0)
+        {
+            std::cout << "\n[web] 回放结束，服务器保持 " << args.web_hold_s
+                      << " s：http://127.0.0.1:" << args.web_port << "/\n" << std::flush;
+            std::this_thread::sleep_for(std::chrono::duration<double>(args.web_hold_s));
+        }
+        STOP_WEB_SERVER();
     }
     return 0;
 }

@@ -205,6 +205,9 @@ target_include_directories(test_batch PRIVATE ${OpenCV_INCLUDE_DIRS})
 # 相机现场时评估视觉识别质量，以及用真实序列做 EKF 关联/锁定/预测的离线调参。
 add_executable(test_camera_playback tests/test_camera_playback.cpp)
 target_link_libraries(test_camera_playback PRIVATE training_core ${OpenCV_LIBS})
+if(ENABLE_WEB_DEBUG)
+    target_link_libraries(test_camera_playback PRIVATE web_debug)
+endif()
 target_include_directories(test_camera_playback PRIVATE ${OpenCV_INCLUDE_DIRS})
 
 # 实时相机取流 + 装甲板检测（相机必须已连接）。
