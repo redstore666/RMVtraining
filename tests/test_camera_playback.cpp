@@ -134,6 +134,8 @@ namespace
         double v_sigma{0.05};
         double omega{0.0};
         bool omega_given{false};
+        double score{0.7};
+        bool score_given{false};
         bool centered_switch{true};
         double sigma_floor{0.06};
         bool phase_anchor{true};
@@ -247,6 +249,11 @@ namespace
                 args.centered_switch = false;
             else if (arg == "--switch-margin")
                 args.switch_margin = std::atof(next("--switch-margin").c_str());
+            else if (arg == "--score")
+            {
+                args.score = std::atof(next("--score").c_str());
+                args.score_given = true;
+            }
             else if (arg == "--omega")
             {
                 args.omega = std::atof(next("--omega").c_str());
@@ -410,6 +417,10 @@ int main(int argc, char **argv)
     tracker_config.position_sigma_m = args.sigma_pos;
     tracker_config.handoff_sigma_scale = args.handoff_scale;
     tracker_config.radius_prior_m = args.radius_prior;
+    if (args.score_given)
+    {
+        setArmorScoreThreshold(static_cast<float>(args.score));
+    }
     tracker_config.velocity_sigma_m_s = args.v_sigma;
     if (args.omega_given)
     {

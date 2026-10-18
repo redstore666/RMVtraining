@@ -66,6 +66,10 @@ public:
     int input_width() const { return input_width_; }
     int input_height() const { return input_height_; }
     const std::string &device() const { return device_; }
+    // 检测置信度阈值：默认 0.7（sp_vision_25 standard3 配置）。复检/跟踪阶段可以
+    // 降到 0.3~0.5 换取召回（自转目标实拍只有约一半的帧能过 0.7）。
+    void setScoreThreshold(float threshold) { score_threshold_ = threshold; }
+    float scoreThreshold() const { return score_threshold_; }
 
     // 对一帧 BGR 图像推理。输入为空或模型未就绪时返回空。
     std::vector<Detection> detect(const cv::Mat &bgr);

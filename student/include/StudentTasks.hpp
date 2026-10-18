@@ -42,6 +42,9 @@ bool solveArmorPoseDisambiguated(const std::vector<cv::Point3f> &object_points,
 // 模型：models/yolov5.xml（OpenVINO，RMV_DET_MODEL=yolo11 切备选）。
 std::vector<ArmorDetection> armor_detect(const cv::Mat &pic, TeamColor enemy_color);
 
+// 覆盖神经网络检测的置信度阈值（默认 0.7）。离线回放用来量化"降阈值能换多少召回"。
+void setArmorScoreThreshold(float threshold);
+
 // 任务 3：使用已标定的相机内参进行位姿解算，再将观测从相机坐标系变换到云台坐标系。
 // 输出位置单位为米。
 // 云台系 -> 相机光学系（右/下/前），cameraToGimbalPoint 的逆变换。

@@ -497,6 +497,16 @@ namespace
 } // namespace
 
 // 任务 2 入口：神经网络四点检测（唯一实现）。
+void setArmorScoreThreshold(float threshold)
+{
+    bool ok = false;
+    ArmorDetectorNet &detector = nnDetector(ok);
+    if (ok)
+    {
+        detector.setScoreThreshold(threshold);
+    }
+}
+
 std::vector<ArmorDetection> armor_detect(const cv::Mat &pic, TeamColor enemy_color)
 {
     return armorDetectNn(pic, enemy_color);
