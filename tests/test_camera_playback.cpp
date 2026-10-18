@@ -589,7 +589,7 @@ int main(int argc, char **argv)
     {
         dump_stream.open(args.dump_csv);
         dump_stream << "frame,t,det,target_id,aim_slot,obs_id,x,y,z,best_slot,best_dist,"
-                       "second_dist,cx,cy,cz,cyaw,R,oyaw,aimx,aimy,aimz,u,v\n";
+                       "second_dist,cx,cy,cz,cyaw,R,oyaw,aimx,aimy,aimz,u,v,stab,upd,missed\n";
     }
 
     const bool show = !args.headless;
@@ -930,7 +930,10 @@ int main(int argc, char **argv)
                                                       camera.camera_matrix, cv::noArray(), px);
                                     dump_stream << ',' << px[0].x << ',' << px[0].y;
                                 }
-                                dump_stream << '\n';
+                                dump_stream << ',' << tracker.diagnostics().stability
+                                            << ',' << tracker.diagnostics().updates_this_frame
+                                            << ',' << tracker.diagnostics().missed_frames
+                                            << '\n';
                 }
                 if (std::isfinite(best))
                 {
@@ -1197,9 +1200,32 @@ int main(int argc, char **argv)
                         label = "AIM-P";
                     }
                     const cv::Point2d p = projected[diagnostics.aim_slot];
+                    // 提前量可视化：白色细十字 = 模型此刻的板心（不前推），
+                    // 连线指向 AIM 圈 = 外推到开火时刻的瞄准点。高速自转时
+                    // 两者本来就会差出 ω·(bias+latency)·R，不是画错。
+                    const Eigen::Vector3d plate_now =
+                        rotating_armor::platePosition(ekf_state, diagnostics.aim_slot, 4);
+                    const Eigen::Vector3d g_now = rotating_armor::toGimbal(gimbal, plate_now);
+                    const cv::Vec3d c_now = gimbalToCameraPoint(
+                        camera, cv::Vec3d(g_now.x(), g_now.y(), g_now.z()));
+                    std::vector<cv::Point2d> now_proj;
+                    cv::projectPoints(std::vector<cv::Point3d>{cv::Point3d(
+                                          c_now[0], c_now[1], c_now[2])},
+                                      cv::Vec3d(0, 0, 0), cv::Vec3d(0, 0, 0),
+                                      camera.camera_matrix, cv::noArray(), now_proj);
+                    const cv::Point2d q = now_proj[0];
+                    const double lead_px = cv::norm(p - q);
+                    if (lead_px > 1.5)
+                    {
+                        cv::drawMarker(frame, q, cv::Scalar(255, 255, 255),
+                                       cv::MARKER_TILTED_CROSS, 10, 1);
+                        cv::line(frame, q, p, cv::Scalar(200, 200, 200), 1);
+                    }
                     cv::circle(frame, p, 10, color, measured ? -1 : 2);
-                    cv::putText(frame, label, p + cv::Point2d(13, -13), cv::FONT_HERSHEY_SIMPLEX,
-                                0.6, color, 2);
+                    char aim_text[64];
+                    std::snprintf(aim_text, sizeof(aim_text), "%s lead %.0fpx", label, lead_px);
+                    cv::putText(frame, aim_text, p + cv::Point2d(13, -13),
+                                cv::FONT_HERSHEY_SIMPLEX, 0.55, color, 2);
                 }
                 // 车体中心
                 // 状态排布是 [x, vx, y, vy, z, vz, theta, omega, R]，中心是 (0,2,4)。
