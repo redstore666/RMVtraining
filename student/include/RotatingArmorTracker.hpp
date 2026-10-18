@@ -47,6 +47,9 @@ struct TrackerConfig
     // 会让滤波器把旋转解释成平移、中心以 1 m/s 飞出去（实拍 v4 旋转目标
     // 中心跑 1.4 m 后位置门全拒）。所以速度先验压到很小、基本钉在 0。
     double velocity_sigma_m_s{0.05};
+    // 过程噪声缩放：默认 1.0 = ProcessNoiseConfig 的原值。自转目标的板心每帧能走
+    // 30-50 mm，滤波器 P 收得太紧时会"拒跟"观测（实测状态离刚更新的观测 87 mm）。
+    double process_accel_scale{1.0};
     // 板面法向 yaw 的噪声（弧度）。IPPE 孪生解会让 yaw 差 10~30°，取 0.35。
     double normal_sigma_rad{0.35};
 
@@ -226,6 +229,7 @@ public:
     explicit RotatingArmorTracker(TrackerConfig config = TrackerConfig{});
 
     void reset();
+    void applyProcessNoise();
 
 
     // 与 ekf_predict 同签名：喂进本帧的全部装甲板位姿，返回本帧应该发出去的结果。

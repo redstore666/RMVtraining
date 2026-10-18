@@ -134,6 +134,7 @@ namespace
         double v_sigma{0.05};
         double omega{0.0};
         bool omega_given{false};
+        double q_scale{1.0};
         double score{0.7};
         bool score_given{false};
         bool centered_switch{true};
@@ -249,6 +250,10 @@ namespace
                 args.centered_switch = false;
             else if (arg == "--switch-margin")
                 args.switch_margin = std::atof(next("--switch-margin").c_str());
+            else if (arg == "--q-scale")
+            {
+                args.q_scale = std::atof(next("--q-scale").c_str());
+            }
             else if (arg == "--score")
             {
                 args.score = std::atof(next("--score").c_str());
@@ -422,6 +427,7 @@ int main(int argc, char **argv)
         setArmorScoreThreshold(static_cast<float>(args.score));
     }
     tracker_config.velocity_sigma_m_s = args.v_sigma;
+    tracker_config.process_accel_scale = args.q_scale;
     if (args.omega_given)
     {
         tracker_config.forced_omega_rad_s = args.omega;

@@ -102,6 +102,9 @@ public:
     RotatingArmorEkf() = default;
     explicit RotatingArmorEkf(const EkfConfig& config);
 
+    // 覆盖配置（过程噪声、板数）。只改后续 predict/update 用的参数，不动当前状态。
+    void setConfig(const EkfConfig &config) { config_ = config; }
+
     // 回到"未初始化"：状态与协方差清零，需要重新 initialize()。
     void reset();
 

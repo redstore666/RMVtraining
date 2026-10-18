@@ -152,9 +152,21 @@ RotatingArmorTracker::RotatingArmorTracker(TrackerConfig config)
     reset();
 }
 
+void RotatingArmorTracker::applyProcessNoise()
+{
+    const double scale = std::max(1e-6, config_.process_accel_scale);
+    EkfConfig config = config_.ekf;
+    config.process.accel_x = 0.01 * scale;
+    config.process.accel_y = 0.01 * scale;
+    config.process.accel_z = 0.01 * scale;
+    config.process.angular_accel = 0.01 * scale;
+    ekf_.setConfig(config);
+}
+
 void RotatingArmorTracker::reset()
 {
     ekf_.reset();
+    applyProcessNoise();
     diagnostics_ = TrackerDiagnostics{};
     has_timestamp_ = false;
     last_timestamp_s_ = 0.0;
