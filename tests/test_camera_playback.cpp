@@ -133,6 +133,7 @@ namespace
         double radius_prior{0.25};
         double v_sigma{0.05};
         bool centered_switch{true};
+        double sigma_floor{0.06};
         double switch_margin{0.10};
         double lock_span{0.18};
         double lock_age{0.50};
@@ -220,6 +221,8 @@ namespace
                 args.radius_prior = std::atof(next("--radius").c_str());
                 args.radius_given = true;
             }
+            else if (arg == "--sigma-floor")
+                args.sigma_floor = std::atof(next("--sigma-floor").c_str());
             else if (arg == "--no-centered-switch")
                 args.centered_switch = false;
             else if (arg == "--switch-margin")
@@ -383,6 +386,7 @@ int main(int argc, char **argv)
     tracker_config.handoff_sigma_scale = args.handoff_scale;
     tracker_config.radius_prior_m = args.radius_prior;
     tracker_config.velocity_sigma_m_s = args.v_sigma;
+    tracker_config.association_sigma_floor_m = args.sigma_floor;
     tracker_config.prefer_centered_target = args.centered_switch;
     tracker_config.target_switch_margin_rad = args.switch_margin;
     tracker_config.max_updates_per_frame = args.max_updates;

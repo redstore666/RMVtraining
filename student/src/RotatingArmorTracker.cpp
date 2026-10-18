@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <map>
 
@@ -1187,6 +1189,22 @@ PredictionResult RotatingArmorTracker::buildResult(const GimbalState &gimbal,
     // 瞄在背面板上）。
     const Eigen::Vector3d body_center(probe.state()(0), probe.state()(2), probe.state()(4));
     int best_slot = -1;
+    // 首选"刚刚被观测到的那块板"，而不是重新按角度挑。
+    //
+    // 关联结果已经把它写在 aim_slot_ 里（associateAndUpdate 中 aim_slot_ =
+    // best_slot）。如果这里再用"离云台最近"重挑，四块板差几度时就会挑到相邻
+    // 那块上——实拍 v4 自转车 id=3 上，47% 的帧 aim_slot 与真正看到的那块板
+    // 不同，瞄准残差中位被抬到 159 mm（而观测到最近板只有 87 mm）。
+    // 用户的要求也正是"瞄现在正对着的那块"，所以只要它还在"刚看见"窗口内就直接用。
+    if (aim_slot_ >= 0 && aim_slot_ < plate_count &&
+        aim_slot_ < static_cast<int>(last_seen_s_.size()))
+    {
+        const double seen = last_seen_s_[static_cast<std::size_t>(aim_slot_)];
+        if (seen >= 0.0 && timestamp_s - seen <= config_.aim_visible_hold_s)
+        {
+            best_slot = aim_slot_;
+        }
+    }
     for (int pass = 0; pass < 2 && best_slot < 0; ++pass)
     {
         double best_error = std::numeric_limits<double>::infinity();
