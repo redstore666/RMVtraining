@@ -500,6 +500,103 @@ namespace
 } // namespace
 
 // 任务 2 入口：神经网络四点检测（唯一实现）。
+std::vector<LedArmorMeasurement> detect_led_armors(const cv::Mat &bgr, TeamColor color)
+{
+    std::vector<LedArmorMeasurement> out;
+    if (bgr.empty() || bgr.type() != CV_8UC3)
+    {
+        return out;
+    }
+
+    cv::Mat hsv;
+    cv::cvtColor(bgr, hsv, cv::COLOR_BGR2HSV);
+    cv::Mat mask;
+    if (color == TeamColor::Red)
+    {
+        // 红色跨 0 度：两端各取一段再合并。
+        cv::Mat low;
+        cv::Mat high;
+        cv::inRange(hsv, cv::Scalar(0, 110, 140), cv::Scalar(14, 255, 255), low);
+        cv::inRange(hsv, cv::Scalar(166, 110, 140), cv::Scalar(180, 255, 255), high);
+        cv::bitwise_or(low, high, mask);
+    }
+    else
+    {
+        cv::inRange(hsv, cv::Scalar(95, 110, 140), cv::Scalar(135, 255, 255), mask);
+    }
+
+    cv::Mat labels;
+    cv::Mat stats;
+    cv::Mat centroids;
+    const int count = cv::connectedComponentsWithStats(mask, labels, stats, centroids, 8);
+    struct Bar
+    {
+        cv::Point2f center;
+        double height;
+        double width;
+    };
+    std::vector<Bar> bars;
+    for (int i = 1; i < count; ++i)
+    {
+        const int area = stats.at<int>(i, cv::CC_STAT_AREA);
+        const int w = stats.at<int>(i, cv::CC_STAT_WIDTH);
+        const int h = stats.at<int>(i, cv::CC_STAT_HEIGHT);
+        if (area < 24 || h < 5 || w < 2)
+        {
+            continue;
+        }
+        // 灯条是细长的：允许板面有侧倾，所以用长边/短边 >= 2 而不是只认竖直。
+        const double long_side = std::max(w, h);
+        const double short_side = std::max(1.0, static_cast<double>(std::min(w, h)));
+        if (long_side / short_side < 2.0)
+        {
+            continue;
+        }
+        Bar bar;
+        bar.center = cv::Point2f(static_cast<float>(centroids.at<double>(i, 0)),
+                                 static_cast<float>(centroids.at<double>(i, 1)));
+        bar.height = h;
+        bar.width = w;
+        bars.push_back(bar);
+    }
+
+    for (std::size_t a = 0; a < bars.size(); ++a)
+    {
+        for (std::size_t b = a + 1; b < bars.size(); ++b)
+        {
+            const double h_a = bars[a].height;
+            const double h_b = bars[b].height;
+            const double h_max = std::max(h_a, h_b);
+            if (std::abs(h_a - h_b) > 0.4 * h_max || h_max < 9.0)
+            {
+                continue;
+            }
+            const double gap = std::abs(bars[a].center.x - bars[b].center.x);
+            // 小板 0.135x0.057、大板 0.23x0.057：间距/高度大致 2.4 与 4.0。
+            if (gap < 0.9 * h_max || gap > 6.0 * h_max)
+            {
+                continue;
+            }
+            const double dy = std::abs(bars[a].center.y - bars[b].center.y);
+            if (dy > 0.5 * h_max)
+            {
+                continue;
+            }
+            LedArmorMeasurement m;
+            const Bar &left = bars[a].center.x <= bars[b].center.x ? bars[a] : bars[b];
+            const Bar &right = bars[a].center.x <= bars[b].center.x ? bars[b] : bars[a];
+            m.left_bar = left.center;
+            m.right_bar = right.center;
+            m.center = cv::Point2f(0.5F * (left.center.x + right.center.x),
+                                   0.5F * (left.center.y + right.center.y));
+            m.baseline_px = gap;
+            m.height_px = h_max;
+            out.push_back(m);
+        }
+    }
+    return out;
+}
+
 void setArmorScoreThreshold(float threshold)
 {
     bool ok = false;

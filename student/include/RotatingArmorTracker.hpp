@@ -231,6 +231,10 @@ public:
     void reset();
     void applyProcessNoise();
 
+    // 独立相位量测（LED 灯条给出的板面法向）。内部按 phase_anti_anchor 决定
+    // 是否把中心反锚、让瞄准板保持原位。
+    bool applyPhaseMeasurement(double world_yaw_rad, double sigma_rad);
+
 
     // 与 ekf_predict 同签名：喂进本帧的全部装甲板位姿，返回本帧应该发出去的结果。
     // 没有目标、时间戳非法或跟踪失效时返回默认的 NoTarget 结果。

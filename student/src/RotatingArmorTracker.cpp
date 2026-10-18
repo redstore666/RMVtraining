@@ -163,6 +163,26 @@ void RotatingArmorTracker::applyProcessNoise()
     ekf_.setConfig(config);
 }
 
+bool RotatingArmorTracker::applyPhaseMeasurement(double world_yaw_rad, double sigma_rad)
+{
+    if (!ekf_.initialized() || !std::isfinite(world_yaw_rad) || !(sigma_rad > 0.0))
+    {
+        return false;
+    }
+    const int slot = aim_slot_ >= 0 ? aim_slot_ : 0;
+    const Eigen::Vector3d plate_before = platePosition(ekf_.state(), slot, config_.ekf.plate_count);
+    if (!ekf_.updatePhase(world_yaw_rad, sigma_rad))
+    {
+        return false;
+    }
+    if (config_.phase_anti_anchor)
+    {
+        const Eigen::Vector3d plate_after = platePosition(ekf_.state(), slot, config_.ekf.plate_count);
+        ekf_.shiftCenter(plate_before - plate_after);
+    }
+    return true;
+}
+
 void RotatingArmorTracker::reset()
 {
     ekf_.reset();

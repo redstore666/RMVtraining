@@ -42,6 +42,21 @@ bool solveArmorPoseDisambiguated(const std::vector<cv::Point3f> &object_points,
 // 模型：models/yolov5.xml（OpenVINO，RMV_DET_MODEL=yolo11 切备选）。
 std::vector<ArmorDetection> armor_detect(const cv::Mat &pic, TeamColor enemy_color);
 
+// 装甲板两侧 LED 灯条：比板面花纹亮且大，可以独立于神经网络给出"板心 + 板面方向"。
+// 两灯条质心中点 = 板心（实测与神经网络板心差 2.5 px 中位）；两灯条连线在图像里的
+// 方向 = 板面内水平轴，与竖直轴叉乘即板面法向 → 一条独立的 yaw（相位）量测。
+struct LedArmorMeasurement
+{
+    cv::Point2f left_bar{};
+    cv::Point2f right_bar{};
+    cv::Point2f center{};
+    double baseline_px{0.0};
+    double height_px{0.0};
+    int target_id{0};
+};
+
+std::vector<LedArmorMeasurement> detect_led_armors(const cv::Mat &bgr, TeamColor color);
+
 // 覆盖神经网络检测的置信度阈值（默认 0.7）。离线回放用来量化"降阈值能换多少召回"。
 void setArmorScoreThreshold(float threshold);
 

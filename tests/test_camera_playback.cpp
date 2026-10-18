@@ -135,6 +135,8 @@ namespace
         double omega{0.0};
         bool omega_given{false};
         double q_scale{1.0};
+        bool led_yaw{false};
+        double led_sigma{0.08};
         double score{0.7};
         bool score_given{false};
         bool centered_switch{true};
@@ -250,6 +252,14 @@ namespace
                 args.centered_switch = false;
             else if (arg == "--switch-margin")
                 args.switch_margin = std::atof(next("--switch-margin").c_str());
+            else if (arg == "--led-yaw")
+            {
+                args.led_yaw = true;
+            }
+            else if (arg == "--led-sigma")
+            {
+                args.led_sigma = std::atof(next("--led-sigma").c_str());
+            }
             else if (arg == "--q-scale")
             {
                 args.q_scale = std::atof(next("--q-scale").c_str());
@@ -518,7 +528,7 @@ int main(int argc, char **argv)
     {
         dump_stream.open(args.dump_csv);
         dump_stream << "frame,t,det,target_id,aim_slot,obs_id,x,y,z,best_slot,best_dist,"
-                       "second_dist,cx,cy,cz,cyaw,R,oyaw,aimx,aimy,aimz\n";
+                       "second_dist,cx,cy,cz,cyaw,R,oyaw,aimx,aimy,aimz,u,v\n";
     }
 
     const bool show = !args.headless;
@@ -526,6 +536,7 @@ int main(int argc, char **argv)
     if (show)
         cv::namedWindow(window, cv::WINDOW_NORMAL);
 
+    int led_yaw_updates = 0;
     bool paused = false;
     int frame_index = range_start;
     cv::Mat frame;
@@ -761,8 +772,20 @@ int main(int argc, char **argv)
                                                             static_cast<double>(gimbal.yaw))
                                 << ',' << tracker.diagnostics().predicted_aim_world.x()
                                 << ',' << tracker.diagnostics().predicted_aim_world.y()
-                                << ',' << tracker.diagnostics().predicted_aim_world.z()
-                                << '\n';
+                                << ',' << tracker.diagnostics().predicted_aim_world.z();
+                                {
+                                    // 观测板心投影回像素：用来和 LED 灯条质心对比精度
+                                    // （世界 -> 云台 -> 相机 -> 像素）。
+                                    const Eigen::Vector3d p_gimbal = rotating_armor::toGimbal(gimbal, observed);
+                                    const cv::Vec3d p_camera = gimbalToCameraPoint(
+                                        camera, cv::Vec3d(p_gimbal.x(), p_gimbal.y(), p_gimbal.z()));
+                                    std::vector<cv::Point3d> one{cv::Point3d(p_camera[0], p_camera[1], p_camera[2])};
+                                    std::vector<cv::Point2d> px;
+                                    cv::projectPoints(one, cv::Vec3d(0, 0, 0), cv::Vec3d(0, 0, 0),
+                                                      camera.camera_matrix, cv::noArray(), px);
+                                    dump_stream << ',' << px[0].x << ',' << px[0].y;
+                                }
+                                dump_stream << '\n';
                 }
                 if (std::isfinite(best))
                 {
@@ -924,6 +947,77 @@ int main(int argc, char **argv)
                                   camera.camera_matrix, cv::noArray(), projected);
                 // 只把"跟踪中的那块板"(aim slot) 画实：另外 3 块是模型外推到车体
                 // 背面的，本来就看不见，画出来会像"满天飞的点"，容易误判成状态错了。
+                // LED 灯条独立相位量测：两灯条连线 = 板面内水平轴，与竖直轴叉乘得法向。
+                if (args.led_yaw && diagnostics.aim_slot >= 0 && diagnostics.aim_slot < 4)
+                {
+                    const cv::Point2d aim_px = projected[diagnostics.aim_slot];
+                    const double depth = model_points[diagnostics.aim_slot].z;
+                    if (aim_px.x > 0.0 && aim_px.y > 0.0 && depth > 0.3 && depth < 20.0 &&
+                        !camera.camera_matrix.empty())
+                    {
+                        const std::vector<LedArmorMeasurement> leds = detect_led_armors(frame, args.enemy);
+                        const LedArmorMeasurement *best_led = nullptr;
+                        double best_px = 70.0;
+                        for (const LedArmorMeasurement &led : leds)
+                        {
+                            const double d = cv::norm(led.center - cv::Point2f(static_cast<float>(aim_px.x),
+                                                                              static_cast<float>(aim_px.y)));
+                            if (d < best_px)
+                            {
+                                best_px = d;
+                                best_led = &led;
+                            }
+                        }
+                        if (best_led != nullptr)
+                        {
+                            const cv::Mat k_inv = camera.camera_matrix.inv();
+                            auto back_project = [&](const cv::Point2f &px) {
+                                cv::Mat ray = k_inv * cv::Mat(cv::Vec3d(px.x, px.y, 1.0));
+                                const double scale = depth / ray.at<double>(2);
+                                const cv::Vec3d p_camera(ray.at<double>(0) * scale,
+                                                         ray.at<double>(1) * scale, depth);
+                                // 相机 -> 云台：p_gimbal = R * p_camera + t
+                                cv::Vec3d p_gimbal = p_camera;
+                                if (!camera.translation_camera_to_gimbal.empty())
+                                {
+                                    for (int i = 0; i < 3; ++i)
+                                    {
+                                        p_gimbal[i] += camera.translation_camera_to_gimbal.at<double>(i);
+                                    }
+                                }
+                                const cv::Mat p_g = camera.rotation_camera_to_gimbal * cv::Mat(p_gimbal);
+                                return rotating_armor::toWorld(
+                                    gimbal, Eigen::Vector3d(p_g.at<double>(0), p_g.at<double>(1),
+                                                            p_g.at<double>(2)));
+                            };
+                            const Eigen::Vector3d bar_l = back_project(best_led->left_bar);
+                            const Eigen::Vector3d bar_r = back_project(best_led->right_bar);
+                            Eigen::Vector3d baseline = bar_r - bar_l;
+                            baseline.z() = 0.0;
+                            if (baseline.norm() > 1e-6)
+                            {
+                                baseline.normalize();
+                                Eigen::Vector3d normal =
+                                    baseline.cross(Eigen::Vector3d(0.0, 0.0, 1.0));
+                                const Eigen::Vector3d plate_center =
+                                    rotating_armor::platePosition(tracker.ekf().state(),
+                                                                  diagnostics.aim_slot, 4);
+                                const Eigen::Vector3d camera_world =
+                                    rotating_armor::toWorld(gimbal, Eigen::Vector3d::Zero());
+                                if (normal.dot(camera_world - plate_center) < 0.0)
+                                {
+                                    normal = -normal;
+                                }
+                                const double led_yaw_world = std::atan2(normal.y(), normal.x());
+                                if (tracker.applyPhaseMeasurement(led_yaw_world, args.led_sigma))
+                                {
+                                    ++led_yaw_updates;
+                                }
+                            }
+                        }
+                    }
+                }
+
                 for (int slot = 0; slot < 4; ++slot)
                 {
                     if (slot == diagnostics.aim_slot)
