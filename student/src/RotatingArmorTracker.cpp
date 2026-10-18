@@ -219,6 +219,8 @@ void RotatingArmorTracker::reset()
     lock_radius_from_data_ = false;
     lock_phase_flipped_ = false;
     smoother_ = ObservationSmoother{};
+    noise_samples_.clear();
+    observation_noise_m_ = config_.association_sigma_floor_m;
     last_updated_slot_ = -1;
 }
 
@@ -1266,8 +1268,7 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
             }
             ArmorObservation observation;
             observation.position = world[i].position;
-            observation.sigma_position_m =
-                std::hypot(world[i].sigma_position_m, config_.association_sigma_floor_m);
+            observation.sigma_position_m = observationSigma(world[i].sigma_position_m);
             for (int slot = 0; slot < plate_count; ++slot)
             {
                 const Eigen::Vector3d predicted = platePosition(ekf_.state(), slot, plate_count);
@@ -1329,8 +1330,7 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
         if (!smoothObservation(chosen, best_slot, timestamp_s, observation))
         {
             observation.position = chosen.position;
-            observation.sigma_position_m =
-                std::hypot(chosen.sigma_position_m, config_.association_sigma_floor_m);
+            observation.sigma_position_m = observationSigma(chosen.sigma_position_m);
         }
         // 单板重锚：状态和这块板差得太多时，用观测把相位与中心直接对齐。
         // 单板 + 钉死半径时 (中心, 相位) 只有一个自由度被位置观测约束，滤波器
@@ -1362,6 +1362,7 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
         {
             break;
         }
+        noteObservationForNoise(chosen.position, timestamp_s);
         // "看见过"=这块板真的被用来更新了（或者观测就落在这块板的预测位置上）。
         // 只按位置门判定会把相邻板也算成看见：四块板相距 0.35 m，位置门 0.6 m，
         // 于是"没看见的板"也进了瞄准候选，又挑回离云台最近的那块去了。
@@ -2036,6 +2037,7 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
     }
     diagnostics_.consecutive_updates = consecutive_updates_;
     diagnostics_.missed_frames = missed_frames_;
+    diagnostics_.observation_noise_m = observation_noise_m_;
 
     if (!has_accept_ || timestamp_seconds - last_accept_s_ > config_.timeout_s)
     {
@@ -2051,6 +2053,59 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
         return PredictionResult{};
     }
     return buildResult(gimbal, timestamp_seconds);
+}
+
+void RotatingArmorTracker::noteObservationForNoise(const Eigen::Vector3d &position,
+                                                   double timestamp_s)
+{
+    if (!config_.adaptive_observation_noise)
+    {
+        return;
+    }
+    noise_samples_.push_back(NoiseSample{position, timestamp_s});
+    const std::size_t keep = static_cast<std::size_t>(std::max(3, config_.adaptive_noise_window));
+    while (noise_samples_.size() > keep)
+    {
+        noise_samples_.pop_front();
+    }
+    // 二阶差分：p(t) - 2p(t-dt) + p(t-2dt)。匀速/匀速自转下它≈0，
+    // 只剩检测抖动（自转的向心项在 166fps 下 <1 mm）。换板造成的大跳变
+    // 用中位数压掉。
+    std::vector<double> squared;
+    squared.reserve(noise_samples_.size());
+    for (std::size_t i = 2; i < noise_samples_.size(); ++i)
+    {
+        const NoiseSample &a = noise_samples_[i - 2];
+        const NoiseSample &b = noise_samples_[i - 1];
+        const NoiseSample &c = noise_samples_[i];
+        const double dt1 = b.timestamp_s - a.timestamp_s;
+        const double dt2 = c.timestamp_s - b.timestamp_s;
+        if (!(dt1 > 1e-4) || !(dt2 > 1e-4) || dt1 > 0.05 || dt2 > 0.05)
+        {
+            continue;
+        }
+        const Eigen::Vector3d d2 = c.position - 2.0 * b.position + a.position;
+        squared.push_back(d2.squaredNorm() / 6.0);
+    }
+    if (squared.size() < 5)
+    {
+        return;
+    }
+    std::sort(squared.begin(), squared.end());
+    const double median = squared[squared.size() / 2];
+    const double sigma = std::sqrt(std::max(0.0, median));
+    observation_noise_m_ =
+        std::min(std::max(sigma, config_.adaptive_noise_min_sigma_m),
+                 config_.adaptive_noise_max_sigma_m);
+}
+
+double RotatingArmorTracker::observationSigma(double detection_sigma_m) const
+{
+    if (!config_.adaptive_observation_noise)
+    {
+        return std::hypot(detection_sigma_m, config_.association_sigma_floor_m);
+    }
+    return std::hypot(detection_sigma_m, observation_noise_m_);
 }
 
 double RotatingArmorTracker::staleWindowSeconds() const

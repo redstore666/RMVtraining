@@ -89,6 +89,14 @@ struct TrackerConfig
     // 的系统性偏差），不体现在 P 里。地板太小 → NIS 门把有信息的帧全拒了
     // （实拍 v4 旋转目标 466/466 帧被拒）；地板太大 → 更新变钝。
     double association_sigma_floor_m{0.06};
+    // 观测噪声自适应：用"连续三帧观测的二阶差分"估当前目标的检测抖动。
+    // 固定地板（0.06 m）对静止车大了一个量级（实测帧间抖动 4 mm），滤波器
+    // 于是几乎不信观测（NIS 中位 0.03，理论应 ~2.4）；对高速自转车 0.06 m
+    // 又略小。改成按实测抖动给 sigma，静止车更贴合、自转车不被夸大。
+    bool adaptive_observation_noise{true};
+    int adaptive_noise_window{24};
+    double adaptive_noise_min_sigma_m{0.004};
+    double adaptive_noise_max_sigma_m{0.090};
     // 同帧两块板的中点直接给"车体中心"量测：对置板中点恰是圆心（误差 ~sigma/sqrt2），
     // 相邻板中点沿弦法向偏 R*cos45。半径已知时这块观测比单板位置强得多。
     bool pair_center_update_enabled{false};
@@ -235,6 +243,7 @@ struct TrackerDiagnostics
     std::uint64_t accepted_updates{0};
     int consecutive_updates{0};
     int missed_frames{0};
+    double observation_noise_m{0.0}; // 本帧使用的观测噪声 sigma（m）
     int updates_this_frame{0};
     double measured_latency_s{0.0};
     int rejected_this_frame{0};
@@ -344,6 +353,12 @@ private:
         double timestamp_s{0.0};
     };
     ObservationSmoother smoother_;
+    // 观测噪声估计用的历史（只放被接受的观测，按时间升序）。
+    struct NoiseSample { Eigen::Vector3d position; double timestamp_s; };
+    std::deque<NoiseSample> noise_samples_;
+    double observation_noise_m_{0.06};
+    void noteObservationForNoise(const Eigen::Vector3d &position, double timestamp_s);
+    double observationSigma(double detection_sigma_m) const;
     std::array<double, 8> last_seen_s_{{-1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0}};
     // 每个槽位最近一次被接受到的世界系板心。零延迟时它就是"此刻板在哪"
     // 的最好答案；EKF 只负责给没有新鲜观测的槽位做外推。

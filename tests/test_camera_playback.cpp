@@ -133,6 +133,8 @@ namespace
         int only_id{0};
         double radius_prior{0.25};
         double v_sigma{0.05};
+        bool adaptive_noise{true};
+        double noise_min{0.004};
         double omega{0.0};
         bool omega_given{false};
         double q_scale{1.0};
@@ -323,6 +325,14 @@ namespace
                 args.omega = std::atof(next("--omega").c_str());
                 args.omega_given = true;
             }
+            else if (arg == "--noise-min")
+            {
+                args.noise_min = std::atof(next("--noise-min").c_str());
+            }
+            else if (arg == "--no-adaptive-noise")
+            {
+                args.adaptive_noise = false;
+            }
             else if (arg == "--v-sigma")
             {
                 args.v_sigma = std::atof(next("--v-sigma").c_str());
@@ -493,6 +503,8 @@ int main(int argc, char **argv)
         setArmorScoreThreshold(static_cast<float>(args.score));
     }
     tracker_config.velocity_sigma_m_s = args.v_sigma;
+    tracker_config.adaptive_observation_noise = args.adaptive_noise;
+    tracker_config.adaptive_noise_min_sigma_m = args.noise_min;
     tracker_config.process_accel_scale = args.q_scale;
     if (args.omega_given)
     {
