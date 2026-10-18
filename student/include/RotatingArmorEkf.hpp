@@ -143,6 +143,10 @@ public:
     // 所以位置关联出错也不会把相位带歪。sigma_rad 取值见上层配置。
     bool updatePhase(double measured_world_yaw, double sigma_rad);
 
+    // 车体中心直接量测（同帧两块板的中点）。状态里中心三维在 0/2/4 行，
+    // H = [e0; e2; e4]，与位置量测共用同一份协方差。
+    bool updateCenter(const Eigen::Vector3d& measured_center_m, double sigma_m);
+
     // 用"同一帧两块板的弦长"直接观测半径：相邻两板 |n_i-n_j| = sqrt(2)，
     // 弦长 = R*|n_i-n_j|，所以 R = chord / |n_i-n_j|，不需要圆拟合。
     // 静止目标只露一块板时 R 不可辨识（中心会跟着 R 平移，观测依然自洽），
@@ -161,7 +165,13 @@ public:
     // 单块板可见时 (center, yaw) 有一个规范自由度（绕着板心转），
     // 只改 yaw 会把板挪走、再被位置更新拉回来，两个更新互相打架；
     // 改完 yaw 把中心平移回去、让那块板留在原地，等价于"沿可观方向更新"。
-    void shiftCenter(const Eigen::Vector3d& delta) { state_.head<3>() += delta; }
+    // 平移车体中心（瞄准反锚用）。状态排布是 [cx, vx, cy, vy, z, vz, yaw, w, r]，
+    // 中心三维在 0/2/4 行，不是 head<3>()（那会把位移加到 vx 上）。
+    void shiftCenter(const Eigen::Vector3d& delta) {
+        state_(0) += delta.x();
+        state_(2) += delta.y();
+        state_(4) += delta.z();
+    }
 
     // 把车体相位整体转 delta（换板重绑用）。这是状态空间沿 theta 轴的平移，
     // 误差坐标不变，所以协方差不用动。

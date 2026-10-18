@@ -1063,6 +1063,7 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
     const int plate_count = config_.ekf.plate_count;
     int accepted = 0;
     std::vector<bool> used(world.size(), false);
+    std::vector<int> slot_of_observation(world.size(), -1);
     diagnostics_.rejected_this_frame = 0;
     diagnostics_.best_gate_distance_m = std::numeric_limits<double>::infinity();
     diagnostics_.best_gate_nis = std::numeric_limits<double>::infinity();
@@ -1169,6 +1170,7 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
             diagnostics_.aim_slot = best_slot;
         }
         used[static_cast<std::size_t>(best_observation)] = true;
+        slot_of_observation[static_cast<std::size_t>(best_observation)] = best_slot;
         ++accepted;
         diagnostics_.last_nis = best_nis;
         if (chosen.has_yaw)
@@ -1196,6 +1198,70 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                 }
             }
             pushNormalHistory(best_slot, timestamp_s, chosen.yaw);
+        }
+    }
+
+    // 同帧两块板的中点 = 车体中心量测（对置板：中点即圆心；相邻板：沿弦法向
+    // 偏 R*cos45）。单板可见时中心与相位是一对规范自由度，滤波器只能二选一；
+    // 双板帧把这两个自由度同时钉住，是实拍里唯一能压相位误差的硬约束。
+    if (config_.pair_center_update_enabled && accepted >= 2)
+    {
+        int index[2] = {-1, -1};
+        int found = 0;
+        for (std::size_t i = 0; i < world.size() && found < 2; ++i)
+        {
+            if (!used[i] || world[i].target_id != target_id_ ||
+                slot_of_observation[i] < 0)
+            {
+                continue;
+            }
+            index[found] = static_cast<int>(i);
+            ++found;
+        }
+        const double radius = ekf_.state()(8);
+        const int slots[2] = {found == 2 ? slot_of_observation[index[0]] : -1,
+                              found == 2 ? slot_of_observation[index[1]] : -1};
+        if (found == 2 && slots[0] != slots[1] && radius > 0.01)
+        {
+            const Eigen::Vector3d p1 = world[index[0]].position;
+            const Eigen::Vector3d p2 = world[index[1]].position;
+            const Eigen::Vector3d chord = p2 - p1;
+            const double chord_length = chord.norm();
+            const double ratio = chord_length / radius;
+            // 板间距：相邻板 2R sin(pi/N)、对置板 2R。只认这两种构型。
+            const double period = 2.0 * kPi / static_cast<double>(plate_count);
+            const double expected_adjacent = 2.0 * radius * std::sin(period * 0.5);
+            const bool opposite = std::fabs(chord_length - 2.0 * radius) <=
+                                  0.25 * radius;
+            const bool adjacent = std::fabs(chord_length - expected_adjacent) <=
+                                  0.25 * radius;
+            if ((opposite || adjacent) && chord_length > 1e-6)
+            {
+                // 弦方向 = 两块板角度的中值 - 90 度；中值 = theta + (s1+s2)/2*period
+                const double chord_angle = std::atan2(chord.y(), chord.x());
+                const double mid_angle = chord_angle + kHalfPi;
+                const double slot_mid =
+                    0.5 * static_cast<double>(slots[0] + slots[1]) * period;
+                double theta_pair = wrapToPi(mid_angle - slot_mid);
+                // 只有 period 的可辨识度：取离当前相位最近的一支。
+                double delta = wrapToPi(theta_pair - ekf_.state()(6));
+                if (std::fabs(delta) > 0.5 * period)
+                {
+                    delta -= std::copysign(period, delta);
+                }
+                ekf_.rotatePhase(delta);
+                // 相位定了以后中心由任一块板反推：c = p + R*u(theta + s*period)
+                const double angle1 =
+                    ekf_.state()(6) + static_cast<double>(slots[0]) * period;
+                const Eigen::Vector3d center_measured =
+                    p1 + radius * Eigen::Vector3d(std::cos(angle1), std::sin(angle1), 0.0);
+                const double sigma = std::max(
+                    config_.pair_center_sigma_m,
+                    std::hypot(world[index[0]].sigma_position_m,
+                               world[index[1]].sigma_position_m) /
+                        std::sqrt(2.0));
+                ekf_.updateCenter(center_measured, sigma);
+            }
         }
     }
 

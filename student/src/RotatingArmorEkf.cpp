@@ -259,6 +259,38 @@ bool RotatingArmorEkf::updatePhase(double measured_world_yaw, double sigma_rad) 
     return true;
 }
 
+bool RotatingArmorEkf::updateCenter(const Eigen::Vector3d& measured_center_m, double sigma_m) {
+    if (!initialized_ || !measured_center_m.allFinite() || !std::isfinite(sigma_m) ||
+        !(sigma_m > 0.0)) {
+        return false;
+    }
+
+    Eigen::Matrix<double, 3, 9> h = Eigen::Matrix<double, 3, 9>::Zero();
+    h(0, 0) = 1.0;
+    h(1, 2) = 1.0;
+    h(2, 4) = 1.0;
+
+    const Eigen::Vector3d predicted(state_(0), state_(2), state_(4));
+    const Eigen::Vector3d residual = measured_center_m - predicted;
+    const Eigen::Matrix3d s = h * covariance_ * h.transpose() +
+                              sigma_m * sigma_m * Eigen::Matrix3d::Identity();
+    const Eigen::Matrix<double, 9, 3> k = covariance_ * h.transpose() * s.inverse();
+
+    state_ = state_ + k * residual;
+
+    // Joseph 形式，保持协方差对称正定。
+    Eigen::Matrix<double, 9, 9> i_kh = Eigen::Matrix<double, 9, 9>::Identity();
+    i_kh -= k * h;
+    covariance_ = i_kh * covariance_ * i_kh.transpose() +
+                  sigma_m * sigma_m * (k * k.transpose());
+
+    if (!state_.allFinite() || !covariance_.allFinite()) {
+        reset();
+        return false;
+    }
+    return true;
+}
+
 bool RotatingArmorEkf::updateRadius(double measured_radius, double sigma_radius) {
     if (!initialized_ || !std::isfinite(measured_radius) || !std::isfinite(sigma_radius) ||
         !(measured_radius > 0.0) || !(sigma_radius > 0.0)) {

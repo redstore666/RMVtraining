@@ -88,6 +88,11 @@ struct TrackerConfig
     // 的系统性偏差），不体现在 P 里。地板太小 → NIS 门把有信息的帧全拒了
     // （实拍 v4 旋转目标 466/466 帧被拒）；地板太大 → 更新变钝。
     double association_sigma_floor_m{0.06};
+    // 同帧两块板的中点直接给"车体中心"量测：对置板中点恰是圆心（误差 ~sigma/sqrt2），
+    // 相邻板中点沿弦法向偏 R*cos45。半径已知时这块观测比单板位置强得多。
+    bool pair_center_update_enabled{false};
+    double pair_center_sigma_m{0.05};
+
     // 观测平滑：同一槽位连续命中时，对世界系位置做指数平均后再喂滤波器。
     // 单帧检测抖动（实测 v4 旋转目标相邻帧位移中位 52 mm、静止 3.8 mm）是
     // 白噪声，平均 N 帧能压到 1/sqrt(N)；换板/换 id/超时立即重置，避免把

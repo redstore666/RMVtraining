@@ -143,6 +143,7 @@ namespace
         bool score_given{false};
         bool centered_switch{true};
         double sigma_floor{0.06};
+        bool pair_center{false};
         bool phase_anchor{true};
         double aim_obs{0.012};
         double aim_alpha{0.0};
@@ -250,6 +251,8 @@ namespace
                 args.phase_anchor = false;
             else if (arg == "--sigma-floor")
                 args.sigma_floor = std::atof(next("--sigma-floor").c_str());
+            else if (arg == "--pair-center")
+                args.pair_center = true;
             else if (arg == "--no-centered-switch")
                 args.centered_switch = false;
             else if (arg == "--switch-margin")
@@ -453,6 +456,7 @@ int main(int argc, char **argv)
         tracker_config.forced_omega_rad_s = args.omega;
     }
     tracker_config.association_sigma_floor_m = args.sigma_floor;
+    tracker_config.pair_center_update_enabled = args.pair_center;
     tracker_config.prefer_centered_target = args.centered_switch;
     tracker_config.target_switch_margin_rad = args.switch_margin;
     tracker_config.max_updates_per_frame = args.max_updates;
