@@ -159,6 +159,9 @@ struct TrackerConfig
     // 瞄准点的一阶平滑系数（0 = 不平滑）。观测有 ~35 mm 的帧间抖动，直接送
     // 云台会抖；按 omega 做运动补偿后再做一阶平滑，不引入相位滞后。
     double aim_smoothing_alpha{0.0};
+    // 瞄准点局部直线拟合的样本数与时间窗（0 = 关闭，直接用当帧观测）。
+    int aim_fit_samples{0};
+    double aim_fit_window_s{0.15};
     // 目标选择：自瞄应瞄"正压在准星上"的那台车。两台车同时在场时，另一台车的板
     // 连续 relock_frames 帧都比当前目标更靠近准星（多出 target_switch_margin_rad
     // 的迟滞），就丢目标重锁到它。
@@ -292,6 +295,13 @@ private:
     // 每个槽位最近一次被接受到的世界系板心。零延迟时它就是"此刻板在哪"
     // 的最好答案；EKF 只负责给没有新鲜观测的槽位做外推。
     std::array<Eigen::Vector3d, 8> last_seen_position_{};
+    // 每个槽位最近几次观测的(时间, 世界系板心)。瞄准点用"局部直线拟合"而不是
+    // EKF 的 omega：实拍里 omega 常被判 0，靠它就等于纯滞后；直线拟合不需要
+    // omega，30 ms 内圆周的曲率可以忽略。
+    static constexpr int kAimHistory = 5;
+    std::array<std::array<Eigen::Vector3d, kAimHistory>, 8> aim_history_{};
+    std::array<std::array<double, kAimHistory>, 8> aim_history_s_{};
+    std::array<int, 8> aim_history_count_{};
     Eigen::Vector3d aim_smoothed_world_{};
     double aim_smoothed_s_{-1.0};
     bool aim_smoothed_valid_{false};

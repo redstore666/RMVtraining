@@ -165,6 +165,7 @@ void RotatingArmorTracker::reset()
     last_seen_s_.fill(-1.0);
     aim_smoothed_valid_ = false;
     aim_smoothed_s_ = -1.0;
+    aim_history_count_.fill(0);
     last_accept_s_ = 0.0;
     has_accept_ = false;
     consecutive_updates_ = 0;
@@ -1030,6 +1031,14 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
         {
             last_seen_s_[static_cast<std::size_t>(best_slot)] = timestamp_s;
             last_seen_position_[static_cast<std::size_t>(best_slot)] = chosen.position;
+            {
+                const std::size_t index = static_cast<std::size_t>(best_slot);
+                const int count = aim_history_count_[index];
+                const int slot_in_ring = count % kAimHistory;
+                aim_history_[index][static_cast<std::size_t>(slot_in_ring)] = chosen.position;
+                aim_history_s_[index][static_cast<std::size_t>(slot_in_ring)] = timestamp_s;
+                aim_history_count_[index] = std::min(count + 1, kAimHistory);
+            }
         }
         // 瞄准槽位跟着观测到的板走：4 块板物理上等价，把瞄准点绑在"刚看到
         // 的那块"上误差最小；不重绑的话对外发布的瞄准点会指向模型外推 90 度
@@ -1323,6 +1332,62 @@ PredictionResult RotatingArmorTracker::buildResult(const GimbalState &gimbal,
                 }
                 const double alpha = config_.aim_smoothing_alpha;
                 plate = (1.0 - alpha) * previous + alpha * plate;
+            }
+            // 局部直线拟合（最小二乘，各自对 t 拟合 x/y/z），在 timestamp_s 处取值。
+            // 比 EMA 好的地方：不需要 omega，且用的是"窗口中点前后"的样本，不滞后。
+            if (config_.aim_fit_samples >= 3 && config_.aim_fit_window_s > 0.0)
+            {
+                const std::size_t index = static_cast<std::size_t>(best_slot);
+                const int count = aim_history_count_[index];
+                if (count >= 3)
+                {
+                    double sum_t = 0.0, sum_tt = 0.0;
+                    Eigen::Vector3d sum_p = Eigen::Vector3d::Zero();
+                    int used = 0;
+                    for (int i = 0; i < count; ++i)
+                    {
+                        const double sample_t = aim_history_s_[index][static_cast<std::size_t>(i)];
+                        if (timestamp_s - sample_t > config_.aim_fit_window_s || sample_t > timestamp_s)
+                        {
+                            continue;
+                        }
+                        sum_t += sample_t;
+                        sum_tt += sample_t * sample_t;
+                        sum_p += aim_history_[index][static_cast<std::size_t>(i)];
+                        ++used;
+                    }
+                    if (used >= 3)
+                    {
+                        const double denominator = used * sum_tt - sum_t * sum_t;
+                        if (std::fabs(denominator) > 1.0e-12)
+                        {
+                            Eigen::Vector3d sum_tp = Eigen::Vector3d::Zero();
+                            for (int i = 0; i < count; ++i)
+                            {
+                                const double sample_t =
+                                    aim_history_s_[index][static_cast<std::size_t>(i)];
+                                if (timestamp_s - sample_t > config_.aim_fit_window_s ||
+                                    sample_t > timestamp_s)
+                                {
+                                    continue;
+                                }
+                                sum_tp += sample_t * aim_history_[index][static_cast<std::size_t>(i)];
+                            }
+                            const Eigen::Vector3d slope =
+                                (used * sum_tp - sum_t * sum_p) / denominator;
+                            const Eigen::Vector3d intercept = (sum_p - slope * sum_t) / used;
+                            const Eigen::Vector3d fitted = intercept + slope * timestamp_s;
+                            // 拟合外推太远（样本都挤在窗口边缘）时不采信。
+                            const double extrapolation =
+                                std::fabs(timestamp_s - sum_t / used);
+                            if (extrapolation <= 0.5 * config_.aim_fit_window_s &&
+                                fitted.allFinite())
+                            {
+                                plate = fitted;
+                            }
+                        }
+                    }
+                }
             }
             aim_smoothed_world_ = plate;
             aim_smoothed_s_ = timestamp_s;
