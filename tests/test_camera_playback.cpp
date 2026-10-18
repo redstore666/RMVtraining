@@ -512,7 +512,7 @@ int main(int argc, char **argv)
     {
         dump_stream.open(args.dump_csv);
         dump_stream << "frame,t,det,target_id,aim_slot,obs_id,x,y,z,best_slot,best_dist,"
-                       "second_dist,cx,cy,cz,cyaw,R,oyaw\n";
+                       "second_dist,cx,cy,cz,cyaw,R,oyaw,aimx,aimy,aimz\n";
     }
 
     const bool show = !args.headless;
@@ -753,6 +753,9 @@ int main(int argc, char **argv)
                                 << st(6) << ',' << st(8) << ','
                                 << rotating_armor::wrapToPi(static_cast<double>(pose.armor_yaw) +
                                                             static_cast<double>(gimbal.yaw))
+                                << ',' << tracker.diagnostics().predicted_aim_world.x()
+                                << ',' << tracker.diagnostics().predicted_aim_world.y()
+                                << ',' << tracker.diagnostics().predicted_aim_world.z()
                                 << '\n';
                 }
                 if (std::isfinite(best))

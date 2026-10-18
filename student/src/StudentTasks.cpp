@@ -337,6 +337,9 @@ bool solveArmorPoseDisambiguated(const std::vector<cv::Point3f> &object_points,
     return true;
 }
 
+// 检测置信度硬门槛：默认 0.7，可由 setArmorScoreThreshold() 覆盖。
+static float g_nn_min_confidence = 0.7F;
+
 namespace
 {
 
@@ -345,7 +348,7 @@ namespace
     // 解码与语义映射见 ArmorDetectorNet.cpp 与 models/README.md。
     // 最终输出置信度门限：0.7（512 输入时远处小目标定位噪声大，用户实测 0.6/0.8
     // 都不影响"抖动只来自定位精度"这一结论；门限只过滤漏检不过滤抖动）。
-    constexpr float kNnMinConfidence = 0.7F;
+    // 与解码阈值分开的硬过滤：历史上写死 0.7，导致 --score 降到 0.3 也一条都不过。
 
     ArmorDetectorNet &nnDetector(bool &ok)
     {
@@ -464,7 +467,7 @@ namespace
             {
                 continue;
             }
-            if (det.confidence < kNnMinConfidence)
+            if (det.confidence < g_nn_min_confidence)
             {
                 continue;
             }
@@ -501,6 +504,7 @@ void setArmorScoreThreshold(float threshold)
 {
     bool ok = false;
     ArmorDetectorNet &detector = nnDetector(ok);
+    g_nn_min_confidence = threshold;
     if (ok)
     {
         detector.setScoreThreshold(threshold);
