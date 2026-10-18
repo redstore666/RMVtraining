@@ -397,6 +397,136 @@ void scenarioLatencyCompensation()
           "F 诊断里能看到实测延迟");
 }
 
+
+// ------------------------------------------------------------------ G
+// 高速自转目标的"能不能打着"验收：云台跟瞄 + 50ms 处理延迟，
+// 比较"预测出的射击点"与"子弹到达时刻的真实板心"。
+void scenarioFastSpin(double omega)
+{
+    State truth;
+    truth << 3.00, 0.0, 0.0, 0.0, 0.35, 0.0, 0.30, omega, 0.25;
+    sim::Rig rig(truth);
+    rig.dt = 1.0 / 166.0;
+    rig.sigma_position_m = 0.03; // 实拍检测抖动（3cm 量级）
+    rig.latency_s = 0.05;        // 视觉 + 传输 + 电机的处理延迟
+    rig.gimbal.yaw = rotating_armor::vectorYaw(
+        sim::nearestPlatePosition(rig.truth, rig.plate_count, 0.0));
+    rig.gimbal.pitch = rotating_armor::vectorPitch(
+        sim::nearestPlatePosition(rig.truth, rig.plate_count, 0.0));
+    rig.gimbal.rate_rad_s = 12.0;
+
+    sim::Rig no_latency(truth);
+    no_latency.dt = rig.dt;
+    no_latency.sigma_position_m = rig.sigma_position_m;
+    no_latency.gimbal = rig.gimbal;
+
+    std::vector<double> strike_errors;
+    std::vector<double> now_errors;
+    std::vector<double> min4_errors;
+    int front_hit = 0;
+    int front_total = 0;
+    int stable_frames = 0;
+    for (int frame = 0; frame < 420; ++frame)
+    {
+        const PredictionResult result = rig.step(true, true);
+        const PredictionResult plain = no_latency.step(true, true);
+        static_cast<void>(plain);
+        if (result.state != TrackingState::Stable)
+        {
+            continue;
+        }
+        ++stable_frames;
+        const auto &diagnostics = rig.tracker.diagnostics();
+        if (diagnostics.aim_slot < 0)
+        {
+            continue;
+        }
+        const Eigen::Vector3d aim = sim::polarPoint(static_cast<double>(result.target_yaw),
+                                                    static_cast<double>(result.target_pitch),
+                                                    static_cast<double>(result.distance_m));
+        const State strike_state = rotating_armor::transition(rig.truth, rig.latency_s);
+        const Eigen::Vector3d strike_plate =
+            rotating_armor::measurement(strike_state, diagnostics.aim_slot, rig.plate_count);
+        const Eigen::Vector3d now_plate =
+            rotating_armor::measurement(rig.truth, diagnostics.aim_slot, rig.plate_count);
+        strike_errors.push_back((aim - strike_plate).norm());
+        now_errors.push_back((aim - now_plate).norm());
+        // 四块板完全相同：瞄准点落在"任意一块真板"上也算能打到（槽位编号只是
+        // 标号，锁定时的相位分支会让标号整体错一位）。
+        double nearest = 1.0e9;
+        int nearest_slot = -1;
+        for (int slot = 0; slot < rig.plate_count; ++slot)
+        {
+            const double error =
+                (aim - rotating_armor::measurement(strike_state, slot, rig.plate_count)).norm();
+            if (error < nearest)
+            {
+                nearest = error;
+                nearest_slot = slot;
+            }
+        }
+        min4_errors.push_back(nearest);
+        // "打得到"还必须瞄在朝相机那一面：背面板被车体挡住，命中也只是打在车壳上。
+        if (nearest <= 0.03 && nearest_slot >= 0)
+        {
+            const double phase = rotating_armor::wrapToPi(
+                strike_state(6) + 2.0 * sim::kPi * static_cast<double>(nearest_slot) /
+                                     static_cast<double>(rig.plate_count));
+            const Eigen::Vector3d normal(std::cos(phase + sim::kPi), std::sin(phase + sim::kPi),
+                                         0.0);
+            const Eigen::Vector3d to_shooter = -aim.normalized();
+            ++front_total;
+            if (normal.dot(to_shooter) > 0.0)
+            {
+                ++front_hit;
+            }
+
+        }
+    }
+    auto median = [](std::vector<double> values) {
+        if (values.empty())
+        {
+            return 0.0;
+        }
+        std::sort(values.begin(), values.end());
+        return values[values.size() / 2];
+    };
+    auto p90 = [](std::vector<double> values) {
+        if (values.empty())
+        {
+            return 0.0;
+        }
+        std::sort(values.begin(), values.end());
+        return values[static_cast<std::size_t>(0.9 * static_cast<double>(values.size() - 1))];
+    };
+    const double strike_median = median(strike_errors);
+    const double min4_median = median(min4_errors);
+    const double now_median = median(now_errors);
+    int hit = 0;
+    for (double error : min4_errors)
+    {
+        if (error <= 0.03)
+        {
+            ++hit;
+        }
+    }
+    const double hit_rate =
+        min4_errors.empty() ? 0.0
+                            : static_cast<double>(hit) / static_cast<double>(min4_errors.size());
+    const double front_rate =
+        front_total == 0 ? 0.0 : static_cast<double>(front_hit) / static_cast<double>(front_total);
+    const auto &estimate = rig.tracker.ekf().state();
+    std::printf("  omega=%4.1f rad/s: 稳定帧=%d/%d 角速度估计=%.2f 射击点误差 中位=%.3f p90=%.3f "
+                "| 最近真板 中位=%.3f | 朝面板占比=%.0f%% | 3cm 命中率=%.0f%%\n",
+                omega, stable_frames, 420, estimate(7), strike_median, p90(strike_errors),
+                min4_median, front_rate * 100.0, hit_rate * 100.0);
+    if (omega >= 0.0)
+    {
+        check(min4_median <= 0.03 && hit_rate >= 0.9 && front_rate >= 0.9,
+              "G 高速自转：射击点落在朝相机的真板上（中位 <= 3cm、命中率 >= 90%）");
+    }
+}
+
 } // namespace
 
 int main()
@@ -407,6 +537,11 @@ int main()
     scenarioOutlierRejected();
     scenarioTargetSwitch();
     scenarioLatencyCompensation();
+    std::printf("\n[G] 高速自转目标：能不能瞄准（处理延迟 50ms）\n");
+    scenarioFastSpin(2.0);
+    scenarioFastSpin(4.0);
+    scenarioFastSpin(6.0);
+    scenarioFastSpin(8.0);
     if (g_failures != 0)
     {
         std::printf("\n%d 项失败\n", g_failures);

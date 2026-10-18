@@ -1158,7 +1158,13 @@ PredictionResult RotatingArmorTracker::buildResult(const GimbalState &gimbal,
     // 都是 slot 0 —— 瞄准点因此画在板外 0.35 m 处，正是"紫圈跑到板外面"）。
     // 正确的瞄准点是"最近一次被接受更新关联上的那块板"在未来时刻的位置：
     // 同一块板按 ω 外推，换板由关联结果驱动（update 里 aim_slot_ = best_slot）。
+    // 朝向过滤：外法向 = (板心 − 中心)/R。朝向云台那一面才有可能被看见/打中；
+    // "离云台最近"的角度判据对"同一条视线上的近板与远板"完全打平（两者方位角
+    // 一模一样），不按朝面过滤就会挑到车体背面那块（合成 8 rad/s 实测一半帧
+    // 瞄在背面板上）。
+    const Eigen::Vector3d body_center(probe.state()(0), probe.state()(2), probe.state()(4));
     int best_slot = -1;
+    for (int pass = 0; pass < 2 && best_slot < 0; ++pass)
     {
         double best_error = std::numeric_limits<double>::infinity();
         for (int slot = 0; slot < plate_count && slot < static_cast<int>(last_seen_s_.size());
@@ -1170,6 +1176,14 @@ PredictionResult RotatingArmorTracker::buildResult(const GimbalState &gimbal,
                 continue; // 最近没见过这块板，不能拿它当瞄准点
             }
             const Eigen::Vector3d candidate = platePosition(probe.state(), slot, plate_count);
+            const Eigen::Vector3d outward = candidate - body_center;
+            const double outward_norm = outward.norm();
+            const double facing =
+                outward_norm > 1.0e-6 ? outward.dot(-candidate.normalized()) / outward_norm : 0.0;
+            if (pass == 0 && facing <= 0.0)
+            {
+                continue; // 背面板：先不考虑，找不到朝面板再退回纯角度
+            }
             const double error =
                 std::max(std::fabs(wrapToPi(vectorYaw(candidate) - gimbal.yaw)),
                          std::fabs(vectorPitch(candidate) - gimbal.pitch));

@@ -203,9 +203,25 @@ struct Rig
         const std::vector<Plate> plates = platesAt(truth, plate_count);
         if (aim_at_truth && !plates.empty())
         {
-            int best = 0;
-            double best_error = 1.0e9;
+            // 云台只能追"朝向自己这一面"的板：背面的板被车体挡住，拿去当云台指向
+            // 会让测试夹具自己瞄错（实测 8rad/s 时一半帧云台在追背面那块）。
+            std::vector<int> visible;
             for (int slot = 0; slot < static_cast<int>(plates.size()); ++slot)
+            {
+                const Eigen::Vector3d &position = plates[static_cast<std::size_t>(slot)].position;
+                const Eigen::Vector3d &normal = plates[static_cast<std::size_t>(slot)].normal;
+                if (normal.dot(-position.normalized()) > 0.3)
+                {
+                    visible.push_back(slot);
+                }
+            }
+            if (visible.empty())
+            {
+                visible.push_back(0);
+            }
+            int best = visible[0];
+            double best_error = 1.0e9;
+            for (int slot : visible)
             {
                 const double error = std::fabs(rotating_armor::wrapToPi(
                     rotating_armor::vectorYaw(plates[static_cast<std::size_t>(slot)].position) -
