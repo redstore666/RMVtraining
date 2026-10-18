@@ -253,72 +253,50 @@ void RotatingArmorTracker::collectWorldObservations(
 RotatingArmorTracker::CircleFit
 RotatingArmorTracker::fitArmorCircle(const std::deque<LockSample> &samples)
 {
+    // Kasa 代数圆拟合：min sum (|p-c|^2 - R^2)^2，闭式解，对"接近共线"的
+    // 短弧也稳定（Gauss-Newton 在短弧上会发散，实测给出 R=3142 m 这种值）。
     CircleFit fit;
     if (samples.size() < 4)
     {
         return fit;
     }
-    // 初值：位置均值当圆心、平均距离当半径。
-    double mx = 0.0;
-    double my = 0.0;
-    for (const LockSample &sample : samples)
+    Eigen::MatrixXd a = Eigen::MatrixXd::Zero(static_cast<int>(samples.size()), 3);
+    Eigen::VectorXd b = Eigen::VectorXd::Zero(static_cast<int>(samples.size()));
+    for (std::size_t i = 0; i < samples.size(); ++i)
     {
-        mx += sample.position.x();
-        my += sample.position.y();
+        const double x = samples[i].position.x();
+        const double y = samples[i].position.y();
+        const int row = static_cast<int>(i);
+        a(row, 0) = 2.0 * x;
+        a(row, 1) = 2.0 * y;
+        a(row, 2) = 1.0;
+        b(row) = x * x + y * y;
     }
-    mx /= static_cast<double>(samples.size());
-    my /= static_cast<double>(samples.size());
-    double r = 0.0;
-    for (const LockSample &sample : samples)
+    const Eigen::Vector3d solution = a.colPivHouseholderQr().solve(b);
+    if (!solution.allFinite())
     {
-        r += std::hypot(sample.position.x() - mx, sample.position.y() - my);
+        return fit;
     }
-    r /= static_cast<double>(samples.size());
-    // Gauss-Newton：残差 = |p - c| - R，未知量 (cx, cy, R)。
-    for (int iter = 0; iter < 15; ++iter)
+    const double cx = solution(0);
+    const double cy = solution(1);
+    const double radius_sq = solution(2) + cx * cx + cy * cy;
+    if (!(radius_sq > 0.0))
     {
-        Eigen::Matrix3d normal = Eigen::Matrix3d::Zero();
-        Eigen::Vector3d rhs = Eigen::Vector3d::Zero();
-        for (const LockSample &sample : samples)
-        {
-            const double dx = sample.position.x() - mx;
-            const double dy = sample.position.y() - my;
-            const double d = std::hypot(dx, dy);
-            if (d < 1.0e-6)
-            {
-                continue;
-            }
-            const double residual = d - r;
-            const Eigen::Vector3d jacobian(-dx / d, -dy / d, -1.0);
-            normal += jacobian * jacobian.transpose();
-            rhs += jacobian * (-residual);
-        }
-        const Eigen::Vector3d step = normal.ldlt().solve(rhs);
-        if (!step.allFinite())
-        {
-            return fit;
-        }
-        mx += step(0);
-        my += step(1);
-        r += step(2);
-        if (step.norm() < 1.0e-9)
-        {
-            break;
-        }
+        return fit;
     }
+    const double radius = std::sqrt(radius_sq);
     double sum = 0.0;
     for (const LockSample &sample : samples)
     {
-        const double residual =
-            std::hypot(sample.position.x() - mx, sample.position.y() - my) - r;
+        const double residual = std::hypot(sample.position.x() - cx, sample.position.y() - cy) - radius;
         sum += residual * residual;
     }
-    fit.cx = mx;
-    fit.cy = my;
-    fit.radius = r;
+    fit.cx = cx;
+    fit.cy = cy;
+    fit.radius = radius;
     fit.residual = std::sqrt(sum / static_cast<double>(samples.size()));
-    fit.ok = std::isfinite(fit.cx) && std::isfinite(fit.cy) &&
-             std::isfinite(fit.radius) && fit.radius > 0.0;
+    fit.ok = std::isfinite(fit.cx) && std::isfinite(fit.cy) && std::isfinite(fit.radius) &&
+             fit.radius > 0.0 && fit.residual < 1.0;
     return fit;
 }
 
@@ -523,18 +501,92 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
         body[i] = body[i - 1] + (delta - jump);
     }
     const LinearFit fit = fitLinear(times, body);
-    diagnostics_.last_reject = "lock:rate_ambiguous";
     if (!fit.ok || count < 6)
     {
+        diagnostics_.last_reject = "lock:rate_ambiguous";
         return false;
     }
-    const double omega = fit.slope;
-    const double slope_error = fit.slope_error;
+    double omega = fit.slope;
+    double slope_error = fit.slope_error;
+    // 法向序列给出的速率"可用"的判据：斜率和标准误同量级时不可信。
+    const bool yaw_rate_reliable =
+        std::fabs(omega) > 1.0e-3 && slope_error < 0.5 * std::fabs(omega) + 0.05;
 
     double phase_spread = 0.0;
     for (std::size_t i = 0; i < count; ++i)
     {
         phase_spread = std::max(phase_spread, std::fabs(body[i] - body[count - 1]));
+    }
+
+    // 2c) 位置圆拟合：高速自转目标的速率必须从"板心位置"估，不能从板面 yaw 估。
+    //
+    //     实拍 v4 的 3 号车自转时，单帧 yaw 抖动 ±0.3 rad，而单帧真实转角只有
+    //     0.01-0.02 rad —— yaw 序列看起来就是噪声，线性拟合给出 |omega|≈0，
+    //     于是锁定按 Static 初始化，转速永久钉在 0，预测永远滞后。
+    //
+    //     板心位置没有这个问题（重投影 0.5 px）：四块板共圆，圆拟合给出
+    //     (c, R)，相邻板心的切向位移 delta_theta ≈ cross(r, dp)/R^2 累加给出
+    //     omega 的大小和方向。换板那一步位移 ~2R，用步长门限剔除。
+    CircleFit circle = fitArmorCircle(lock_samples_);
+    bool spin_from_positions = false;
+    double circle_phase_last = 0.0;
+    double circle_step_ratio = 0.0;
+    if (circle.ok && circle.residual <= config_.lock_circle_residual_m &&
+        circle.radius >= config_.radius_min_m && circle.radius <= config_.radius_max_m &&
+        count >= 6)
+    {
+        double sum_dtheta = 0.0;
+        double sum_dt = 0.0;
+        double sum_dtheta2 = 0.0;
+        int used_steps = 0;
+        int total_steps = 0;
+        for (std::size_t i = 1; i < count; ++i)
+        {
+            const Eigen::Vector2d prev(lock_samples_[i - 1].position.x(),
+                                       lock_samples_[i - 1].position.y());
+            const Eigen::Vector2d cur(lock_samples_[i].position.x(),
+                                      lock_samples_[i].position.y());
+            const double dt =
+                lock_samples_[i].timestamp_s - lock_samples_[i - 1].timestamp_s;
+            if (dt <= 1.0e-6)
+            {
+                continue;
+            }
+            ++total_steps;
+            const Eigen::Vector2d delta = cur - prev;
+            if (delta.norm() > config_.lock_circle_max_step_ratio * circle.radius)
+            {
+                continue; // 换板跳变（~2R）或漏检后的跳跃，不参与速率
+            }
+            const Eigen::Vector2d radius_vector =
+                prev - Eigen::Vector2d(circle.cx, circle.cy);
+            const double dtheta = (radius_vector.x() * delta.y() -
+                                   radius_vector.y() * delta.x()) /
+                                  (circle.radius * circle.radius);
+            sum_dtheta += dtheta;
+            sum_dtheta2 += dtheta * dtheta;
+            sum_dt += dt;
+            ++used_steps;
+        }
+        const double used_ratio =
+            total_steps > 0 ? static_cast<double>(used_steps) / total_steps : 0.0;
+        circle_step_ratio = used_ratio;
+        if (!yaw_rate_reliable && used_steps >= 5 && sum_dt > 0.0 &&
+            used_ratio >= config_.lock_circle_trusted_ratio)
+        {
+            const double omega_positions = sum_dtheta / sum_dt;
+            const double mean_dtheta = sum_dtheta / static_cast<double>(used_steps);
+            const double variance = std::max(
+                0.0, sum_dtheta2 / static_cast<double>(used_steps) - mean_dtheta * mean_dtheta);
+            // 单步角增量的散布折算到"速率标准误"：omega 的不确定度 ~ std/dsqrt(N)*dt
+            const double mean_dt = sum_dt / static_cast<double>(used_steps);
+            slope_error = std::sqrt(variance) / (std::max(1, used_steps) * mean_dt);
+            omega = omega_positions;
+            spin_from_positions = true;
+            circle_phase_last = std::atan2(
+                lock_samples_.back().position.y() - circle.cy,
+                lock_samples_.back().position.x() - circle.cx);
+        }
     }
 
     const LockSample last = lock_samples_.back();
@@ -550,7 +602,16 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
     const double ray = std::atan2(last.position.y(), last.position.x());
     const double inside = std::fabs(wrapToPi(wrapToPi(last.yaw) - ray));
     const double outside = std::fabs(wrapToPi(wrapToPi(last.yaw + kPi) - ray));
-    const bool flipped = outside < inside;
+    bool flipped = outside < inside;
+    if (spin_from_positions)
+    {
+        // 有了圆拟合中心，"板面外法向"可以直接定出来：(p - c)/R。板面法向的
+        // 180 度歧义在这里一次解决，不再依赖"车体在板背后"的几何先验。
+        const Eigen::Vector2d outward(last.position.x() - circle.cx,
+                                      last.position.y() - circle.cy);
+        const Eigen::Vector2d yaw_dir(std::cos(last.yaw), std::sin(last.yaw));
+        flipped = outward.dot(yaw_dir) < 0.0;
+    }
 
     if (phase_spread >= config_.phase_spread_for_radius_rad && count >= 12)
     {
@@ -588,7 +649,11 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
         }
     }
 
-    const double phase_last = wrapToPi(last.yaw + (flipped ? kPi : 0.0));
+    // 位置圆拟合给出的相位已经是"从圆心指向板"的外法向，直接可用；否则用
+    // 单帧 yaw 加 180 度歧义消解。
+    const double phase_last =
+        spin_from_positions ? wrapToPi(circle_phase_last)
+                            : wrapToPi(last.yaw + (flipped ? kPi : 0.0));
     // 声明"不转"必须有据：速率接近 0 且拟合标准误小。速率本身测不准时
     // （噪声大、样本短）不能拿"static_rate_rad_s"兜底——那正是旧实现把
     // 2-8 rad/s 的旋转目标全判成 Static、然后硬钉住、整段跟踪 0 次更新的原因。
@@ -597,8 +662,15 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
     //   - 板面法向几乎没扫开（相位不动 ⇒ 车体没转，与速率估得准不准无关）。
     // 第二条是给"法向抖动比转速还大"的场合兜底的：抖动大时速率估不准，但
     // "压根没扫开"这个事实本身很强。
+    if (spin_from_positions)
+    {
+        // 四块板共圆是整体几何约束，半径比单板先验/单帧弦长可靠得多
+        // （实拍 v4 的 3 号车：先验 0.20、圆拟合 0.18-0.22）。
+        radius = circle.radius;
+        radius_from_data = true;
+    }
     const double static_confidence = std::max(1.0, 0.5 * config_.static_rate_rad_s);
-    const bool is_static =
+    bool is_static =
         std::fabs(omega) <= config_.static_rate_rad_s &&
         (slope_error <= static_confidence || phase_spread < 0.15);
     EkfInitPrior prior;
@@ -616,6 +688,11 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
     }
     prior.radius_m = radius;
     prior.plate_slot = 0; // 槽位基准任意：相对相位才是物理量
+    if (std::isfinite(config_.forced_omega_rad_s))
+    {
+        omega = config_.forced_omega_rad_s;
+        is_static = std::fabs(omega) < 1.0e-6;
+    }
     prior.spin = is_static ? SpinPriorKind::Static : SpinPriorKind::Spinning;
     prior.yaw_rate_prior_rad_s = is_static ? 0.0 : omega;
     prior.position_sigma_m = 0.15;
@@ -666,8 +743,19 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
     contradiction_streak_ = 0;
     aim_slot_ = 0;
     locked_radius_m_ = radius;
+    if (std::isfinite(config_.forced_omega_rad_s))
+    {
+        radius_from_data = true;
+        spin_from_positions = false;
+    }
     locked_spin_rad_s_ = is_static ? 0.0 : omega;
+    diagnostics_.last_reject.clear();
     lock_radius_from_data_ = radius_from_data;
+    diagnostics_.lock_rate_error_rad_s = slope_error;
+    diagnostics_.lock_spin_from_positions = spin_from_positions;
+    diagnostics_.lock_circle_radius_m = circle.ok ? circle.radius : 0.0;
+    diagnostics_.lock_circle_residual_m = circle.ok ? circle.residual : 0.0;
+    diagnostics_.lock_step_ratio = circle_step_ratio;
     lock_phase_flipped_ = flipped;
     diagnostics_.phase = LockPhase::Tracking;
     diagnostics_.accepted_updates = 1;

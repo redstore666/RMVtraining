@@ -132,6 +132,8 @@ namespace
         int only_id{0};
         double radius_prior{0.25};
         double v_sigma{0.05};
+        double omega{0.0};
+        bool omega_given{false};
         bool centered_switch{true};
         double sigma_floor{0.06};
         bool phase_anchor{true};
@@ -245,6 +247,11 @@ namespace
                 args.centered_switch = false;
             else if (arg == "--switch-margin")
                 args.switch_margin = std::atof(next("--switch-margin").c_str());
+            else if (arg == "--omega")
+            {
+                args.omega = std::atof(next("--omega").c_str());
+                args.omega_given = true;
+            }
             else if (arg == "--v-sigma")
             {
                 args.v_sigma = std::atof(next("--v-sigma").c_str());
@@ -404,6 +411,10 @@ int main(int argc, char **argv)
     tracker_config.handoff_sigma_scale = args.handoff_scale;
     tracker_config.radius_prior_m = args.radius_prior;
     tracker_config.velocity_sigma_m_s = args.v_sigma;
+    if (args.omega_given)
+    {
+        tracker_config.forced_omega_rad_s = args.omega;
+    }
     tracker_config.association_sigma_floor_m = args.sigma_floor;
     tracker_config.prefer_centered_target = args.centered_switch;
     tracker_config.target_switch_margin_rad = args.switch_margin;
@@ -454,7 +465,23 @@ int main(int argc, char **argv)
     };
     std::vector<AimTrace> pending_aims;
     std::vector<double> aim_errors_m;
+    // 真正的"预测准不准"：aim 在 t_cmd_s 时刻打到哪，就和那一刻实测板心比。
+    // （之前 aim_errors_m 装的是"模型解释度"，不是预测误差，两者被混在一起了。）
+    std::vector<double> prediction_errors_m;
     std::vector<double> aim_slot_errors_m;
+
+    // 瞄准残差按"跟踪状态"分列：Idle / Collecting / Tracking。用户验收时最关心的
+    // 是"没锁上时的偏离"和"锁上后的偏离"是两个量，混在一起看不出改动的效果。
+    std::array<std::vector<double>, 3> aim_slot_by_phase;
+    // 预测质量单独看：没有观测的帧只能靠 EKF 外推（"瞄准偏离"主要发生在这里）。
+    std::array<std::vector<double>, 2> aim_slot_by_measurement; // 0=有观测 1=无观测
+    std::array<long, 2> aim_frames_by_measurement{{0, 0}};
+    std::array<long, 3> frames_by_phase{{0, 0, 0}};
+    std::array<long, 3> aim_frames_by_phase{{0, 0, 0}};
+    // 按 |omega| 分桶（<1 / 1-5 / 5-15 / >=15 rad/s）：高速自转单独看，
+    // 否则被大量静止帧的中位数掩盖。
+    std::array<std::vector<double>, 4> aim_slot_by_omega;
+    std::array<long, 4> aim_frames_by_omega{{0, 0, 0, 0}};
 
     std::ofstream csv;
     if (!args.csv_path.empty())
@@ -599,15 +626,79 @@ int main(int argc, char **argv)
             stats.has_last = true;
         }
 
+        // ---- EKF ----
+        rotating_armor::TrackerDiagnostics diagnostics{};
+        PredictionResult prediction{};
+        if (args.ekf)
+        {
+            prediction = tracker.step(poses, gimbal, time_s, 0.0);
+            diagnostics = tracker.diagnostics();
+            final_diagnostics = diagnostics;
+            if (args.trace)
+            {
+                const auto &st = tracker.ekf().state();
+                std::printf("[trace] f=%d t=%.3f det=%zu init=%d phase=%d id=%d ok=%llu rej=%d miss=%d "
+                            "relock=%d ls=%d omega=%.2f R=%.3f yaw=%.2f nis=%.1f why=%s stab=%s gd=%.2f gn=%.0f\n",
+                            frame_index, time_s, poses.size(), static_cast<int>(tracker.initialized()),
+                            static_cast<int>(diagnostics.phase), diagnostics.target_id,
+                            static_cast<unsigned long long>(diagnostics.accepted_updates),
+                            diagnostics.rejected_this_frame, diagnostics.missed_frames,
+                            diagnostics.relock_count, diagnostics.lock_samples, st(7), st(8), st(6), diagnostics.last_nis,
+                            diagnostics.last_reject.c_str(), diagnostics.stability.c_str(),
+                            diagnostics.best_gate_distance_m, diagnostics.best_gate_nis);
+                        if (diagnostics.phase == rotating_armor::LockPhase::Tracking)
+                        {
+                            const auto &st = tracker.ekf().state();
+                            std::printf("   v=(%.2f,%.2f) c=(%.2f,%.2f)\n", st(1), st(3),
+                                        st(0), st(2));
+                        }
+            }
         // 模型解释度：观测到的板心到 4 个"模型板位"里最近的那个的距离。
         // 单看某一块板没意义（4 板对称，槽位标签本来就只能确定到 2pi/N），
         // 但"每一块观测都能被模型解释"是状态对不对的硬指标：状态错 2R 时
         // 这个残差就是 0.3 m 量级，状态对时是几厘米。
         std::vector<double> frame_model_residuals;
+        std::vector<double> frame_aim_candidates;
         std::vector<double> frame_aim_residuals;
         if (args.ekf && tracker.initialized())
         {
             const rotating_armor::State &st = tracker.ekf().state();
+            // 先把本帧所有观测转到世界系，供"到期 aim 对账"使用。
+            std::vector<std::pair<int, Eigen::Vector3d>> frame_obs_world;
+            for (const ArmorPose &pose : poses)
+            {
+                if (pose.detection.target_id == 0)
+                {
+                    continue;
+                }
+                frame_obs_world.emplace_back(
+                    pose.detection.target_id,
+                    rotating_armor::gimbalToWorld(gimbal) *
+                        Eigen::Vector3d(pose.position_gimbal_m[0], pose.position_gimbal_m[1],
+                                        pose.position_gimbal_m[2]));
+            }
+            for (auto it = pending_aims.begin(); it != pending_aims.end();)
+            {
+                if (it->t_cmd_s > time_s)
+                {
+                    ++it;
+                    continue;
+                }
+                double best = std::numeric_limits<double>::infinity();
+                for (const auto &obs : frame_obs_world)
+                {
+                    if (it->target_id != 0 && obs.first != it->target_id)
+                    {
+                        continue;
+                    }
+                    best = std::min(best, (obs.second - it->aim_world).norm());
+                }
+                if (std::isfinite(best))
+                {
+                    prediction_errors_m.push_back(best);
+                }
+                it = pending_aims.erase(it);
+            }
             for (const ArmorPose &pose : poses)
             {
                 if (pose.detection.target_id == 0 ||
@@ -663,41 +754,26 @@ int main(int argc, char **argv)
                 // 用"实际发布出去的瞄准点"（diagnostics().predicted_aim_world），
                 // 而不是再用 EKF 状态重算一遍：后者会把 buildResult 里的
                 // 瞄准点后处理（观测直用 / 可见性窗口）全部绕过。
+                // 同帧可能有两块板同时可见（实拍 v4 自转车 209/742 帧）：瞄准点只
+                // 可能落在其中一块上，所以一帧只取"离瞄准点最近的那个观测"作为
+                // 该帧的瞄准残差；否则另一块板（离 0.35 m）会把中位数抬到无意义。
                 const Eigen::Vector3d &aim_world = tracker.diagnostics().predicted_aim_world;
                 if (aim_world.allFinite() && aim_world.squaredNorm() > 1.0e-6)
                 {
-                    frame_aim_residuals.push_back((observed - aim_world).norm());
+                    frame_aim_candidates.push_back((observed - aim_world).norm());
                 }
+            }
+            if (!frame_aim_candidates.empty())
+            {
+                const double best_aim =
+                    *std::min_element(frame_aim_candidates.begin(), frame_aim_candidates.end());
+                frame_aim_residuals.push_back(best_aim);
+                const std::size_t measured = tracker.diagnostics().updates_this_frame > 0 ? 0 : 1;
+                aim_slot_by_measurement[measured].push_back(best_aim);
+                ++aim_frames_by_measurement[measured];
             }
         }
 
-        // ---- EKF ----
-        rotating_armor::TrackerDiagnostics diagnostics{};
-        PredictionResult prediction{};
-        if (args.ekf)
-        {
-            prediction = tracker.step(poses, gimbal, time_s, 0.0);
-            diagnostics = tracker.diagnostics();
-            final_diagnostics = diagnostics;
-            if (args.trace)
-            {
-                const auto &st = tracker.ekf().state();
-                std::printf("[trace] f=%d t=%.3f det=%zu init=%d phase=%d id=%d ok=%llu rej=%d miss=%d "
-                            "relock=%d ls=%d omega=%.2f R=%.3f yaw=%.2f nis=%.1f why=%s stab=%s gd=%.2f gn=%.0f\n",
-                            frame_index, time_s, poses.size(), static_cast<int>(tracker.initialized()),
-                            static_cast<int>(diagnostics.phase), diagnostics.target_id,
-                            static_cast<unsigned long long>(diagnostics.accepted_updates),
-                            diagnostics.rejected_this_frame, diagnostics.missed_frames,
-                            diagnostics.relock_count, diagnostics.lock_samples, st(7), st(8), st(6), diagnostics.last_nis,
-                            diagnostics.last_reject.c_str(), diagnostics.stability.c_str(),
-                            diagnostics.best_gate_distance_m, diagnostics.best_gate_nis);
-                        if (diagnostics.phase == rotating_armor::LockPhase::Tracking)
-                        {
-                            const auto &st = tracker.ekf().state();
-                            std::printf("   v=(%.2f,%.2f) c=(%.2f,%.2f)\n", st(1), st(3),
-                                        st(0), st(2));
-                        }
-            }
             final_prediction = prediction;
             ekf_accepted = static_cast<long>(diagnostics.accepted_updates);
             ekf_rejected += diagnostics.rejected_this_frame;
@@ -717,6 +793,22 @@ int main(int argc, char **argv)
             for (double r : frame_aim_residuals)
             {
                 aim_slot_errors_m.push_back(r);
+            }
+            {
+                const int phase_index = std::clamp(static_cast<int>(diagnostics.phase), 0, 2);
+                ++frames_by_phase[static_cast<std::size_t>(phase_index)];
+                for (double r : frame_aim_residuals)
+                {
+                    aim_slot_by_phase[static_cast<std::size_t>(phase_index)].push_back(r);
+                    ++aim_frames_by_phase[static_cast<std::size_t>(phase_index)];
+                }
+                const double omega_abs = std::fabs(tracker.ekf().state()(7));
+                const int omega_bucket = omega_abs < 1.0 ? 0 : (omega_abs < 5.0 ? 1 : (omega_abs < 15.0 ? 2 : 3));
+                for (double r : frame_aim_residuals)
+                {
+                    aim_slot_by_omega[static_cast<std::size_t>(omega_bucket)].push_back(r);
+                    ++aim_frames_by_omega[static_cast<std::size_t>(omega_bucket)];
+                }
             }
             if (prediction.state != TrackingState::NoTarget &&
                 std::isfinite(prediction.distance_m) && prediction.distance_m > 0.0f)
@@ -747,7 +839,13 @@ int main(int argc, char **argv)
                 std::cout << "[EKF] 帧 " << frame_index << " 阶段 " << last_phase << " -> "
                           << phase << "（样本 " << diagnostics.lock_samples
                           << "，半径 " << (diagnostics.radius_from_data ? "估" : "先验")
-                          << "，omega " << diagnostics.locked_spin_rad_s << "）\n";
+                          << " " << diagnostics.locked_radius_m
+                          << "，omega " << diagnostics.locked_spin_rad_s
+                          << " 误差 " << diagnostics.lock_rate_error_rad_s
+                          << "，来源 " << (diagnostics.lock_spin_from_positions ? "位置圆拟合" : "法向序列")
+                          << "，圆R " << diagnostics.lock_circle_radius_m
+                          << " 残差 " << diagnostics.lock_circle_residual_m
+                          << " 有效步 " << diagnostics.lock_step_ratio << "）\n";
                 last_phase = phase;
             }
             if (diagnostics.last_reject != last_reject)
@@ -992,11 +1090,65 @@ int main(int argc, char **argv)
         }
         if (args.ekf && !aim_slot_errors_m.empty())
         {
+            if (!prediction_errors_m.empty())
+            {
+                std::cout << "  预测瞄准误差(到期对账): " << prediction_errors_m.size()
+                          << " 帧，中位 " << percentile(prediction_errors_m, 0.50) << " m，p90 "
+                          << percentile(prediction_errors_m, 0.90) << " m，≤5cm "
+                          << 100.0 * fractionBelow(prediction_errors_m, 0.05) << "%\n";
+            }
             std::cout << "  瞄准板残差: " << aim_slot_errors_m.size() << " 帧，中位 "
                       << percentile(aim_slot_errors_m, 0.50) << " m，p90 "
                       << percentile(aim_slot_errors_m, 0.90) << " m，≤2cm "
                       << 100.0 * fractionBelow(aim_slot_errors_m, 0.02) << "% ，≤5cm "
                       << 100.0 * fractionBelow(aim_slot_errors_m, 0.05) << "%\n";
+            const char *phase_names[3] = {"Idle(未追踪)", "Collecting(攒样本)", "Tracking(已锁定)"};
+            std::cout << "  瞄准板残差分状态:\n";
+            for (std::size_t i = 0; i < 3; ++i)
+            {
+                if (aim_slot_by_phase[i].empty())
+                {
+                    std::cout << "    " << phase_names[i] << ": 帧数 " << frames_by_phase[i]
+                              << "，无瞄准点\n";
+                    continue;
+                }
+                std::cout << "    " << phase_names[i] << ": 帧数 " << frames_by_phase[i]
+                          << "，瞄准样本 " << aim_slot_by_phase[i].size() << "，中位 "
+                          << percentile(aim_slot_by_phase[i], 0.50) << " m，p90 "
+                          << percentile(aim_slot_by_phase[i], 0.90) << " m，≤5cm "
+                          << 100.0 * fractionBelow(aim_slot_by_phase[i], 0.05) << "%\n";
+            }
+            {
+                static const char *const names[2] = {"本帧有观测", "本帧无观测(纯预测)"};
+                std::cout << "  瞄准板残差分测量状态:\n";
+                for (std::size_t i = 0; i < 2; ++i)
+                {
+                    if (aim_slot_by_measurement[i].empty())
+                    {
+                        std::cout << "    " << names[i] << ": 帧数 "
+                                  << aim_frames_by_measurement[i] << "，无瞄准点\n";
+                        continue;
+                    }
+                    std::cout << "    " << names[i] << ": 帧数 " << aim_frames_by_measurement[i]
+                              << "，中位 " << percentile(aim_slot_by_measurement[i], 0.50)
+                              << " m，p90 " << percentile(aim_slot_by_measurement[i], 0.90)
+                              << " m，≤5cm "
+                              << 100.0 * fractionBelow(aim_slot_by_measurement[i], 0.05) << "%\n";
+                }
+            }
+            const char *omega_names[4] = {"|w|<1", "|w|1-5", "|w|5-15", "|w|>=15"};
+            std::cout << "  瞄准板残差按角速度:\n";
+            for (std::size_t i = 0; i < 4; ++i)
+            {
+                if (aim_slot_by_omega[i].empty())
+                {
+                    std::cout << "    " << omega_names[i] << ": 样本 0\n";
+                    continue;
+                }
+                std::cout << "    " << omega_names[i] << ": 样本 " << aim_slot_by_omega[i].size()
+                          << "，中位 " << percentile(aim_slot_by_omega[i], 0.50) << " m，p90 "
+                          << percentile(aim_slot_by_omega[i], 0.90) << " m\n";
+            }
         }
         std::cout << "  末帧预测: " << stateName(final_prediction.state)
                   << " id " << static_cast<int>(final_prediction.target_id)

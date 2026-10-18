@@ -24,6 +24,7 @@
 #include <array>
 #include <cstdint>
 #include <deque>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -68,6 +69,12 @@ struct TrackerConfig
     double radius_min_m{0.05};
     double radius_max_m{0.60};
     double phase_spread_for_radius_rad{0.30}; // 相位扫过小于它 -> 半径不可辨识
+    // 位置圆拟合锁定：高速自转时单帧板面 yaw 的抖动（实拍 ±0.3 rad）比单帧
+    // 真实转角还大，yaw 序列拟合不出转速；板心位置却准（重投影 0.5 px），
+    // 四块板共圆 => 圆拟合给 (c, R)，相邻板心的切向位移/半径给 omega。
+    double lock_circle_residual_m{0.05};              // 圆拟合 RMS 残差超过它不可信
+    double lock_circle_max_step_ratio{0.25};          // 单步位移 > 0.25R 视为换板，跳过
+    double lock_circle_trusted_ratio{0.35};           // 有效步数占比低于它不采信位置速率
     double static_rate_rad_s{1.2};            // |omega| 低于它判为"不转"（Static）
 
     // === 关联 / 门限 ===
@@ -154,6 +161,9 @@ struct TrackerConfig
     // 1384 帧全aim=3、看见的是 slot 0，瞄准点画到板外 0.35 m）。这个时间窗内
     // 见过的板才算候选，窗内的板里再挑离云台最近的。
     double aim_visible_hold_s{0.30};
+    // 诊断用：强制锁定角速度（rad/s，NaN=不强制）。用来扫"真实角速度大概是多少"：
+    // 在不同 forced omega 下看 30 ms 预测误差哪个最小，比从含跳变的序列里拟合更可靠。
+    double forced_omega_rad_s{std::numeric_limits<double>::quiet_NaN()};
     // 瞄准点直接用"最近一次观测到的板心"的时间窗（秒）。0 = 关闭，退回 EKF。
     double aim_observation_hold_s{0.012};
     // 瞄准点的一阶平滑系数（0 = 不平滑）。观测有 ~35 mm 的帧间抖动，直接送
@@ -184,6 +194,12 @@ struct TrackerDiagnostics
     int last_lock_samples{0};
     double locked_radius_m{0.0};
     double locked_spin_rad_s{0.0};
+    // 锁定时刻的速率估计细节（诊断"为什么判成不转/转多快"用）：
+    double lock_rate_error_rad_s{0.0};
+    bool lock_spin_from_positions{false}; // true = 速率来自板心位置圆拟合
+    double lock_circle_radius_m{0.0};
+    double lock_circle_residual_m{0.0};
+    double lock_step_ratio{0.0};          // 有效（同板）步数占比
     bool radius_from_data{false};
     bool phase_flipped{false};
     std::uint64_t accepted_updates{0};
