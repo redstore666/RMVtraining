@@ -703,6 +703,47 @@ cv::Vec3d gimbalToCameraPoint(const CameraParameters &camera, const cv::Vec3d &p
     return cv::Vec3d(p_camera.at<double>(0), p_camera.at<double>(1), p_camera.at<double>(2));
 }
 
+std::size_t refineArmorCorners(const cv::Mat &gray, std::vector<ArmorDetection> &detections,
+                               double min_edge_px, int win)
+{
+    if (gray.empty() || gray.type() != CV_8UC1)
+    {
+        return 0;
+    }
+    std::size_t refined = 0;
+    for (ArmorDetection &det : detections)
+    {
+        const double edge = cv::norm(det.corners[1] - det.corners[0]);
+        if (edge < min_edge_px)
+        {
+            continue;
+        }
+        std::vector<cv::Point2f> points(det.corners.begin(), det.corners.end());
+        cv::cornerSubPix(gray, points, cv::Size(win, win), cv::Size(-1, -1),
+                         cv::TermCriteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS, 20, 0.02));
+        // 细化结果离原角点太远说明窗口里没有可用的强角点，保留原值。
+        bool sane = true;
+        for (int k = 0; k < 4; ++k)
+        {
+            if (cv::norm(points[k] - det.corners[k]) > 4.0)
+            {
+                sane = false;
+                break;
+            }
+        }
+        if (!sane)
+        {
+            continue;
+        }
+        for (int k = 0; k < 4; ++k)
+        {
+            det.corners[k] = points[k];
+        }
+        ++refined;
+    }
+    return refined;
+}
+
 std::vector<ArmorPose> armor_solve(const std::vector<ArmorDetection> &detections,
                                    const CameraParameters &camera,
                                    const GimbalState &gimbal)

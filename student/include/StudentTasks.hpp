@@ -49,6 +49,14 @@ std::vector<ArmorDetection> armor_detect(const cv::Mat &pic, TeamColor enemy_col
 // "模型板有没有压住真实板"。
 cv::Vec3d gimbalToCameraPoint(const CameraParameters &camera, const cv::Vec3d &p_gimbal);
 
+// 亚像素角点细化（可选）：把检测网络给出的四角在灰度图上细化到亚像素。
+// 只在板够大（边长 >= min_edge_px）时做，避免小板上细化窗口跨到背景里把角点拉走。
+// 返回被细化的板数。
+// 实测（v4 --only-id 3）：win=3 / min_edge=60 比不细化好 5%（87.1 -> 82.5 mm 中位），
+// 但 v1（遮挡重锁多）会差一倍，所以只作为可选项、默认关闭。
+std::size_t refineArmorCorners(const cv::Mat &gray, std::vector<ArmorDetection> &detections,
+                               double min_edge_px = 60.0, int win = 3);
+
 std::vector<ArmorPose> armor_solve(const std::vector<ArmorDetection> &detections,
                                    const CameraParameters &camera,
                                    const GimbalState &gimbal);

@@ -135,6 +135,7 @@ namespace
         double lock_span{0.18};
         double lock_age{0.50};
         bool radius_given{false};
+        bool refine_corners{false};
         bool smooth{false};
         int smooth_window{4};
         bool trace{false};
@@ -201,11 +202,14 @@ namespace
                 args.only_id = std::atoi(next("--only-id").c_str());
             else if (arg == "--smooth")
                 args.smooth = true;
+            else if (arg == "--refine-corners")
+                args.refine_corners = true;
             else if (arg == "--smooth-window")
                 args.smooth_window = std::max(1, std::atoi(next("--smooth-window").c_str()));
             else if (arg == "--radius")
             {
                 args.radius_prior = std::atof(next("--radius").c_str());
+                args.radius_given = true;
             }
             else if (arg == "--v-sigma")
             {
@@ -218,7 +222,6 @@ namespace
             else if (arg == "--lock-age")
             {
                 args.lock_age = std::atof(next("--lock-age").c_str());
-                args.radius_given = true;
             }
             else if (arg == "--config")
                 args.config_path = next("--config");
@@ -385,6 +388,7 @@ int main(int argc, char **argv)
     long ekf_first_stable_frame{-1};
     long ekf_stable_frames{0};
     long ekf_accepted{0};
+    long refine_count{0};
     long ekf_rejected{0};
     int ekf_relock_count{0};
     int ekf_target_switches{0};
@@ -465,7 +469,13 @@ int main(int argc, char **argv)
         }
 
         const auto t0 = std::chrono::steady_clock::now();
-        const std::vector<ArmorDetection> detections = armor_detect(frame, args.enemy);
+        std::vector<ArmorDetection> detections = armor_detect(frame, args.enemy);
+        if (args.refine_corners && !detections.empty())
+        {
+            cv::Mat gray;
+            cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
+            refine_count += refineArmorCorners(gray, detections);
+        }
         const auto t1 = std::chrono::steady_clock::now();
         GimbalState gimbal{};
         gimbal.prediction_bias_s = static_cast<float>(args.bias_s);
