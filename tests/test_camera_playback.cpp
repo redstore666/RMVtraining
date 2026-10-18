@@ -144,6 +144,10 @@ namespace
         bool centered_switch{true};
         double sigma_floor{0.06};
         bool pair_center{false};
+        bool aim_obs_horizon{false};
+        bool phase_yaw_static{false};
+        bool no_aim_extrapolate{false};
+        double realign_m{0.0};
         bool phase_anchor{true};
         double aim_obs{0.012};
         double aim_alpha{0.0};
@@ -251,6 +255,22 @@ namespace
                 args.phase_anchor = false;
             else if (arg == "--sigma-floor")
                 args.sigma_floor = std::atof(next("--sigma-floor").c_str());
+            else if (arg == "--realign")
+            {
+                args.realign_m = std::atof(next("--realign").c_str());
+            }
+            else if (arg == "--no-aim-extrapolate")
+            {
+                args.no_aim_extrapolate = true;
+            }
+            else if (arg == "--phase-yaw-static")
+            {
+                args.phase_yaw_static = true;
+            }
+            else if (arg == "--aim-obs-horizon")
+            {
+                args.aim_obs_horizon = true;
+            }
             else if (arg == "--pair-center")
                 args.pair_center = true;
             else if (arg == "--no-centered-switch")
@@ -480,6 +500,10 @@ int main(int argc, char **argv)
     tracker_config.aim_observation_hold_s = args.aim_obs;
     tracker_config.aim_smoothing_alpha = args.aim_alpha;
     tracker_config.aim_fit_samples = args.aim_fit;
+    tracker_config.aim_observation_any_horizon = args.aim_obs_horizon;
+    tracker_config.phase_update_when_static = args.phase_yaw_static;
+    tracker_config.aim_observation_extrapolate = !args.no_aim_extrapolate;
+    tracker_config.single_plate_realign_m = args.realign_m;
     rotating_armor::RotatingArmorTracker tracker(tracker_config);
     long ekf_first_stable_frame{-1};
     long ekf_stable_frames{0};

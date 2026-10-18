@@ -219,6 +219,7 @@ void RotatingArmorTracker::reset()
     lock_radius_from_data_ = false;
     lock_phase_flipped_ = false;
     smoother_ = ObservationSmoother{};
+    last_updated_slot_ = -1;
 }
 
 void RotatingArmorTracker::dropTarget(const char *reason)
@@ -280,6 +281,65 @@ void RotatingArmorTracker::collectWorldObservations(
         }
         out.push_back(observation);
     }
+}
+
+RotatingArmorTracker::CircleFit RotatingArmorTracker::fitCenterFixedRadius(
+    const std::deque<LockSample> &samples, double radius, const CircleFit &initial) {
+    // 半径钉住、只解圆心（Gauss-Newton，2 个未知量）。自由三参数拟合在短弧上
+    // 病态：实拍 v4 末段 31 个样本只走 0.2 m，自由拟合把半径压到 0.101（真值
+    // 0.20），圆心偏移让每步角增量正负相消，ω 落到 0.37 rad/s 而车实际以
+    // ~8 rad/s 自转。半径是按板型的物理常数，钉住它之后条件数好得多。
+    CircleFit fit;
+    fit.radius = radius;
+    if (samples.size() < 4 || !(radius > 0.0)) {
+        return fit;
+    }
+    double cx = initial.ok ? initial.cx : 0.0;
+    double cy = initial.ok ? initial.cy : 0.0;
+    if (!initial.ok) {
+        for (const LockSample &sample : samples) {
+            cx += sample.position.x();
+            cy += sample.position.y();
+        }
+        cx /= static_cast<double>(samples.size());
+        cy /= static_cast<double>(samples.size());
+    }
+    for (int iteration = 0; iteration < 20; ++iteration) {
+        Eigen::Matrix2d normal = Eigen::Matrix2d::Zero();
+        Eigen::Vector2d rhs = Eigen::Vector2d::Zero();
+        for (const LockSample &sample : samples) {
+            const Eigen::Vector2d delta(cx - sample.position.x(), cy - sample.position.y());
+            const double distance = delta.norm();
+            if (distance < 1e-6) {
+                continue;
+            }
+            const Eigen::Vector2d jacobian = delta / distance;
+            const double residual = distance - radius;
+            normal += jacobian * jacobian.transpose();
+            rhs -= jacobian * residual;
+        }
+        if (std::fabs(normal.determinant()) < 1e-12) {
+            break;
+        }
+        const Eigen::Vector2d step = normal.inverse() * rhs;
+        cx += step.x();
+        cy += step.y();
+        if (step.norm() < 1e-6) {
+            break;
+        }
+    }
+    double sum = 0.0;
+    for (const LockSample &sample : samples) {
+        const double distance =
+            (Eigen::Vector2d(cx, cy) - Eigen::Vector2d(sample.position.x(), sample.position.y()))
+                .norm();
+        sum += (distance - radius) * (distance - radius);
+    }
+    fit.cx = cx;
+    fit.cy = cy;
+    fit.residual = std::sqrt(sum / static_cast<double>(samples.size()));
+    fit.ok = true;
+    return fit;
 }
 
 RotatingArmorTracker::CircleFit
@@ -559,7 +619,25 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
     //     板心位置没有这个问题（重投影 0.5 px）：四块板共圆，圆拟合给出
     //     (c, R)，相邻板心的切向位移 delta_theta ≈ cross(r, dp)/R^2 累加给出
     //     omega 的大小和方向。换板那一步位移 ~2R，用步长门限剔除。
+    // 半径先按板型取物理先验；自由三参数拟合只在它离先验不远时才采信半径值，
+    // 否则改用"钉住半径、只解圆心"的拟合（短弧上条件数好得多）。
+    double size_prior = config_.radius_prior_small_m;
+    if (config_.radius_prior_from_size && lock_samples_.back().size == ArmorSize::Large)
+    {
+        size_prior = config_.radius_prior_large_m;
+    }
+    size_prior = clampd(size_prior, config_.radius_min_m, config_.radius_max_m);
     CircleFit circle = fitArmorCircle(lock_samples_);
+    bool used_fixed_radius = false;
+    if (circle.ok && std::fabs(circle.radius - size_prior) > 0.3 * size_prior)
+    {
+        const CircleFit fixed = fitCenterFixedRadius(lock_samples_, size_prior, circle);
+        if (fixed.ok)
+        {
+            circle = fixed;
+            used_fixed_radius = true;
+        }
+    }
     bool spin_from_positions = false;
     double circle_phase_last = 0.0;
     double circle_step_ratio = 0.0;
@@ -600,11 +678,63 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
             sum_dt += dt;
             ++used_steps;
         }
+        // 角跨度：短弧上圆拟合是病态的（实拍 v4 末段 31 个样本只走了 0.2 m，
+        // 自由拟合把半径压到 0.101、每步角增量正负相消，ω 落在 0.37 rad/s 而
+        // 真值约 8）。跨度不够时改用"弦长 + 先验半径"解整段转过的角度：
+        //     chord = 2R sin(dtheta/2)  =>  dtheta = 2 asin(chord / 2R)
+        // 方向取法向序列的净变化符号（1 rad 量级的转角远大于法向噪声）。
+        double angular_span = 0.0;
+        {
+            const double reference = std::atan2(
+                lock_samples_.front().position.y() - circle.cy,
+                lock_samples_.front().position.x() - circle.cx);
+            for (const LockSample &sample : lock_samples_)
+            {
+                const double angle =
+                    std::atan2(sample.position.y() - circle.cy, sample.position.x() - circle.cx);
+                angular_span = std::max(angular_span, std::fabs(wrapToPi(angle - reference)));
+            }
+        }
+        const bool span_ok = angular_span >= config_.lock_circle_min_span_rad;
+        // 弦长兜底只在"法向速率不可靠"时用：法向拟合可靠时它是更好的估计，
+        // 不能被短弧兜底覆盖（合成场景 A 的角速度辨识会因此失效）。
+        if (!span_ok && !yaw_rate_reliable)
+        {
+            const Eigen::Vector3d chord =
+                lock_samples_.back().position - lock_samples_.front().position;
+            const double chord_length = chord.norm();
+            const double window_dt =
+                lock_samples_.back().timestamp_s - lock_samples_.front().timestamp_s;
+            double net_yaw = 0.0;
+            for (std::size_t i = 1; i < count; ++i)
+            {
+                if (lock_samples_[i].handoff || lock_samples_[i - 1].handoff)
+                {
+                    continue;
+                }
+                net_yaw += wrapToPi(lock_samples_[i].yaw - lock_samples_[i - 1].yaw);
+            }
+            if (chord_length > 1e-3 && window_dt > 1e-4 && chord_length <= 2.0 * size_prior)
+            {
+                double dtheta = 2.0 * std::asin(
+                    std::min(1.0, chord_length / (2.0 * size_prior)));
+                dtheta *= (net_yaw < 0.0) ? -1.0 : 1.0;
+                omega = dtheta / window_dt;
+                sum_dtheta = dtheta;
+                sum_dt = window_dt;
+                used_steps = std::max(used_steps, 6);
+                slope_error = 0.0; // 由弦长直接解，没有"每步散布"这个自由度
+                spin_from_positions = true;
+                circle_phase_last = std::atan2(
+                    lock_samples_.back().position.y() - circle.cy,
+                    lock_samples_.back().position.x() - circle.cx);
+            }
+        }
         const double used_ratio =
             total_steps > 0 ? static_cast<double>(used_steps) / total_steps : 0.0;
         circle_step_ratio = used_ratio;
-        if (!yaw_rate_reliable && used_steps >= 5 && sum_dt > 0.0 &&
-            used_ratio >= config_.lock_circle_trusted_ratio)
+        if (!spin_from_positions && span_ok && !yaw_rate_reliable && used_steps >= 5 &&
+            sum_dt > 0.0 && used_ratio >= config_.lock_circle_trusted_ratio)
         {
             const double omega_positions = sum_dtheta / sum_dt;
             const double mean_dtheta = sum_dtheta / static_cast<double>(used_steps);
@@ -696,10 +826,31 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
     // "压根没扫开"这个事实本身很强。
     if (spin_from_positions)
     {
-        // 四块板共圆是整体几何约束，半径比单板先验/单帧弦长可靠得多
-        // （实拍 v4 的 3 号车：先验 0.20、圆拟合 0.18-0.22）。
-        radius = circle.radius;
-        radius_from_data = true;
+        // 四块板共圆是整体几何约束，短弧上弧长/圆心都稳，但**半径**是病态的：
+        // 实拍 v4 的 3 号车重锁时圆拟合给出 0.145、0.101（真值 ~0.20），
+        // 半径一旦被拉小，冻结之后整段跟踪的板位都偏 —— 末段瞄准点飞到
+        // 板外 0.24 m 就是这么来的。半径是"按板型的物理常数"，只在离先验
+        // 不太远时才采信数据值；超出容差就保留先验。
+        double size_prior = radius;
+        if (config_.radius_prior_from_size)
+        {
+            size_prior = (last.size == ArmorSize::Large) ? config_.radius_prior_large_m
+                                                         : config_.radius_prior_small_m;
+        }
+        const double tolerance = 0.3 * size_prior;
+        if (std::fabs(circle.radius - size_prior) <= tolerance)
+        {
+            // 只有"自由拟合可信"时才把半径当数据估计；钉住半径的那次拟合里
+            // circle.radius 就是先验本身，不能反过来宣称是数据估出来的
+            // （合成场景 A 的半径辨识测试靠这个）。
+            radius = used_fixed_radius ? size_prior : circle.radius;
+            radius_from_data = !used_fixed_radius;
+        }
+        else
+        {
+            radius = size_prior;
+            radius_from_data = false;
+        }
     }
     const double static_confidence = std::max(1.0, 0.5 * config_.static_rate_rad_s);
     bool is_static =
@@ -1080,6 +1231,14 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
             {
                 continue;
             }
+            // 只更新"跟踪中的那台车"的观测。不按 target_id 过滤的话，另一台车
+            // 的板只要离我们的预测板够近就会被当成自己的观测：实拍 v4 两台车
+            // 同框时，id=3 的滤波器被 id=1 的板反复拉走（瞄准点直接跳到另一台
+            // 车上 1.0 m，半径被撑到 0.34 m）。
+            if (target_id_ != 0 && world[i].target_id != target_id_)
+            {
+                continue;
+            }
             ArmorObservation observation;
             observation.position = world[i].position;
             observation.sigma_position_m =
@@ -1099,7 +1258,14 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                 const ArmorObservation &slot_observation = observation;
                 diagnostics_.best_gate_distance_m =
                     std::min(diagnostics_.best_gate_distance_m, distance);
-                if (!(distance <= config_.position_gate_m))
+                const bool within_gate = distance <= config_.position_gate_m;
+                // 重锚候选：状态已经漂出位置门，但观测仍可能是"同一台车的某块
+                // 板"（同 target_id）。此时先按这块板把相位+中心对齐，再更新；
+                // 不这样做的话位置门/ NIS 门会一起把状态锁死在错误相位上。
+                const bool realign_candidate =
+                    !within_gate && config_.single_plate_realign_m > 0.0 &&
+                    distance <= config_.single_plate_realign_gate_m;
+                if (!within_gate && !realign_candidate)
                 {
                     continue;
                 }
@@ -1115,7 +1281,7 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                 const bool bootstrapping =
                     diagnostics_.accepted_updates <
                     static_cast<std::uint64_t>(std::max(config_.bootstrap_updates, 0));
-                if (!bootstrapping && nis > config_.nis_gate)
+                if (!bootstrapping && !realign_candidate && nis > config_.nis_gate)
                 {
                     diagnostics_.best_gate_nis = std::min(diagnostics_.best_gate_nis, nis);
                     continue;
@@ -1140,6 +1306,32 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
             observation.position = chosen.position;
             observation.sigma_position_m =
                 std::hypot(chosen.sigma_position_m, config_.association_sigma_floor_m);
+        }
+        // 单板重锚：状态和这块板差得太多时，用观测把相位与中心直接对齐。
+        // 单板 + 钉死半径时 (中心, 相位) 只有一个自由度被位置观测约束，滤波器
+        // 可能整块板漂走（实拍 v4 自转车 f=1076 起状态相位偏 2.16 rad，四块
+        // 模型板全错位，瞄准圈停在另一台车上）。位置门 0.6 m 又刚好放它进来，
+        // NIS 门再拒掉更新 → 状态永远修不回来。
+        if (config_.single_plate_realign_m > 0.0 && ekf_.initialized())
+        {
+            const int count = config_.ekf.plate_count;
+            const Eigen::Vector3d predicted =
+                platePosition(ekf_.state(), best_slot, count);
+            if ((chosen.position - predicted).norm() > config_.single_plate_realign_m)
+            {
+                const double center_x = ekf_.state()(0);
+                const double center_y = ekf_.state()(2);
+                const double slot_phase =
+                    2.0 * kPi * static_cast<double>(best_slot) / static_cast<double>(count);
+                const double phase_target =
+                    std::atan2(center_y - chosen.position.y(), center_x - chosen.position.x());
+                const double theta_target = wrapToPi(phase_target - slot_phase);
+                const double delta_theta = wrapToPi(theta_target - ekf_.state()(6));
+                ekf_.rotatePhase(delta_theta);
+                const Eigen::Vector3d plate_after =
+                    platePosition(ekf_.state(), best_slot, count);
+                ekf_.shiftCenter(chosen.position - plate_after);
+            }
         }
         if (!ekf_.update(observation, best_slot))
         {
@@ -1171,6 +1363,7 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
         }
         used[static_cast<std::size_t>(best_observation)] = true;
         slot_of_observation[static_cast<std::size_t>(best_observation)] = best_slot;
+        last_updated_slot_ = best_slot;
         ++accepted;
         diagnostics_.last_nis = best_nis;
         if (chosen.has_yaw)
@@ -1178,7 +1371,11 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
             // 相位观测：板面法向直接约束车体 yaw（折叠掉 2pi/N 的换板歧义）。
             // 它和位置观测吃的是同一帧的同一块板，但因为折叠，换板不会把
             // 相位带歪——这正是位置关联最脆弱的地方。
-            if (config_.phase_update_enabled)
+            const bool phase_from_yaw =
+                config_.phase_update_enabled ||
+                (config_.phase_update_when_static && best_slot == last_updated_slot_ &&
+                 std::fabs(ekf_.state()(7)) < config_.static_rate_rad_s);
+            if (phase_from_yaw)
             {
                 // 反锚：先记下这块板在模型里的位置，改完 yaw 再把中心平移回去，
                 // 让板留在观测到的位置。单板可见时 (center, yaw) 是规范自由度，
@@ -1468,7 +1665,8 @@ PredictionResult RotatingArmorTracker::buildResult(const GimbalState &gimbal,
     // bias+latency，EKF 的四板模型相位比"把观测绕中心转一圈"更可靠（合成场景 G
     // 里 8 rad/s、50 ms 延迟下，观测外推 5 cm，EKF 8 mm）。
     const double prediction_horizon = bias + latency;
-    if (config_.aim_observation_hold_s > 0.0 && prediction_horizon <= 0.002 &&
+    if (config_.aim_observation_hold_s > 0.0 &&
+        (prediction_horizon <= 0.002 || config_.aim_observation_any_horizon) &&
         best_slot < static_cast<int>(last_seen_s_.size()))
     {
         const std::size_t slot_index = static_cast<std::size_t>(best_slot);
@@ -1485,7 +1683,8 @@ PredictionResult RotatingArmorTracker::buildResult(const GimbalState &gimbal,
             const double horizon = bias + latency + (timestamp_s - seen);
             const Eigen::Vector3d center(probe.state()(0), probe.state()(2), probe.state()(4));
             const double omega = probe.state()(7);
-            if (horizon > 0.0 && std::isfinite(omega) && std::fabs(omega) > 1.0e-3)
+            if (config_.aim_observation_extrapolate && horizon > 0.0 && std::isfinite(omega) &&
+                std::fabs(omega) > 1.0e-3)
             {
                 const Eigen::Vector3d relative = plate - center;
                 const double angle = omega * horizon;
@@ -1578,6 +1777,18 @@ PredictionResult RotatingArmorTracker::buildResult(const GimbalState &gimbal,
             aim_smoothed_world_ = plate;
             aim_smoothed_s_ = timestamp_s;
             aim_smoothed_valid_ = true;
+        }
+    }
+    // 长时间没有观测：冻结在最后看到的板心上，不用速度外推（外推会让瞄准圈
+    // 在整段丢失里飘出去）。
+    if (config_.aim_freeze_after_s > 0.0 && best_slot >= 0 &&
+        best_slot < static_cast<int>(last_seen_s_.size()))
+    {
+        const double seen = last_seen_s_[static_cast<std::size_t>(best_slot)];
+        if (seen >= 0.0 && timestamp_s - seen > config_.aim_freeze_after_s &&
+            last_seen_position_[static_cast<std::size_t>(best_slot)].allFinite())
+        {
+            plate = last_seen_position_[static_cast<std::size_t>(best_slot)];
         }
     }
     diagnostics_.predicted_aim_world = plate;

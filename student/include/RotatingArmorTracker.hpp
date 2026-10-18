@@ -77,7 +77,8 @@ struct TrackerConfig
     // 四块板共圆 => 圆拟合给 (c, R)，相邻板心的切向位移/半径给 omega。
     double lock_circle_residual_m{0.05};              // 圆拟合 RMS 残差超过它不可信
     double lock_circle_max_step_ratio{0.25};          // 单步位移 > 0.25R 视为换板，跳过
-    double lock_circle_trusted_ratio{0.35};           // 有效步数占比低于它不采信位置速率
+    double lock_circle_trusted_ratio{0.35};
+    double lock_circle_min_span_rad{1.2};           // 有效步数占比低于它不采信位置速率
     double static_rate_rad_s{1.2};            // |omega| 低于它判为"不转"（Static）
 
     // === 关联 / 门限 ===
@@ -119,6 +120,17 @@ struct TrackerConfig
     // 因为位置更新与相位更新在"哪个槽位"这件事上互相拉扯。能力保留、单测覆盖
     // RotatingArmorEkf::updatePhase 本身；等有"按槽位一致"的写法再默认打开。
     bool phase_update_enabled{false};
+    // 静止目标（|omega| < static_rate_rad_s）且同一块板连续可见时，用板面法向
+    // 约束车体 yaw。静止时法向没有旋转模糊，是干净量测；单板+钉死半径时
+    // (center, yaw) 是规范自由度，不用法向相位就会自由漂移（实拍 v4 静止车
+    // 1400 帧时相位偏 1.08 rad，另外三块模型板飞到车外）。
+    bool phase_update_when_static{true};
+    // 单板重锚：更新后状态里的板离观测还超过这个距离（相位漂了一整块板 / NIS
+    // 门锁死）时，直接用这块板把相位+中心对齐。0 表示关闭。
+    double single_plate_realign_m{0.0};
+    // 重锚候选的最大距离：状态漂到位置门外时，只要还在这个范围内就当成"重新
+    // 捕获同一块板"（跳过 NIS 门，先重锚再更新）。超过它说明观测根本不是这台车。
+    double single_plate_realign_gate_m{1.5};
     double phase_update_sigma_rad{0.12};
     // 相位更新后是否"反锚"（把中心平移回去、让板留在原地）。单板可见时
     // (中心, 相位) 是规范自由度；但中心已经由位置更新约束住时，反锚会把
@@ -174,6 +186,16 @@ struct TrackerConfig
     double forced_omega_rad_s{std::numeric_limits<double>::quiet_NaN()};
     // 瞄准点直接用"最近一次观测到的板心"的时间窗（秒）。0 = 关闭，退回 EKF。
     double aim_observation_hold_s{0.012};
+    // 允许"新鲜观测外推"在任意预测时域下使用（默认只在零时域时用 EKF 四板模型）。
+    // 实拍 v4 末段状态落后 0.19 m、而观测是 0~6 ms 前的真值，外推量只有 omega*30 ms。
+    bool aim_observation_any_horizon{false};
+    // 观测外推时是否按 omega 转动：omega 不可靠时（旋转模糊/换板）外推会把
+    // 瞄准点推得比"原地不动"更远，关掉更稳。
+    bool aim_observation_extrapolate{true};
+    // 目标已经这么久没被观测到时，不再用状态外推（速度项会把瞄准点推着满场走），
+    // 直接冻结在最后一次看到的那块板上。实拍 v4 有 100+ 帧的整段丢失，外推
+    // 会让瞄准圈飘到另一台车上。
+    double aim_freeze_after_s{0.30};
     // 瞄准点的一阶平滑系数（0 = 不平滑）。观测有 ~35 mm 的帧间抖动，直接送
     // 云台会抖；按 omega 做运动补偿后再做一阶平滑，不引入相位滞后。
     double aim_smoothing_alpha{0.0};
@@ -292,6 +314,8 @@ private:
         bool ok{false};
     };
     static CircleFit fitArmorCircle(const std::deque<LockSample>& samples);
+    static CircleFit fitCenterFixedRadius(const std::deque<LockSample>& samples, double radius,
+                                          const CircleFit& initial);
 
     // 观测 -> 跟踪系（含剔除明显非法的观测）。
     void collectWorldObservations(const std::vector<ArmorPose>& observations,
@@ -378,6 +402,9 @@ private:
     int missed_frames_{0};
     int other_id_streak_{0};
     int centered_streak_{0};
+    // 上一次被接受更新的槽位：用来判断"同一块板连续可见"（换板时不能用板面法向
+    // 约束车体 yaw）。
+    int last_updated_slot_{-1};
 
     std::deque<LockSample> lock_samples_{};
     // 每个 slot 一份：(timestamp, 解缠后的法向 yaw)，用于估计观测到的角速度。
