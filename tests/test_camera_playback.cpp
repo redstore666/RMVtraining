@@ -876,7 +876,7 @@ int main(int argc, char **argv)
             {
                 const auto &st = tracker.ekf().state();
                 std::printf("[trace] f=%d t=%.3f det=%zu init=%d phase=%d id=%d ok=%llu rej=%d miss=%d "
-                            "relock=%d ls=%d omega=%.2f wobs=%+.2f±%.2f n=%d/%d R=%.3f yaw=%.2f nis=%.1f why=%s stab=%s gd=%.2f gn=%.0f\n",
+                            "relock=%d ls=%d omega=%.2f wobs=%+.2f±%.2f n=%d/%d R=%.3f yaw=%.2f mode=%s nis=%.1f why=%s stab=%s gd=%.2f gn=%.0f\n",
                             frame_index, time_s, poses.size(), static_cast<int>(tracker.initialized()),
                             static_cast<int>(diagnostics.phase), diagnostics.target_id,
                             static_cast<unsigned long long>(diagnostics.accepted_updates),
@@ -884,7 +884,8 @@ int main(int argc, char **argv)
                             diagnostics.relock_count, diagnostics.lock_samples, st(7),
                             diagnostics.rate_obs_rad_s, diagnostics.rate_obs_sigma_rad_s,
                             diagnostics.rate_obs_samples, diagnostics.rate_window_samples,
-                            st(8), st(6), diagnostics.last_nis,
+                            st(8), st(6), rotating_armor::motionModeName(diagnostics.motion),
+                            diagnostics.last_nis,
                             diagnostics.last_reject.c_str(), diagnostics.stability.c_str(),
                             diagnostics.best_gate_distance_m, diagnostics.best_gate_nis);
                         if (diagnostics.phase == rotating_armor::LockPhase::Tracking)
@@ -1038,7 +1039,10 @@ int main(int argc, char **argv)
         }
 
             final_prediction = prediction;
-            ekf_accepted = static_cast<long>(diagnostics.accepted_updates);
+            // accepted_updates 会在 dropTarget()->reset() 里清零，直接取末值会
+            // 只统计最后一段（v1 有 1 次重锁，曾把它显示成"接收 84"而实际每帧
+            // 都在更新）；这里按帧累计本帧真正吃进去的更新数。
+            ekf_accepted += diagnostics.updates_this_frame;
             ekf_rejected += diagnostics.rejected_this_frame;
             if (diagnostics.phase == rotating_armor::LockPhase::Tracking)
             {
@@ -1485,8 +1489,9 @@ int main(int argc, char **argv)
         std::cout << "\n-- EKF 汇总 --\n";
         std::cout << "  首次 Tracking 帧: " << ekf_first_stable_frame
                   << "，Stable 帧数: " << ekf_stable_frames << "/" << frames_processed << "\n";
-        std::cout << "  接收更新 " << ekf_accepted << "，被拒 " << ekf_rejected
-                  << "，重锁 " << ekf_relock_count << "，目标切换 " << ekf_target_switches << "\n";
+        std::cout << "  接收更新 " << ekf_accepted << "，未用于更新的观测 " << ekf_rejected
+                  << "（含其它目标的板），重锁 " << ekf_relock_count
+                  << "，目标切换 " << ekf_target_switches << "\n";
         std::cout << "  末态阶段: " << phaseName(final_diagnostics.phase)
                   << "，锁定半径 " << final_diagnostics.locked_radius_m
                   << "（" << (final_diagnostics.radius_from_data ? "数据估计" : "先验") << "）";

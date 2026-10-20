@@ -116,6 +116,9 @@ struct TrackerConfig
     double lock_circle_trusted_ratio{0.35};
     double lock_circle_min_span_rad{1.2};           // 有效步数占比低于它不采信位置速率
     double static_rate_rad_s{1.2};            // |omega| 低于它判为"不转"（Static）
+    // 运动类型诊断（TrackerDiagnostics::motion）的平移门限：车心速度超过它
+    // 且转速不够大时报 Translating。只影响诊断显示，不参与任何滤波。
+    double motion_translating_speed_m_s{0.30};
 
     // === 关联 / 门限 ===
     double position_gate_m{0.60}; // 单板位置门限（含中心先验不确定的余量）
@@ -278,10 +281,39 @@ enum class LockPhase : std::uint8_t
     Tracking,     // EKF 已初始化
 };
 
+// 由状态量自己判出来的运动类型（不是调用方声明的）。
+// 判据只用 EKF 估计：|omega| 与 |v| 各自的门限，和"有没有证据"无关——
+// 证据够不够是 rate_obs_* 的事，这里回答"车现在在干什么"。
+enum class MotionMode : std::uint8_t
+{
+    Unknown = 0, // 还没有状态
+    Static,      // |v| < static_speed_m_s 且 |omega| < static_rate_rad_s
+    Translating, // 平移为主（|v| 够大、|omega| 不够）
+    Spinning,    // 自转为主
+};
+
+inline const char *motionModeName(MotionMode mode)
+{
+    switch (mode)
+    {
+    case MotionMode::Static:
+        return "static";
+    case MotionMode::Translating:
+        return "trans";
+    case MotionMode::Spinning:
+        return "spin";
+    case MotionMode::Unknown:
+    default:
+        return "unknown";
+    }
+}
+
 // 每帧诊断量。只给测试与 Web Debug 用，不进通信协议。
 struct TrackerDiagnostics
 {
     LockPhase phase{LockPhase::Idle};
+    MotionMode motion{MotionMode::Unknown};
+    double speed_m_s{0.0};
     int lock_samples{0};
     int last_lock_samples{0};
     double locked_radius_m{0.0};

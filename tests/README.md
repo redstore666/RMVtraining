@@ -265,7 +265,11 @@ P50≈8），不是拍脑袋。
    就喂一次 `omega=0` 的弱伪量测（sigma 2.0），把 omega 按住在 0。
 
 `--trace` 里的 `wobs=±n=` 现在写成 `n=本帧斜率样本数/窗口样本数`，`rate_window_samples=0`
-表示这一帧根本没有可续接的观测（不是拟合失败）。回归测试见
+表示这一帧根本没有可续接的观测（不是拟合失败）。`mode=static/trans/spin` 是
+`TrackerDiagnostics::motion`：每帧从状态量读出来的运动类型（`|omega| >= static_rate_rad_s`
+→ spin；否则 `|v| >= motion_translating_speed_m_s` → trans；否则 static），
+俯视图 HUD 第三行也会显示同一个词。它只是"现在认为车在干什么"，说明可信度的是
+`rate_obs_sigma_rad_s`，两者别混。回归测试见
 `test_rotating_armor_tracker` 的 G 组（2/4/6/8 rad/s）与 H 组（静止/平移/慢转，
 判据是"omega 落在真值附近"而不是"命中率"）。
 

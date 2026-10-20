@@ -1,5 +1,7 @@
 #include "TopDownView.hpp"
 
+#include "RotatingArmorTracker.hpp"
+
 #include "AimGeometry.hpp"
 
 #include <algorithm>
@@ -578,8 +580,11 @@ const cv::Mat &TopDownView::render(const TopDownFrame &frame)
         const State &state = frame.state;
         lines.push_back(fmt("center x %+7.3f  y %+7.3f   vx %+6.2f  vy %+6.2f m/s", state(0),
                             state(2), state(1), state(3)));
-        lines.push_back(fmt("spin   omega %+7.3f rad/s   R %.3f m   |v| %.2f m/s", state(7),
-                            state(8), std::hypot(state(1), state(3))));
+        // 运动类型是 EKF 自己从状态量判的（Spinning/Translating/Static），
+        // 放在这一行是为了回答"它现在认为车在干什么"，而不是只报数字。
+        lines.push_back(fmt("spin   omega %+7.3f rad/s   R %.3f m   |v| %.2f m/s   %s", state(7),
+                            state(8), std::hypot(state(1), state(3)),
+                            motionModeName(diagnostics.motion)));
         if (result.state != TrackingState::NoTarget)
         {
             lines.push_back(fmt("aim    slot %d  yaw %+7.1f  pitch %+6.1f  d %.2f m   fire %s "

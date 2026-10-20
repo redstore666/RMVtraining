@@ -1835,6 +1835,24 @@ PredictionResult RotatingArmorTracker::buildResult(const GimbalState &gimbal,
     }
     const State &state = ekf_.state();
 
+    // 运动类型完全由状态量判：这不是"声明"，是每帧从估计值读出来的结论，
+    // 转速可信度看 rate_obs_sigma_rad_s，别把两者混在一起。
+    const double speed = std::hypot(state(1), state(3));
+    diagnostics_.speed_m_s = speed;
+    const double spin = std::fabs(state(7));
+    if (spin >= config_.static_rate_rad_s)
+    {
+        diagnostics_.motion = MotionMode::Spinning;
+    }
+    else if (speed >= config_.motion_translating_speed_m_s)
+    {
+        diagnostics_.motion = MotionMode::Translating;
+    }
+    else
+    {
+        diagnostics_.motion = MotionMode::Static;
+    }
+
     // 新鲜度按"距上次被接收的更新多少秒"判，不按丢帧数：相机帧率变化时
     // 帧数门限的含义会漂移（166fps 下 2 帧只有 12ms，实拍里会长期卡在 Unstable）。
     const double stale_s = has_accept_ ? (timestamp_s - last_accept_s_) : 1e9;
