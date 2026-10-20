@@ -1587,6 +1587,42 @@ int main(int argc, char **argv)
                     draw_body(ekf_state, diagnostics.aim_slot, cv::Scalar(235, 120, 60),
                               cv::Scalar(0, 200, 255), 2, cv::Scalar(-1, -1, -1),
                               active_tracker);
+                    // 把"整车模型认为的旋转圆"投到图上：圆心 = 状态里的 (cx, cy, z)，
+                    // 半径 = 状态里的 R。用户说的"绿色板旋转圆心偏上"可以直接用它
+                    // 对照：这个圈应该正好套住绿色检测框转一圈扫过的那些位置。
+                    {
+                        std::vector<cv::Point> ring;
+                        bool ring_ok = true;
+                        const double ring_r = ekf_state(8);
+                        for (int k = 0; k <= 24; ++k)
+                        {
+                            const double th = 2.0 * 3.141592653589793 * k / 24.0;
+                            const Eigen::Vector3d p_world(
+                                ekf_state(0) + ring_r * std::cos(th),
+                                ekf_state(2) + ring_r * std::sin(th),
+                                ekf_state(4) + (active_tracker != nullptr
+                                                    ? active_tracker->slotZOffsetMean()
+                                                    : 0.0));
+                            const Eigen::Vector3d p_gimbal = rotating_armor::toGimbal(gimbal, p_world);
+                            const cv::Vec3d p_camera = gimbalToCameraPoint(
+                                camera, cv::Vec3d(p_gimbal.x(), p_gimbal.y(), p_gimbal.z()));
+                            if (!(p_camera[2] > 0.3))
+                            {
+                                ring_ok = false;
+                                break;
+                            }
+                            std::vector<cv::Point3d> one{cv::Point3d(p_camera[0], p_camera[1], p_camera[2])};
+                            std::vector<cv::Point2d> one_px;
+                            cv::projectPoints(one, cv::Vec3d(0, 0, 0), cv::Vec3d(0, 0, 0),
+                                              camera.camera_matrix, cv::noArray(), one_px);
+                            ring.emplace_back(cv::Point(cvRound(one_px[0].x), cvRound(one_px[0].y)));
+                        }
+                        if (ring_ok && ring.size() > 2)
+                        {
+                            cv::polylines(frame, std::vector<std::vector<cv::Point>>{ring}, false,
+                                          cv::Scalar(255, 200, 0), 1, cv::LINE_AA);
+                        }
+                    }
                 }
                 // 多目标：其它车也画出来（细线、紫灰），一眼看出"两台都被跟住了"。
                 for (const rotating_armor::TopDownFrame &body : extra_bodies)
