@@ -179,6 +179,9 @@ struct Rig
     double sigma_position_m{0.01};
     // 传给跟踪器的"本帧视觉处理延迟"，用于验证预测时域包含它。
     double latency_s{0.0};
+    // 最近一帧生成的观测（跟踪器已经消费过）。给俯视图之类的可视化用，
+    // 这样它们不必重造一遍"真值 -> 观测"的流程。
+    std::vector<ArmorPose> last_observations{};
 
     // 合成场景要验证"半径从坏初值收敛"，所以默认关掉实时跟踪用的半径钉死。
     static rotating_armor::TrackerConfig defaultConfig()
@@ -241,6 +244,7 @@ struct Rig
         {
             observations = observe(plates, gimbal_state, id, rng, sigma_position_m);
         }
+        last_observations = observations;
         return tracker.step(observations, gimbal_state, time_s, latency_s);
     }
 };

@@ -60,6 +60,8 @@ Web Debug 在 `http://127.0.0.1:8080`。相机→云台外参尚未标定，`cam
 | `test_batch 目录 --red` | 批量检出率评估（调参/回归用） |
 | `test_solve 图 --red` | 检测→PnP 全链路，打印距离/角度/重投影误差 |
 | `test_camera` | 相机取流自检（ctest camera_grab） |
+| `test_ekf_viewer [--world] [--out DIR]` | EKF 俯视图（上帝视角）演示：红点车心 + 四块模型板 + 绿点实测板 + 瞄准射线；`--no-show --out DIR` 无显示环境导出 PNG |
+| `test_camera_playback v.avi --red --ekf --topdown` | 视频回放 + 俯视图窗口（`--topdown-world` 固定原点、`--topdown-out DIR` 逐帧落盘） |
 | `calib_capture` / `calibrate_intrinsics` | 标定采集 / 内参解算 |
 
 常用环境变量（检测器）：`RMV_DET_MODEL=yolo11` 切备选模型；

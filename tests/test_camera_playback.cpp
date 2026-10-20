@@ -21,6 +21,11 @@
 //   --csv PATH       逐帧导出 CSV（表头见文件第一行）
 //   --bias S         模拟控制器前馈补偿（秒），写入云台快照的 prediction_bias_s
 //   --config PATH    相机参数文件（默认 config/camera.yaml，或 RMV_CAMERA_CONFIG）
+//   --topdown        额外开一个"EKF 俯视图"窗口（红点车心 + 四块模型板 + 绿点实测板，
+//                    风格见 tmp/example.jpg）；跟随车心、自动缩放
+//   --topdown-world  俯视图改成固定原点（云台）视图，按 --topdown-ppm 缩放（默认 200）
+//   --topdown-ppm P  固定原点视图的像素/米（默认 200）
+//   --topdown-out D  把俯视图逐帧写成 D/t%06d.png（无需 --headless，也可不显示）
 //
 // 按键（窗口模式）：ESC/q 退出 | 空格 暂停/继续 | s 保存当前帧 | m 打印 EKF 状态
 //
@@ -32,6 +37,7 @@
 // 的片段——所以每帧都统计画面运动量（CSV 的 motion 列），用它挑片段。
 #include "AutoAimTypes.hpp"
 #include "RotatingArmorTracker.hpp"
+#include "TopDownView.hpp"
 #include "StudentTasks.hpp"
 #include "WebLogger.hpp"
 #include <opencv2/calib3d.hpp>
@@ -174,6 +180,10 @@ namespace
     double handoff_scale{2.5};
     double phase_sigma{0.12};
     std::string dump_csv;
+    bool topdown{false};
+    bool topdown_world{false};
+    double topdown_ppm{200.0};
+    std::string topdown_out;
     };
 
     bool parseArgs(int argc, char **argv, Args &args)
@@ -345,6 +355,23 @@ namespace
             {
                 args.lock_age = std::atof(next("--lock-age").c_str());
             }
+            else if (arg == "--topdown")
+                args.topdown = true;
+            else if (arg == "--topdown-world")
+            {
+                args.topdown = true;
+                args.topdown_world = true;
+            }
+            else if (arg == "--topdown-ppm")
+            {
+                args.topdown_ppm = std::atof(next("--topdown-ppm").c_str());
+                args.topdown = true;
+            }
+            else if (arg == "--topdown-out")
+            {
+                args.topdown_out = next("--topdown-out");
+                args.topdown = true;
+            }
             else if (arg == "--config")
                 args.config_path = next("--config");
             else
@@ -360,7 +387,8 @@ namespace
     {
         std::cerr << "用法: " << program << " <video> [--red|--blue] [--ekf] [--headless]\n"
                   << "        [--stride N] [--start N] [--end N] [--max-frames N]\n"
-                  << "        [--wait MS] [--csv PATH] [--bias S] [--config PATH] [--dump-every N]\n";
+                  << "        [--wait MS] [--csv PATH] [--bias S] [--config PATH] [--dump-every N]\n"
+                  << "        [--topdown] [--topdown-world] [--topdown-ppm P] [--topdown-out DIR]\n";
     }
 
     const char *phaseName(rotating_armor::LockPhase phase)
@@ -608,6 +636,31 @@ int main(int argc, char **argv)
     const std::string window = "camera playback";
     if (show)
         cv::namedWindow(window, cv::WINDOW_NORMAL);
+
+    // ---- 俯视图（Top-Down）：只是"把 EKF 结果画出来"，不参与任何估计逻辑 ----
+    const bool topdown_enabled = args.topdown && args.ekf;
+    if (args.topdown && !args.ekf)
+    {
+        std::cerr << "[俯视图] 需要同时给 --ekf，已忽略 --topdown\n";
+    }
+    rotating_armor::TopDownOptions topdown_options;
+    topdown_options.follow_target = !args.topdown_world;
+    topdown_options.pixels_per_meter = args.topdown_ppm;
+    rotating_armor::TopDownView topdown_view(topdown_options);
+    const std::string topdown_window = "EKF top-down";
+    if (topdown_enabled && show)
+        cv::namedWindow(topdown_window, cv::WINDOW_AUTOSIZE);
+    if (topdown_enabled && !args.topdown_out.empty())
+    {
+        std::error_code mkdir_error;
+        std::filesystem::create_directories(args.topdown_out, mkdir_error);
+        if (mkdir_error)
+        {
+            std::cerr << "无法创建俯视图目录 " << args.topdown_out << ": "
+                      << mkdir_error.message() << "\n";
+            return 1;
+        }
+    }
 
     int led_yaw_updates = 0;
     int roi_recovered = 0;
@@ -1253,6 +1306,43 @@ int main(int argc, char **argv)
                                   cv::noArray(), c_proj);
                 cv::drawMarker(frame, c_proj[0], cv::Scalar(255, 0, 255), cv::MARKER_CROSS, 20, 2);
             }
+        // ---- 俯视图：把 EKF 状态/诊断 + 本帧实测板画成一张上帝视角图 ----
+        if (topdown_enabled)
+        {
+            rotating_armor::TopDownFrame topdown_frame;
+            topdown_frame.has_state = tracker.initialized();
+            if (topdown_frame.has_state)
+                topdown_frame.state = tracker.ekf().state();
+            topdown_frame.diagnostics = diagnostics;
+            topdown_frame.result = prediction;
+            topdown_frame.gimbal = gimbal;
+            const Eigen::Matrix3d gimbal_to_world = rotating_armor::gimbalToWorld(gimbal);
+            for (const ArmorPose &pose : poses)
+            {
+                if (pose.detection.target_id == 0)
+                    continue;
+                rotating_armor::TopDownObservation observation;
+                observation.position = gimbal_to_world *
+                                       Eigen::Vector3d(pose.position_gimbal_m[0],
+                                                       pose.position_gimbal_m[1],
+                                                       pose.position_gimbal_m[2]);
+                observation.normal_yaw =
+                    rotating_armor::wrapToPi(pose.armor_yaw + gimbal.yaw);
+                observation.target_id = pose.detection.target_id;
+                topdown_frame.observations.push_back(observation);
+            }
+            const cv::Mat canvas = topdown_view.render(topdown_frame).clone();
+            if (!args.topdown_out.empty())
+            {
+                char path[512];
+                std::snprintf(path, sizeof(path), "%s/t%06d.png", args.topdown_out.c_str(),
+                              frame_index);
+                cv::imwrite(path, canvas);
+            }
+            if (show)
+                cv::imshow(topdown_window, canvas);
+        }
+
         // ---- 落盘标注帧（给报告/答辩留证据）----
         if (args.dump_every > 0 && frame_index % args.dump_every == 0)
         {
@@ -1348,6 +1438,8 @@ int main(int argc, char **argv)
     std::cout << "\n================ 回放汇总 ================\n";
     std::cout << "处理帧数 " << frames_processed << "（有目标 " << frames_with_target
               << "，空帧 " << frames_empty << "）\n";
+    if (topdown_enabled && !args.topdown_out.empty())
+        std::cout << "俯视图已逐帧写入 " << args.topdown_out << "/t%06d.png\n";
     std::cout << "耗时: detect " << (frames_processed > 0 ? detect_ms_sum / frames_processed : 0.0)
               << " ms/帧，solve " << (frames_processed > 0 ? solve_ms_sum / frames_processed : 0.0)
               << " ms/帧\n";

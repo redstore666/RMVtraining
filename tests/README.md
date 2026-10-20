@@ -205,6 +205,35 @@ P50≈8），不是拍脑袋。
 ./build/test_camera_playback tmp/v4.avi --red --ekf --csv build/v4.csv         # 导出观测/EKF
 ```
 
+俯视图（上帝视角）调试：把 EKF 结果画成一张 800x800 的图（风格见 `tmp/example.jpg`），
+用来一眼看出"状态和实测板对不对得上、瞄准点在哪、开火判据还差多少度"：
+
+```bash
+./build/test_ekf_viewer                                   # 合成旋转目标，窗口实时看
+./build/test_ekf_viewer --no-show --out build/topdown_demo  # 无显示环境：逐帧导出 PNG
+./build/test_ekf_viewer --world --range 1.6 --ppm 200      # 固定原点（云台）视图
+./build/test_camera_playback tmp/v4.avi --red --ekf --topdown            # 真视频 + 俯视图窗口
+./build/test_camera_playback tmp/v4.avi --red --ekf --headless \
+        --topdown-out build/topdown_v4                    # 真视频：俯视图逐帧落盘
+```
+
+图上元素：红点 = EKF 车体中心；四根蓝条 = 用 `body_yaw/R` 推出来的模型装甲板；
+黄边 = 当前瞄准板；绿点/绿条 = 本帧 PnP 实测板心（和蓝条错开就是视觉抖动或状态偏差）；
+品红十字 + 虚线 = 预测瞄准点与从云台原点出发的瞄准射线；灰虚线 = 云台当前光轴，
+两根线的夹角就是 `fire_allowed` 里的 yaw 误差。左上角打印状态机、中心/速度/角速度/R、
+瞄准槽位与距离、观测数/NIS/观测噪声，底部是图例与比例尺（`--world` 固定原点时
+按 `--ppm` 缩放，目标超出视野会自动缩小；跟随模式则按车体大小自动缩放）。
+
+实现上分成两层：`include/TopDownView.hpp` + `src/TopDownView.cpp`（只读
+`TrackerDiagnostics`/`PredictionResult`/`EKF State`，不碰跟踪逻辑，库名 `topdown_view`），
+两个调用方分别是 `tests/test_ekf_viewer.cpp`（合成真值）和 `test_camera_playback --topdown`。
+截图：![跟随模式](../docs/figures/topdown_follow.png)
+![固定原点](../docs/figures/topdown_world.png)
+![真视频回放](../docs/figures/topdown_replay.png)
+
+坐标映射只有一处：`px = w/2 - (wy-cy)*ppm`、`py = h/2 - (wx-cx)*ppm`，即画布向上 = +x（前方）、
+向左 = +y（左方），车体自转在图上呈逆时针。
+
 `--trace` 每帧打印 `phase`（0=Idle/1=Collecting/2=Tracking）、锁定编号、累计接收
 更新数、本帧拒绝数、丢帧数、重锁次数、状态量 `omega/R/yaw`、最近 NIS、
 `why`（最近一次拒绝原因）与 `stab`（本帧 `Stable/Unstable` 的判定理由：

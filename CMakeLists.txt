@@ -54,6 +54,14 @@ target_include_directories(rotating_armor_ekf PUBLIC
 )
 target_link_libraries(rotating_armor_ekf PUBLIC rotating_armor_model Eigen3::Eigen opencv_core)
 
+# EKF 俯视图（Top-Down）渲染器：把 EKF 结果画成 tmp/example.jpg 风格的调试图
+# （红点车心 + 四块蓝色模型板 + 绿色实测板 + 瞄准射线）。只读 EKF 结果、不碰跟踪
+# 逻辑，也不进 training_core —— 主程序 rmv_training 的依赖与行为保持不变。
+add_library(topdown_view STATIC
+    src/TopDownView.cpp
+)
+target_link_libraries(topdown_view PUBLIC rotating_armor_ekf opencv_imgproc)
+
 add_library(training_core STATIC
     src/AppSupport.cpp
     src/AutoAimTypes.cpp
@@ -162,6 +170,14 @@ if(BUILD_TESTING)
     add_executable(test_ekf_pipeline tests/test_ekf_pipeline.cpp)
     target_link_libraries(test_ekf_pipeline PRIVATE training_core)
     add_test(NAME ekf_pipeline COMMAND test_ekf_pipeline)
+
+    # 俯视图冒烟测试：合成一圈旋转车体，确认渲染器能跑完并落盘
+    # （不开窗口、不连相机，几秒内完成；只验证"能画、不崩、状态收敛"）。
+    add_test(NAME ekf_viewer_smoke
+             COMMAND test_ekf_viewer --no-show --frames 40
+                     --out ${CMAKE_CURRENT_BINARY_DIR}/topdown_smoke)
+    set_tests_properties(ekf_viewer_smoke PROPERTIES
+        PASS_REGULAR_EXPRESSION "phase=tracking")
 endif()
 
 # ============ 标定工具 ============
@@ -204,11 +220,17 @@ target_include_directories(test_batch PRIVATE ${OpenCV_INCLUDE_DIRS})
 # 离线回放：把录制的视频喂进完整链路（检测 -> PnP -> 可选 EKF），用于在没有
 # 相机现场时评估视觉识别质量，以及用真实序列做 EKF 关联/锁定/预测的离线调参。
 add_executable(test_camera_playback tests/test_camera_playback.cpp)
-target_link_libraries(test_camera_playback PRIVATE training_core ${OpenCV_LIBS})
+target_link_libraries(test_camera_playback PRIVATE training_core topdown_view ${OpenCV_LIBS})
 if(ENABLE_WEB_DEBUG)
     target_link_libraries(test_camera_playback PRIVATE web_debug)
 endif()
 target_include_directories(test_camera_playback PRIVATE ${OpenCV_INCLUDE_DIRS})
+
+# EKF 俯视图演示：合成真值绕云台旋转，实时看状态收敛与实测板对齐
+# （不连相机、不需要模型文件和视频；--out 可在无显示环境导出 PNG）。
+add_executable(test_ekf_viewer tests/test_ekf_viewer.cpp)
+target_link_libraries(test_ekf_viewer PRIVATE topdown_view ${OpenCV_LIBS})
+target_include_directories(test_ekf_viewer PRIVATE ${OpenCV_INCLUDE_DIRS})
 
 # 实时相机取流 + 装甲板检测（相机必须已连接）。
 add_executable(test_camera_live tests/test_camera_live.cpp)
