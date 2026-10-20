@@ -157,9 +157,18 @@ struct TrackerConfig
     // 对旋转目标反而变差（99 -> 125~140 mm），v1 只从 412 降到 380 mm。
     // 原因是锁定时已经用双板弦长定过 R（reinitializeFromPair），运行期再连续
     // 拉 R 会跟位置更新抢"中心该往哪挪"，旋转目标的 yaw 噪声把 R 拖偏。
-    bool pair_radius_update_enabled{false};
+    // 用同帧两块板（弦长 + 法向差）持续修正半径。默认打开：实拍 v4 的 3 号
+    // 道具半径 0.28，按板型先验 0.20 钉死时模型四块板整体小一圈，第二块观测
+    // 到模型板的中位误差 12.4 cm；打开后降到 6.8 cm。自由半径更新（freeze_radius
+    // = false，位置残差驱动）仍然默认关闭——那个才会塌。
+    bool pair_radius_update_enabled{true};
     double radius_update_sigma_m{0.06};
+    double radius_update_alpha{0.25}; // freeze_radius 时的低通系数（每帧最多靠拢 1/4）
     double radius_update_min_chord_m{0.08}; // 太近的两块板（法向几乎平行）弦长除噪会爆
+    // 半径更新只认两种构型：法向差 ~90°（相邻，弦 = √2·R）或 ~180°（对置，弦 = 2R）。
+    // 阈值取在两者中间偏实测噪声：< 50° 当同一块板重复检出丢掉。
+    double radius_update_adjacent_yaw_rad{0.87};  // 50°
+    double radius_update_opposite_yaw_rad{2.27};  // 130°
 
     // 板面法向当"相位观测"塞进滤波器（折叠掉 2pi/N）。实拍小目标法向抖 0.05~0.15
     // rad，取 0.12；关掉它就退回"yaw 只靠位置间接约束"。
@@ -532,6 +541,8 @@ private:
     // 上一次被接受更新的槽位：用来判断"同一块板连续可见"（换板时不能用板面法向
     // 约束车体 yaw）。
     int last_updated_slot_{-1};
+    int radius_updates_{0};   // 本次锁定后已用弦长修正过几次半径
+    int static_streak_{0};    // 连续判为 static 的帧数（半径学习只信它）
 
     std::deque<LockSample> lock_samples_{};
     // 每个 slot 一份：(timestamp, 解缠后的法向 yaw)，用于估计观测到的角速度。

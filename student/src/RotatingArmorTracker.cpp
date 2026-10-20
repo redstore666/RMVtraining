@@ -241,6 +241,7 @@ void RotatingArmorTracker::reset()
     target_id_ = 0;
     aim_slot_ = -1;
     last_seen_s_.fill(-1.0);
+    radius_updates_ = 0;
     aim_smoothed_valid_ = false;
     aim_smoothed_s_ = -1.0;
     aim_history_count_.fill(0);
@@ -571,7 +572,13 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
             }
             const Eigen::Vector2d pi2(world[i].position.x(), world[i].position.y());
             const Eigen::Vector2d pj2(world[j].position.x(), world[j].position.y());
-            const double candidate_radius = (pi2 - pj2).norm() / ndiff.norm();
+            // 用"模型构型"的半角而不是实测法向差：法向本身有 ±20° 噪声，直接
+            // 除 |n_i-n_j| 会把半径算大（实拍 v4：弦 0.40、法向差 80° → 0.31，
+            // 而相邻构型给出的真值是 0.283）。四板模型只有相邻(90°)和对置(180°)。
+            const double dpsi_pair = std::fabs(foldPeriod(world[j].yaw - world[i].yaw, 2.0 * kPi));
+            const double half_pair =
+                dpsi_pair > config_.radius_update_opposite_yaw_rad ? 0.5 * kPi : 0.25 * kPi;
+            const double candidate_radius = (pi2 - pj2).norm() / (2.0 * std::sin(half_pair));
             if (candidate_radius < config_.radius_min_m ||
                 candidate_radius > config_.radius_max_m)
             {
@@ -675,7 +682,11 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
     //     omega 的大小和方向。换板那一步位移 ~2R，用步长门限剔除。
     // 半径先按板型取物理先验；自由三参数拟合只在它离先验不远时才采信半径值，
     // 否则改用"钉住半径、只解圆心"的拟合（短弧上条件数好得多）。
-    double size_prior = config_.radius_prior_small_m;
+    // --radius / radius_prior_m 显式给值时必须真的生效：以前这里无条件从
+    // radius_prior_small_m 起步，于是"小板"永远按 0.20 兜底，--radius 对小板无效
+    // （实拍 v4 的 3 号道具半径 0.28，被钉在 0.20，模型四块板整体小一圈）。
+    double size_prior = config_.radius_prior_from_size ? config_.radius_prior_small_m
+                                                       : config_.radius_prior_m;
     if (config_.radius_prior_from_size && lock_samples_.back().size == ArmorSize::Large)
     {
         size_prior = config_.radius_prior_large_m;
@@ -1370,6 +1381,14 @@ void RotatingArmorTracker::updateRadiusFromPairs(const std::vector<WorldObservat
     {
         return;
     }
+    // 高速自转时不动半径：四块板轮流转，改 R 等于把同帧的相位残差硬塞给半径，
+    // 中心会被拽走（合成 G 组 4/6/8 rad/s 的瞄准残差会从 1 cm 涨到 3 cm 以上）。
+    // 静止/平移目标才需要它——实拍 v4 的自制道具半径 0.28 就是这种情况。
+    if (std::fabs(ekf_.state()(7)) >= config_.static_rate_rad_s ||
+        static_streak_ < 10)
+    {
+        return;
+    }
     for (size_t i = 0; i < world.size(); ++i)
     {
         if (world[i].target_id != target_id_ || !world[i].has_yaw)
@@ -1382,24 +1401,61 @@ void RotatingArmorTracker::updateRadiusFromPairs(const std::vector<WorldObservat
             {
                 continue;
             }
-            const double dpsi = foldPeriod(world[j].yaw - world[i].yaw, 2.0 * kPi);
-            const double half = 0.5 * std::fabs(dpsi);
-            if (half < 0.35) // 同一块板被重复检出：弦长除噪会炸
-            {
-                continue;
-            }
+            const double dpsi = std::fabs(foldPeriod(world[j].yaw - world[i].yaw, 2.0 * kPi));
             const double chord = (world[j].position - world[i].position).norm();
+            // 只采信"两块不同板"的弦长：同一块板被重复检出时弦长很小，
+            // 而法向差却可能几十度，弦长除噪会把半径拉到 0.14（实拍 v4 的 3 号车）。
             if (!std::isfinite(chord) || chord < config_.radius_update_min_chord_m)
             {
                 continue;
             }
-            const double radius = chord / (2.0 * std::sin(half));
+            // 用"模型构型"的半角而不是实测法向差：实测法向差本身有 ±20° 噪声，
+            // 直接带进 sin() 会把半径算大（v4 实测法向差 80° → 半径 0.31，
+            // 而弦长 0.40/相邻构型给出的是 0.283）。四板模型只有两种可能：
+            // 相邻 90°（弦 = √2 R）或对置 180°（弦 = 2R）。
+            double half_model = 0.0;
+            if (dpsi > config_.radius_update_opposite_yaw_rad)
+            {
+                half_model = 0.5 * kPi;
+            }
+            else if (dpsi > config_.radius_update_adjacent_yaw_rad)
+            {
+                half_model = 0.25 * kPi;
+            }
+            else
+            {
+                continue;
+            }
+            const double radius = chord / (2.0 * std::sin(half_model));
             if (!std::isfinite(radius) || radius < config_.radius_min_m ||
                 radius > config_.radius_max_m)
             {
                 continue;
             }
-            ekf_.updateRadius(radius, config_.radius_update_sigma_m);
+            // 低通：单帧弦长还有几毫米到几厘米的噪声，别让它一步跳到位。
+            // freeze_radius 打开时位置更新会把 R 拉回先验，所以 setRadius 会
+            // 同时改先验（见 RotatingArmorEkf::setRadius）。
+            double target_radius = radius;
+            if (config_.freeze_radius)
+            {
+                // 第一次拿到弦长直接采信（先验 0.20 vs 实测 0.28，慢慢靠拢要几百帧）；
+                // 之后低通，滤掉单帧噪声。
+                // 第一次拿到弦长直接采信：先验 0.20 vs 实测 0.28 时慢慢靠拢要几百帧，
+                // 而 static_streak>=10 已经保证目标确实是静止的，这一次不会被打脸。
+                const double alpha =
+                    radius_updates_ == 0 ? 1.0 : config_.radius_update_alpha;
+                const double current = ekf_.state()(8);
+                target_radius = current + alpha * (radius - current);
+                ekf_.setRadius(target_radius);
+                ++radius_updates_;
+            }
+            else
+            {
+                // 不走 updateRadius 的协方差更新：每次改半径都会重写整块协方差，
+                // 高速自转场景里会连累 yaw 的估计（合成 G 组 2 rad/s 射击点偏 30 cm）。
+                // 弦长本身已经是几何量，低通后直接写状态就够。
+                ekf_.setRadius(target_radius);
+            }
             return;
         }
     }
@@ -1853,6 +1909,7 @@ PredictionResult RotatingArmorTracker::buildResult(const GimbalState &gimbal,
     {
         diagnostics_.motion = MotionMode::Static;
     }
+    static_streak_ = (diagnostics_.motion == MotionMode::Static) ? static_streak_ + 1 : 0;
 
     // 新鲜度按"距上次被接收的更新多少秒"判，不按丢帧数：相机帧率变化时
     // 帧数门限的含义会漂移（166fps 下 2 帧只有 12ms，实拍里会长期卡在 Unstable）。

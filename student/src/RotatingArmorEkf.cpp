@@ -347,6 +347,15 @@ bool RotatingArmorEkf::updateRadius(double measured_radius, double sigma_radius)
     return true;
 }
 
+bool RotatingArmorEkf::setRadius(double radius_m) {
+    if (!initialized_ || !std::isfinite(radius_m) || !(radius_m > 0.0)) {
+        return false;
+    }
+    state_(8) = std::clamp(radius_m, 0.03, 0.80);
+    radius_prior_m_ = state_(8);
+    return true;
+}
+
 bool RotatingArmorEkf::innovationNis(const ArmorObservation& observation, int plate_slot,
                                      double& nis) const {
     if (!initialized_ || config_.plate_count <= 0 || plate_slot < 0 ||

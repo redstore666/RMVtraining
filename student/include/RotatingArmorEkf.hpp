@@ -168,6 +168,11 @@ public:
     // 这条观测是"两块板同时可见"时唯一的 R 来源。
     bool updateRadius(double measured_radius, double sigma_radius);
 
+    // 几何通道的半径修正：同帧两块板解出的弦长比位置残差可信得多。
+    // freeze_radius 时位置更新每帧都会把 R 拉回 radius_prior_m_，所以这里
+    // 连同先验一起改（之后的 update 才会守住新值）。
+    bool setRadius(double radius_m);
+
     // 该观测在当前先验下的新息平方和（马氏距离）NIS = r' S^-1 r，S = H P H' + R。
     // 上层用它做离群点拒绝：3 维观测下 NIS ~ chi2(3)，99.5% 分位约 11.34。
     // 未初始化、slot 非法或输入非有限时返回 false。
