@@ -707,8 +707,19 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
     // 写成 !(r > min) || !(r < max) 等于 (r <= min) || (r >= max)，含义完全反了
     // ——那样只有拟合失败时才用固定半径，而拟合成功时反而被钉回先验（实测 v4
     // R 拟合 0.284 却被钉在 0.20，模型四块板整体小一圈）。
-    if (circle.ok && circle.radius > config_.radius_min_m &&
-        circle.radius < config_.radius_max_m)
+    // 拟合半径落在物理区间内就保持"自由拟合"的结果；只有拟合值离谱（出区间）
+    // 时才退回"钉住板型先验、只解圆心"。
+    //
+    // 这里踩过两次坑，写清楚免得再改错：
+    //  1) 原写法是 !(r > min) || !(r < max)，等价于 (r <= min) || (r >= max)，
+    //     即"拟合值出区间才进来"，与它自己的注释相反但**行为上是对的**（v4 拟合
+    //     0.284、区间内，于是保持自由拟合）。我把它"改正"成小区间判断后，v4 的
+    //     id=3 中位从 91.2 变 99.9 px，配对比较 96.0 -> 103.4，是回归。
+    //  2) 又试了"跨锁对拟合半径做 EMA 再解圆心"，配对比较 91.9 -> 107.9，更差。
+    // 所以 v4 上最优仍是：拟合值可用就照用，别平滑、别重解圆心。
+    const bool fit_in_range = circle.ok && circle.radius > config_.radius_min_m &&
+                              circle.radius < config_.radius_max_m;
+    if (!fit_in_range)
     {
         const CircleFit fixed = fitCenterFixedRadius(lock_samples_, size_prior, circle);
         if (fixed.ok)
