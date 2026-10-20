@@ -1234,14 +1234,25 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
     std::vector<double> times(static_cast<std::size_t>(count));
     std::vector<double> yaws(static_cast<std::size_t>(count));
     std::vector<double> bearings(static_cast<std::size_t>(count));
+
+    // 所有采样点用**同一个**极点算方位角（当前 EKF 车心），不能用每帧当时存下来的
+    // 车心：车心本身在自转段会抖 ±0.1 m，0.1/0.28 ≈ 0.36 rad 的极点误差会被当成
+    // 方位角变化，两两斜率散开、MAD 变大（实拍 v4 左车 sigma 3.3，滤波器不敢跟）。
+    // 用同一个极点时，极点偏差只是一个常数偏移，求导后完全消掉。
+    // 平移目标必须用"每帧当时的车心"：车心自己会跟着平移走，拿当前车心去算旧样本
+    // 的方位角会把平移读成转动（H 组平移用例就是这么挂的）。自转目标反过来：
+    // 车心固定、当时车心的抖动才是噪声源。按当前转速选极点。
+    const bool spinning_now = std::fabs(ekf_.state()(7)) >= 0.5;
+    const Eigen::Vector2d pole(ekf_.state()(0), ekf_.state()(2));
     double bearing_unwrapped = 0.0;
     for (int i = 0; i < count; ++i)
     {
         const RateSample &sample = rate_samples_[static_cast<std::size_t>(i)];
         times[static_cast<std::size_t>(i)] = sample.timestamp_s;
         yaws[static_cast<std::size_t>(i)] = sample.unwrapped_yaw;
-        const double dx = sample.position.x() - sample.center.x();
-        const double dy = sample.position.y() - sample.center.y();
+        const Eigen::Vector2d &center = spinning_now ? pole : sample.center;
+        const double dx = sample.position.x() - center.x();
+        const double dy = sample.position.y() - center.y();
         const double bearing = std::atan2(-dy, -dx);
         if (i == 0)
         {
