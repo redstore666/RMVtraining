@@ -1389,6 +1389,44 @@ int main(int argc, char **argv)
                 // 只有已经锁定（Tracking 且 EKF 初始化）时才画模型板：collecting
                 // 阶段 ekf().state() 还是零向量（R=0），四块板会全塌在世界原点，
                 // 投影出一堆与真实板无关的线段——看起来就像"蓝板和绿板对不上"。
+                // 检测点余辉：绿框每帧都在跳（单板 PnP 有 5–8 cm 抖动），把最近
+                // 十几帧的检测中心画成渐隐小点，一眼能看出模型板是不是落在这一团
+                // 点的中心——这比"某一帧绿框偏了几十像素"更能说明问题。
+                static std::map<int, std::deque<cv::Point2f>> detection_trail;
+                for (const ArmorPose &pose_t : poses)
+                {
+                    if (pose_t.detection.corners.empty())
+                    {
+                        continue;
+                    }
+                    cv::Point2f center(0.0f, 0.0f);
+                    for (const cv::Point2f &corner : pose_t.detection.corners)
+                    {
+                        center += corner;
+                    }
+                    center /= static_cast<float>(pose_t.detection.corners.size());
+                    std::deque<cv::Point2f> &trail = detection_trail[pose_t.detection.target_id];
+                    trail.push_back(center);
+                    while (trail.size() > 18)
+                    {
+                        trail.pop_front();
+                    }
+                }
+                for (const auto &entry : detection_trail)
+                {
+                    if (entry.first != diagnostics.target_id)
+                    {
+                        continue;
+                    }
+                    const std::size_t total = entry.second.size();
+                    for (std::size_t i = 0; i < total; ++i)
+                    {
+                        const double fade = static_cast<double>(i + 1) / static_cast<double>(total);
+                        const cv::Scalar color(80.0 * fade + 40.0, 200.0 * fade + 30.0,
+                                               120.0 * fade + 30.0);
+                        cv::circle(frame, entry.second[i], 2, color, -1, cv::LINE_AA);
+                    }
+                }
                 if (diagnostics.phase == rotating_armor::LockPhase::Tracking &&
                     active_tracker->initialized())
                 {
