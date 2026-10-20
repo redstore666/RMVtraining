@@ -830,6 +830,12 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
     }
 
     const LockSample last = lock_samples_.back();
+
+    // 半径是"按板型的物理常数"。短弧上圆拟合/相位回归对 R 是病态的（实拍见过
+    // 0.055、0.145 这种解），所以任何"数据估出来的 R"都必须落在先验附近才采信；
+    // 偏太远就退回先验——宁可板位整体偏一点，也不要让半径塌掉后整段跟踪都错。
+    const double data_radius_tolerance = 0.35 * size_prior;
+
     double radius =
         clampd(config_.radius_prior_m, config_.radius_min_m, config_.radius_max_m);
     bool radius_from_data = false;
@@ -881,7 +887,8 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
             // 拟合出的相位方向必须和几何先验一致，否则说明这段数据还不足以
             // 把"半径 vs 中心"分开，宁可退回先验半径。
             if (std::fabs(fitted) >= config_.radius_min_m &&
-                std::fabs(fitted) <= config_.radius_max_m && fitted_flipped == flipped)
+                std::fabs(fitted) <= config_.radius_max_m && fitted_flipped == flipped &&
+                std::fabs(std::fabs(fitted) - size_prior) <= data_radius_tolerance)
             {
                 radius = std::fabs(fitted);
                 radius_from_data = true;
@@ -909,13 +916,7 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
         // 半径一旦被拉小，冻结之后整段跟踪的板位都偏 —— 末段瞄准点飞到
         // 板外 0.24 m 就是这么来的。半径是"按板型的物理常数"，只在离先验
         // 不太远时才采信数据值；超出容差就保留先验。
-        double size_prior = radius;
-        if (config_.radius_prior_from_size)
-        {
-            size_prior = (last.size == ArmorSize::Large) ? config_.radius_prior_large_m
-                                                         : config_.radius_prior_small_m;
-        }
-        const double tolerance = 0.3 * size_prior;
+        const double tolerance = data_radius_tolerance;
         if (std::fabs(circle.radius - size_prior) <= tolerance)
         {
             // 只有"自由拟合可信"时才把半径当数据估计；钉住半径的那次拟合里

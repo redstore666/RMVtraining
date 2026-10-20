@@ -93,7 +93,10 @@ public:
     void reset();
 
     // 渲染一帧，返回内部画布（复用同一块 cv::Mat，别长期持有）。
-    const cv::Mat &render(const TopDownFrame &frame);
+    // others：同帧里的其它车（多目标）。先画它们（暗一档），再把 frame 当主目标
+    // 画在最上面；follow 模式会把视野放大到能同时容下所有车。
+    const cv::Mat &render(const TopDownFrame &frame,
+                          const std::vector<TopDownFrame> &others = {});
 
     const cv::Mat &canvas() const noexcept { return canvas_; }
     const TopDownOptions &options() const noexcept { return options_; }

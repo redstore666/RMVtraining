@@ -29,6 +29,9 @@ const cv::Scalar kAimColor(215, 40, 205);     // 品红：预测瞄准点
 const cv::Scalar kVelocityColor(0, 130, 255); // 橙：速度箭头
 const cv::Scalar kTrailColor(150, 150, 150);  // 灰：历史轨迹
 const cv::Scalar kCamColor(120, 120, 120);    // 深灰：相机光轴
+// 多目标：非主目标的车用暗一档的同族色，避免和"正在瞄的那辆"抢注意力。
+const cv::Scalar kOtherPlateColor(150, 110, 150); // 灰紫
+const cv::Scalar kOtherCenterColor(150, 60, 150); // 暗紫
 
 const char *phaseName(LockPhase phase)
 {
@@ -257,8 +260,26 @@ void drawOrigin(const Scene &scene, const cv::Point2d &origin_px)
            0.42 * scene.scale, kCamColor);
 }
 
+// 一辆车的配色。主目标用亮色，其它车（多目标）用暗一档的同族色，
+// 让"哪辆是正在瞄的"一眼可分。
+struct ModelPalette
+{
+    cv::Scalar plate;
+    cv::Scalar aim_plate;
+    cv::Scalar center;
+    cv::Scalar velocity;
+    bool draw_aim_plate{true};
+    bool draw_velocity{true};
+    const char *label{nullptr};
+};
+
+const ModelPalette kPrimaryPalette{kPlateColor, kAimPlateColor, kCenterColor, kVelocityColor,
+                                   true, true, nullptr};
+const ModelPalette kSecondaryPalette{kOtherPlateColor, kOtherPlateColor, kOtherCenterColor,
+                                     kOtherPlateColor, false, false, nullptr};
+
 void drawModel(const Scene &scene, const TopDownFrame &frame, const TopDownOptions &options,
-               double radius)
+               double radius, const ModelPalette &palette)
 {
     cv::Mat &canvas = *scene.canvas;
     const State &state = frame.state;
@@ -266,7 +287,7 @@ void drawModel(const Scene &scene, const TopDownFrame &frame, const TopDownOptio
 
     // 半径参考圆：看一眼就知道 R 有没有被锁对。
     cv::circle(canvas, ip(center_px), static_cast<int>(std::lround(radius * scene.ppm)),
-               mix(scene.bg, kPlateColor, 0.30), 1, cv::LINE_AA);
+               mix(scene.bg, palette.plate, 0.30), 1, cv::LINE_AA);
 
     const int thickness = std::clamp(static_cast<int>(std::lround(0.018 * scene.ppm)), 3, 18);
     const double half_width = 0.5 * options.plate_width_m;
@@ -286,29 +307,29 @@ void drawModel(const Scene &scene, const TopDownFrame &frame, const TopDownOptio
             scene.toPx(plate.x() - half_width * tangent.x(), plate.y() - half_width * tangent.y());
         const cv::Point2d p1 =
             scene.toPx(plate.x() + half_width * tangent.x(), plate.y() + half_width * tangent.y());
-        const bool is_aim = slot == aim_slot;
+        const bool is_aim = palette.draw_aim_plate && slot == aim_slot;
         if (is_aim)
         {
             // 瞄准板先画一圈更粗的黄描边，再盖蓝色。
-            cv::line(canvas, ip(p0), ip(p1), kAimPlateColor, thickness + 8, cv::LINE_AA);
-            cv::circle(canvas, ip(p0), (thickness + 8) / 2, kAimPlateColor, -1, cv::LINE_AA);
-            cv::circle(canvas, ip(p1), (thickness + 8) / 2, kAimPlateColor, -1, cv::LINE_AA);
+            cv::line(canvas, ip(p0), ip(p1), palette.aim_plate, thickness + 8, cv::LINE_AA);
+            cv::circle(canvas, ip(p0), (thickness + 8) / 2, palette.aim_plate, -1, cv::LINE_AA);
+            cv::circle(canvas, ip(p1), (thickness + 8) / 2, palette.aim_plate, -1, cv::LINE_AA);
         }
-        cv::line(canvas, ip(p0), ip(p1), kPlateColor, thickness, cv::LINE_AA);
-        cv::circle(canvas, ip(p0), thickness / 2, kPlateColor, -1, cv::LINE_AA);
-        cv::circle(canvas, ip(p1), thickness / 2, kPlateColor, -1, cv::LINE_AA);
+        cv::line(canvas, ip(p0), ip(p1), palette.plate, thickness, cv::LINE_AA);
+        cv::circle(canvas, ip(p0), thickness / 2, palette.plate, -1, cv::LINE_AA);
+        cv::circle(canvas, ip(p1), thickness / 2, palette.plate, -1, cv::LINE_AA);
     }
 
     // 车体中心：红实心圆（和 tmp/example.jpg 一致）。
     cv::circle(canvas, ip(center_px),
-               std::clamp(static_cast<int>(std::lround(0.011 * scene.ppm)), 4, 9), kCenterColor,
+               std::clamp(static_cast<int>(std::lround(0.011 * scene.ppm)), 4, 9), palette.center,
                -1, cv::LINE_AA);
 
     // 速度箭头：长度 = velocity_arrow_s 秒的位移，短到看不见时给最小像素长度。
     const double vx = state(1);
     const double vy = state(3);
     const double speed = std::hypot(vx, vy);
-    if (std::isfinite(speed) && speed > 0.02)
+    if (palette.draw_velocity && std::isfinite(speed) && speed > 0.02)
     {
         const double arrow_s = std::max(options.velocity_arrow_s, 0.02 / speed);
         cv::Point2d tip = scene.toPx(state(0) + vx * arrow_s, state(2) + vy * arrow_s);
@@ -467,7 +488,8 @@ void TopDownView::updateTrail(const TopDownFrame &frame)
         trail_.erase(trail_.begin());
 }
 
-const cv::Mat &TopDownView::render(const TopDownFrame &frame)
+const cv::Mat &TopDownView::render(const TopDownFrame &frame,
+                                   const std::vector<TopDownFrame> &others)
 {
     ensureCanvas();
     const int width = options_.width;
@@ -518,7 +540,20 @@ const cv::Mat &TopDownView::render(const TopDownFrame &frame)
                 center_y_m_ = sum.y() / count;
             }
         }
-        const double extent = std::max(options_.follow_half_extent_m, 2.2 * radius);
+        double extent = std::max(options_.follow_half_extent_m, 2.2 * radius);
+        // 多目标：把视野放大到"所有车都放得下"，否则第二辆车会跑到画布外。
+        for (const TopDownFrame &other : others)
+        {
+            if (!other.has_state || !other.state.allFinite())
+                continue;
+            const double other_radius =
+                (std::isfinite(other.state(8)) && other.state(8) > 0.02)
+                    ? other.state(8)
+                    : options_.fallback_radius_m;
+            extent = std::max(extent, std::hypot(other.state(0) - center_x_m_,
+                                                 other.state(2) - center_y_m_) +
+                                          other_radius + 0.10);
+        }
         pixels_per_meter_ = 0.5 * std::min(width, height) * 0.88 / extent;
     }
     else
@@ -556,9 +591,24 @@ const cv::Mat &TopDownView::render(const TopDownFrame &frame)
     const cv::Point2d origin_px = scene.toPx(0.0, 0.0);
 
     // ---- 3. 模型：四块板 + 车体中心 + 速度 ----
+    // 先画其它车（暗色、无瞄准描边），再把主目标画在上面。
+    for (const TopDownFrame &other : others)
+    {
+        if (!other.has_state || !other.state.allFinite())
+            continue;
+        const double other_radius =
+            (std::isfinite(other.state(8)) && other.state(8) > 0.02) ? other.state(8)
+                                                                     : options_.fallback_radius_m;
+        drawModel(scene, other, options_, other_radius, kSecondaryPalette);
+        const cv::Point2d other_px = scene.toPx(other.state(0), other.state(2));
+        const std::string id_label =
+            other.diagnostics.target_id > 0 ? fmt("id %d", other.diagnostics.target_id) : "id ?";
+        textAt(*scene.canvas, id_label, ip(other_px) + cv::Point(8, -10), 0.42 * scene.scale,
+               kOtherPlateColor);
+    }
     if (frame.has_state &&
         frame.state.allFinite())
-        drawModel(scene, frame, options_, radius);
+        drawModel(scene, frame, options_, radius, kPrimaryPalette);
 
     // ---- 4. 实测板（绿）与云台原点 ----
     drawObservations(scene, frame, options_);
@@ -680,7 +730,8 @@ const cv::Mat &TopDownView::render(const TopDownFrame &frame)
         legendItem(row1, kAimPlateColor, 1, "aim plate");
         legend_x = legend_start_x; // 第二行从左边重新排，别接着第一行往后挤
         legendItem(row2, kObsColor, 0, "observed (PnP)");
-        legendItem(row2, kAimColor, 2, "aim point");
+        legendItem(row2, kAimColor, 1, "aim point");
+        legendItem(row2, kOtherPlateColor, 2, "other target");
         legendItem(row2, kTrailColor, 3, "trail / velocity");
     }
 

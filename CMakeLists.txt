@@ -47,6 +47,7 @@ add_library(rotating_armor_ekf STATIC
     student/src/RotatingArmorEkf.cpp
     student/src/RotatingArmorTracker.cpp
     student/src/AimGeometry.cpp
+    student/src/MultiTargetTracker.cpp
 )
 target_include_directories(rotating_armor_ekf PUBLIC
     student/include
@@ -165,6 +166,11 @@ if(BUILD_TESTING)
     add_executable(test_rotating_armor_tracker tests/test_rotating_armor_tracker.cpp)
     target_link_libraries(test_rotating_armor_tracker PRIVATE rotating_armor_ekf)
     add_test(NAME ekf_tracker COMMAND test_rotating_armor_tracker)
+
+    #   多目标：两辆车各自一个 EKF，靠径向一致性把板分给不同的车。
+    add_executable(test_multi_target tests/test_multi_target.cpp)
+    target_link_libraries(test_multi_target PRIVATE rotating_armor_ekf)
+    add_test(NAME ekf_multi_target COMMAND test_multi_target)
 
     #   管线测试走真实的 ekf_predict + applyPrediction，所以必须链 training_core。
     add_executable(test_ekf_pipeline tests/test_ekf_pipeline.cpp)

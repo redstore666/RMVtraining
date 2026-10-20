@@ -21,6 +21,9 @@
 //   --csv PATH       逐帧导出 CSV（表头见文件第一行）
 //   --bias S         模拟控制器前馈补偿（秒），写入云台快照的 prediction_bias_s
 //   --config PATH    相机参数文件（默认 config/camera.yaml，或 RMV_CAMERA_CONFIG）
+//   --multi-primary N  强制把装甲板编号 N 那辆当主目标（0=自动：优先 Tracking、再近的）
+//   --multi          多目标：按几何把同一帧的板分给多辆车，各自跑一个 EKF，
+//                    俯视图里非主目标用暗色画，主目标仍是亮的
 //   --topdown        额外开一个"EKF 俯视图"窗口（红点车心 + 四块模型板 + 绿点实测板，
 //                    风格见 tmp/example.jpg）；跟随车心、自动缩放
 //   --topdown-world  俯视图改成固定原点（云台）视图，按 --topdown-ppm 缩放（默认 200）
@@ -37,6 +40,7 @@
 // 的片段——所以每帧都统计画面运动量（CSV 的 motion 列），用它挑片段。
 #include "AutoAimTypes.hpp"
 #include "RotatingArmorTracker.hpp"
+#include "MultiTargetTracker.hpp"
 #include "TopDownView.hpp"
 #include "StudentTasks.hpp"
 #include "WebLogger.hpp"
@@ -176,6 +180,8 @@ namespace
         int smooth_window{4};
         bool trace{false};
     bool phase_yaw{false};
+    bool multi{false};
+    int multi_primary{0};
     double sigma_pos{0.03};
     double handoff_scale{2.5};
     double phase_sigma{0.12};
@@ -355,6 +361,10 @@ namespace
             {
                 args.lock_age = std::atof(next("--lock-age").c_str());
             }
+            else if (arg == "--multi")
+                args.multi = true;
+            else if (arg == "--multi-primary")
+                args.multi_primary = std::atoi(next("--multi-primary").c_str());
             else if (arg == "--topdown")
                 args.topdown = true;
             else if (arg == "--topdown-world")
@@ -568,6 +578,22 @@ int main(int argc, char **argv)
     tracker_config.aim_observation_extrapolate = !args.no_aim_extrapolate;
     tracker_config.single_plate_realign_m = args.realign_m;
     rotating_armor::RotatingArmorTracker tracker(tracker_config);
+    // 多目标模式下，下游（画模型板、trace、统计）统一走 active_tracker：
+    // 单目标时它就是 tracker 本身，多目标时是"当前主目标"那辆车的 tracker。
+    rotating_armor::RotatingArmorTracker *active_tracker = &tracker;
+    rotating_armor::MultiTargetTracker multi_tracker(rotating_armor::MultiTargetConfig{},
+                                                     tracker_config);
+    std::vector<rotating_armor::TopDownFrame> extra_bodies;
+    struct MultiStats
+    {
+        int target_id{0};
+        long frames{0};
+        long tracking{0};
+        long stable{0};
+        long observations{0};
+        double cx{0.0}, cy{0.0}, omega{0.0}, radius{0.0}, distance{0.0};
+    };
+    std::map<int, MultiStats> multi_stats;
     long ekf_first_stable_frame{-1};
     long ekf_stable_frames{0};
     long ekf_accepted{0};
@@ -638,6 +664,12 @@ int main(int argc, char **argv)
         cv::namedWindow(window, cv::WINDOW_NORMAL);
 
     // ---- 俯视图（Top-Down）：只是"把 EKF 结果画出来"，不参与任何估计逻辑 ----
+    if (args.multi && !args.ekf)
+    {
+        std::cout << "[多目标] 需要同时给 --ekf（多目标只是在 EKF 之上分组），已忽略 --multi"
+                  << std::endl;
+        args.multi = false;
+    }
     const bool topdown_enabled = args.topdown && args.ekf;
     if (args.topdown && !args.ekf)
     {
@@ -855,12 +887,102 @@ int main(int argc, char **argv)
         PredictionResult prediction{};
         if (args.ekf)
         {
-            prediction = tracker.step(poses, gimbal, time_s, 0.0);
-            diagnostics = tracker.diagnostics();
+            extra_bodies.clear();
+            if (args.multi)
+            {
+                std::vector<rotating_armor::MultiTargetTrack> &tracks =
+                    multi_tracker.step(poses, gimbal, time_s, 0.0);
+                // 主目标按"能瞄、够近、够稳"挑：先比状态机，再比离准星的偏角。
+                rotating_armor::MultiTargetTrack *primary = nullptr;
+                double best_score = 1.0e9;
+                for (rotating_armor::MultiTargetTrack &track : tracks)
+                {
+                    if (!track.tracker)
+                        continue;
+                    double score = 0.0;
+                    if (track.diagnostics.phase == rotating_armor::LockPhase::Tracking)
+                        score -= 100.0;
+                    else if (track.result.state == TrackingState::Stable)
+                        score -= 50.0;
+                    if (track.tracker->initialized())
+                    {
+                        const rotating_armor::State &st = track.tracker->ekf().state();
+                        // 近的优先：多目标时最近那辆才是真正要处理的目标。
+                        score += 0.1 * std::hypot(st(0), st(2));
+                    }
+                    else
+                    {
+                        score += 100.0;
+                    }
+                    if (args.multi_primary > 0 && track.diagnostics.target_id == args.multi_primary)
+                        score -= 1000.0;
+                    if (score < best_score)
+                    {
+                        best_score = score;
+                        primary = &track;
+                    }
+                }
+                if (primary != nullptr)
+                {
+                    active_tracker = primary->tracker.get();
+                    prediction = primary->result;
+                    diagnostics = primary->diagnostics;
+                }
+                else
+                {
+                    active_tracker = &tracker;
+                    prediction = PredictionResult{};
+                    diagnostics = rotating_armor::TrackerDiagnostics{};
+                }
+                for (rotating_armor::MultiTargetTrack &track : tracks)
+                {
+                    if (&track == primary || !track.tracker || !track.tracker->initialized())
+                        continue;
+                    rotating_armor::TopDownFrame body;
+                    body.has_state = true;
+                    body.state = track.tracker->ekf().state();
+                    body.diagnostics = track.diagnostics;
+                    body.result = track.result;
+                    body.gimbal = gimbal;
+                    extra_bodies.push_back(body);
+                }
+                for (rotating_armor::MultiTargetTrack &track : tracks)
+                {
+                    MultiStats &entry = multi_stats[track.track_id];
+                    if (track.diagnostics.target_id > 0)
+                        entry.target_id = track.diagnostics.target_id;
+                    ++entry.frames;
+                    entry.observations = track.observations;
+                    if (track.diagnostics.phase == rotating_armor::LockPhase::Tracking)
+                        ++entry.tracking;
+                    if (track.result.state == TrackingState::Stable)
+                        ++entry.stable;
+                    if (track.tracker && track.tracker->initialized())
+                    {
+                        const rotating_armor::State &st = track.tracker->ekf().state();
+                        entry.cx = st(0);
+                        entry.cy = st(2);
+                        entry.omega = st(7);
+                        entry.radius = st(8);
+                        entry.distance = std::hypot(st(0), st(2));
+                    }
+                }
+                if (args.trace)
+                {
+                    std::printf("[multi] targets=%zu primary=%d\n", tracks.size(),
+                                primary != nullptr ? primary->track_id : 0);
+                }
+            }
+            else
+            {
+                active_tracker = &tracker;
+                prediction = active_tracker->step(poses, gimbal, time_s, 0.0);
+                diagnostics = active_tracker->diagnostics();
+            }
             final_diagnostics = diagnostics;
             if (args.web)
             {
-                const auto &st = tracker.ekf().state();
+                const auto &st = active_tracker->ekf().state();
                 WEB_LOG("frame", static_cast<double>(frame_index));
                 WEB_LOG("phase", static_cast<double>(static_cast<int>(diagnostics.phase)));
                 WEB_LOG("tracking", diagnostics.phase == rotating_armor::LockPhase::Tracking ? 1.0 : 0.0);
@@ -874,10 +996,10 @@ int main(int argc, char **argv)
             }
             if (args.trace)
             {
-                const auto &st = tracker.ekf().state();
+                const auto &st = active_tracker->ekf().state();
                 std::printf("[trace] f=%d t=%.3f det=%zu init=%d phase=%d id=%d ok=%llu rej=%d miss=%d "
                             "relock=%d ls=%d omega=%.2f wobs=%+.2f±%.2f n=%d/%d R=%.3f yaw=%.2f mode=%s nis=%.1f why=%s stab=%s gd=%.2f gn=%.0f\n",
-                            frame_index, time_s, poses.size(), static_cast<int>(tracker.initialized()),
+                            frame_index, time_s, poses.size(), static_cast<int>(active_tracker->initialized()),
                             static_cast<int>(diagnostics.phase), diagnostics.target_id,
                             static_cast<unsigned long long>(diagnostics.accepted_updates),
                             diagnostics.rejected_this_frame, diagnostics.missed_frames,
@@ -890,7 +1012,7 @@ int main(int argc, char **argv)
                             diagnostics.best_gate_distance_m, diagnostics.best_gate_nis);
                         if (diagnostics.phase == rotating_armor::LockPhase::Tracking)
                         {
-                            const auto &st = tracker.ekf().state();
+                            const auto &st = active_tracker->ekf().state();
                             std::printf("   v=(%.2f,%.2f) c=(%.2f,%.2f)\n", st(1), st(3),
                                         st(0), st(2));
                         }
@@ -902,9 +1024,9 @@ int main(int argc, char **argv)
         std::vector<double> frame_model_residuals;
         std::vector<double> frame_aim_candidates;
         std::vector<double> frame_aim_residuals;
-        if (args.ekf && tracker.initialized())
+        if (args.ekf && active_tracker->initialized())
         {
-            const rotating_armor::State &st = tracker.ekf().state();
+            const rotating_armor::State &st = active_tracker->ekf().state();
             // 先把本帧所有观测转到世界系，供"到期 aim 对账"使用。
             std::vector<std::pair<int, Eigen::Vector3d>> frame_obs_world;
             for (const ArmorPose &pose : poses)
@@ -944,7 +1066,7 @@ int main(int argc, char **argv)
             for (const ArmorPose &pose : poses)
             {
                 if (pose.detection.target_id == 0 ||
-                    pose.detection.target_id != tracker.diagnostics().target_id)
+                    pose.detection.target_id != active_tracker->diagnostics().target_id)
                 {
                     continue; // 只评估当前跟踪的那辆车
                 }
@@ -976,17 +1098,17 @@ int main(int argc, char **argv)
                 if (dump_stream.is_open())
                 {
                     dump_stream << frame_index << ',' << time_s << ',' << poses.size() << ','
-                                << tracker.diagnostics().target_id << ','
-                                << tracker.diagnostics().aim_slot << ',' << pose.detection.target_id
+                                << active_tracker->diagnostics().target_id << ','
+                                << active_tracker->diagnostics().aim_slot << ',' << pose.detection.target_id
                                 << ',' << observed.x() << ',' << observed.y() << ',' << observed.z()
                                 << ',' << best_slot << ',' << best << ',' << second << ','
                                 << st(0) << ',' << st(2) << ',' << st(4) << ','
                                 << st(6) << ',' << st(8) << ','
                                 << rotating_armor::wrapToPi(static_cast<double>(pose.armor_yaw) +
                                                             static_cast<double>(gimbal.yaw))
-                                << ',' << tracker.diagnostics().predicted_aim_world.x()
-                                << ',' << tracker.diagnostics().predicted_aim_world.y()
-                                << ',' << tracker.diagnostics().predicted_aim_world.z();
+                                << ',' << active_tracker->diagnostics().predicted_aim_world.x()
+                                << ',' << active_tracker->diagnostics().predicted_aim_world.y()
+                                << ',' << active_tracker->diagnostics().predicted_aim_world.z();
                                 {
                                     // 观测板心投影回像素：用来和 LED 灯条质心对比精度
                                     // （世界 -> 云台 -> 相机 -> 像素）。
@@ -999,9 +1121,9 @@ int main(int argc, char **argv)
                                                       camera.camera_matrix, cv::noArray(), px);
                                     dump_stream << ',' << px[0].x << ',' << px[0].y;
                                 }
-                                dump_stream << ',' << tracker.diagnostics().stability
-                                            << ',' << tracker.diagnostics().updates_this_frame
-                                            << ',' << tracker.diagnostics().missed_frames
+                                dump_stream << ',' << active_tracker->diagnostics().stability
+                                            << ',' << active_tracker->diagnostics().updates_this_frame
+                                            << ',' << active_tracker->diagnostics().missed_frames
                                             << '\n';
                 }
                 if (std::isfinite(best))
@@ -1017,7 +1139,7 @@ int main(int argc, char **argv)
                 // 同帧可能有两块板同时可见（实拍 v4 自转车 209/742 帧）：瞄准点只
                 // 可能落在其中一块上，所以一帧只取"离瞄准点最近的那个观测"作为
                 // 该帧的瞄准残差；否则另一块板（离 0.35 m）会把中位数抬到无意义。
-                const Eigen::Vector3d &aim_world = tracker.diagnostics().predicted_aim_world;
+                const Eigen::Vector3d &aim_world = active_tracker->diagnostics().predicted_aim_world;
                 if (aim_world.allFinite() && aim_world.squaredNorm() > 1.0e-6)
                 {
                     frame_aim_candidates.push_back((observed - aim_world).norm());
@@ -1032,7 +1154,7 @@ int main(int argc, char **argv)
                 {
                     WEB_LOG("aim_err_mm", best_aim * 1000.0);
                 }
-                const std::size_t measured = tracker.diagnostics().updates_this_frame > 0 ? 0 : 1;
+                const std::size_t measured = active_tracker->diagnostics().updates_this_frame > 0 ? 0 : 1;
                 aim_slot_by_measurement[measured].push_back(best_aim);
                 ++aim_frames_by_measurement[measured];
             }
@@ -1069,7 +1191,7 @@ int main(int argc, char **argv)
                     aim_slot_by_phase[static_cast<std::size_t>(phase_index)].push_back(r);
                     ++aim_frames_by_phase[static_cast<std::size_t>(phase_index)];
                 }
-                const double omega_abs = std::fabs(tracker.ekf().state()(7));
+                const double omega_abs = std::fabs(active_tracker->ekf().state()(7));
                 const int omega_bucket = omega_abs < 1.0 ? 0 : (omega_abs < 5.0 ? 1 : (omega_abs < 15.0 ? 2 : 3));
                 for (double r : frame_aim_residuals)
                 {
@@ -1156,7 +1278,7 @@ int main(int argc, char **argv)
             // 模型板压在真实板上 = 状态对；偏出去多少，眼睛直接量。
             if (args.ekf && diagnostics.phase == rotating_armor::LockPhase::Tracking)
             {
-                const auto &ekf_state = tracker.ekf().state();
+                const auto &ekf_state = active_tracker->ekf().state();
                 std::vector<cv::Point3d> model_points;
                 for (int slot = 0; slot < 4; ++slot)
                 {
@@ -1224,7 +1346,7 @@ int main(int argc, char **argv)
                                 Eigen::Vector3d normal =
                                     baseline.cross(Eigen::Vector3d(0.0, 0.0, 1.0));
                                 const Eigen::Vector3d plate_center =
-                                    rotating_armor::platePosition(tracker.ekf().state(),
+                                    rotating_armor::platePosition(active_tracker->ekf().state(),
                                                                   diagnostics.aim_slot, 4);
                                 const Eigen::Vector3d camera_world =
                                     rotating_armor::toWorld(gimbal, Eigen::Vector3d::Zero());
@@ -1233,7 +1355,7 @@ int main(int argc, char **argv)
                                     normal = -normal;
                                 }
                                 const double led_yaw_world = std::atan2(normal.y(), normal.x());
-                                if (tracker.applyPhaseMeasurement(led_yaw_world, args.led_sigma))
+                                if (active_tracker->applyPhaseMeasurement(led_yaw_world, args.led_sigma))
                                 {
                                     ++led_yaw_updates;
                                 }
@@ -1317,9 +1439,9 @@ int main(int argc, char **argv)
         if (topdown_enabled)
         {
             rotating_armor::TopDownFrame topdown_frame;
-            topdown_frame.has_state = tracker.initialized();
+            topdown_frame.has_state = active_tracker->initialized();
             if (topdown_frame.has_state)
-                topdown_frame.state = tracker.ekf().state();
+                topdown_frame.state = active_tracker->ekf().state();
             topdown_frame.diagnostics = diagnostics;
             topdown_frame.result = prediction;
             topdown_frame.gimbal = gimbal;
@@ -1338,7 +1460,7 @@ int main(int argc, char **argv)
                 observation.target_id = pose.detection.target_id;
                 topdown_frame.observations.push_back(observation);
             }
-            const cv::Mat canvas = topdown_view.render(topdown_frame).clone();
+            const cv::Mat canvas = topdown_view.render(topdown_frame, extra_bodies).clone();
             if (!args.topdown_out.empty())
             {
                 char path[512];
@@ -1420,7 +1542,7 @@ int main(int argc, char **argv)
             }
             if (key == 'm' && args.ekf)
             {
-                const rotating_armor::State &state = tracker.ekf().state();
+                const rotating_armor::State &state = active_tracker->ekf().state();
                 std::cout << "EKF state: cx=" << state(0) << " vx=" << state(1)
                           << " cy=" << state(2) << " vy=" << state(3)
                           << " z=" << state(4) << " vz=" << state(5)
@@ -1495,11 +1617,11 @@ int main(int argc, char **argv)
         std::cout << "  末态阶段: " << phaseName(final_diagnostics.phase)
                   << "，锁定半径 " << final_diagnostics.locked_radius_m
                   << "（" << (final_diagnostics.radius_from_data ? "数据估计" : "先验") << "）";
-        if (tracker.initialized())
+        if (active_tracker->initialized())
         {
             // 锁定时刻的半径是"先验"，跟踪中会被双板/位置更新改掉（v4 从 0.25
             // 修到 0.308），汇总里两个都给，免得看先验误判"半径一直没变"。
-            std::cout << "，当前 R " << tracker.ekf().state()(8);
+            std::cout << "，当前 R " << active_tracker->ekf().state()(8);
         }
         std::cout << "，omega " << final_diagnostics.locked_spin_rad_s << "\n";
         if (args.ekf && !aim_errors_m.empty())
@@ -1575,13 +1697,31 @@ int main(int argc, char **argv)
                           << percentile(aim_slot_by_omega[i], 0.90) << " m\n";
             }
         }
+        if (!multi_stats.empty())
+        {
+            std::cout << "  多目标（--multi）：累计新建 " << multi_tracker.createdTracks()
+                      << " 辆，末帧同时在跟踪 " << multi_tracker.tracks().size() << " 辆\n";
+            for (const auto &item : multi_stats)
+            {
+                const MultiStats &entry = item.second;
+                const double tracking_ratio =
+                    entry.frames > 0 ? 100.0 * static_cast<double>(entry.tracking) / entry.frames
+                                     : 0.0;
+                std::cout << "    track " << item.first << "  id " << entry.target_id
+                          << "  观测 " << entry.observations << "  Tracking "
+                          << tracking_ratio << "%  Stable " << entry.stable
+                          << "  末态 cx=" << entry.cx << " cy=" << entry.cy
+                          << " R=" << entry.radius << " omega=" << entry.omega
+                          << " 距离 " << entry.distance << " m\n";
+            }
+        }
         std::cout << "  末帧预测: " << stateName(final_prediction.state)
                   << " id " << static_cast<int>(final_prediction.target_id)
                   << " yaw " << final_prediction.target_yaw * 180.0 / 3.141592653589793
                   << " pitch " << final_prediction.target_pitch * 180.0 / 3.141592653589793
                   << " 距离 " << final_prediction.distance_m
                   << " 发射 " << final_prediction.fire_allowed << "\n";
-        const rotating_armor::State &state = tracker.ekf().state();
+        const rotating_armor::State &state = active_tracker->ekf().state();
         std::cout << "  末帧状态: cx=" << state(0) << " vx=" << state(1)
                   << " cy=" << state(2) << " vy=" << state(3)
                   << " z=" << state(4) << " yaw=" << state(6)

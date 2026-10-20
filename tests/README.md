@@ -235,6 +235,29 @@ P50≈8），不是拍脑袋。
 坐标映射只有一处：`px = w/2 - (wy-cy)*ppm`、`py = h/2 - (wx-cx)*ppm`，即画布向上 = +x（前方）、
 向左 = +y（左方），车体自转在图上呈逆时针。
 
+### 多目标：同一帧里两台车都跟（`--multi`）
+
+单目标链路只会"锁一辆车"，同场有两台时会一直跟着准星最近的那台。`--multi` 把同一帧的
+观测按几何分给多辆车，每辆各跑一个 `RotatingArmorTracker`，俯视图把人看着的那台画成亮色、
+其它车画成灰紫色（图例里的 `other target`）：
+
+```bash
+./build/test_camera_playback tmp/v4.avi --red --ekf --multi --headless       # 两辆都跟
+./build/test_camera_playback tmp/v4.avi --red --ekf --multi --topdown        # 窗口里同时看
+./build/test_camera_playback tmp/v4.avi --red --ekf --multi --multi-primary 3 # 强制以 3 号板那辆为主
+./build/test_multi_target                                                    # 合成两车用例（ctest: ekf_multi_target）
+```
+
+分组用的是**径向一致性**：已锁定的车，任何一块板都落在半径 R 上，所以用
+`| |p-c| - R |` 当代价——它对目标转到哪个角、omega 估计准不准都不敏感；还没锁定的车只有
+"上次观测到的板位"可用，就用直线距离。新车的建立要连续两帧都解释不了才做，避免单帧野点
+造出幽灵车；两辆车的中心靠得太近（< `merge_gate_m`）会合并成一辆。v4 全量：累计新建 2 辆
+（一辆静止大板 + 一辆在动的小板），中段 `[multi] targets=2`。
+局限：目标长时间离开视野再回来会重新建一辆（`createdTracks()` 会累计），这时俯视图里
+新车的轨迹是空的。
+
+![多目标：两台车同时画](../docs/figures/topdown_multi.png)
+
 `--trace` 每帧打印 `phase`（0=Idle/1=Collecting/2=Tracking）、锁定编号、累计接收
 更新数、本帧拒绝数、丢帧数、重锁次数、状态量 `omega/R/yaw`、最近 NIS、
 `why`（最近一次拒绝原因）与 `stab`（本帧 `Stable/Unstable` 的判定理由：
