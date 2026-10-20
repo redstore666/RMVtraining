@@ -1489,8 +1489,14 @@ int main(int argc, char **argv)
                   << "，重锁 " << ekf_relock_count << "，目标切换 " << ekf_target_switches << "\n";
         std::cout << "  末态阶段: " << phaseName(final_diagnostics.phase)
                   << "，锁定半径 " << final_diagnostics.locked_radius_m
-                  << "（" << (final_diagnostics.radius_from_data ? "数据估计" : "先验") << "）"
-                  << "，omega " << final_diagnostics.locked_spin_rad_s << "\n";
+                  << "（" << (final_diagnostics.radius_from_data ? "数据估计" : "先验") << "）";
+        if (tracker.initialized())
+        {
+            // 锁定时刻的半径是"先验"，跟踪中会被双板/位置更新改掉（v4 从 0.25
+            // 修到 0.308），汇总里两个都给，免得看先验误判"半径一直没变"。
+            std::cout << "，当前 R " << tracker.ekf().state()(8);
+        }
+        std::cout << "，omega " << final_diagnostics.locked_spin_rad_s << "\n";
         if (args.ekf && !aim_errors_m.empty())
         {
             std::cout << "  预测命中评估: " << aim_errors_m.size() << " 帧，"

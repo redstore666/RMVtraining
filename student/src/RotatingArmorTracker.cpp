@@ -777,7 +777,11 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
                 sum_dtheta = dtheta;
                 sum_dt = window_dt;
                 used_steps = std::max(used_steps, 6);
-                slope_error = 0.0; // 由弦长直接解，没有"每步散布"这个自由度
+                // 弦长只回答"这一段总共转了多少"，没回答"转得稳不稳"：手持
+                // 抖动同样造得出弦长（回放 v1 的 23 个样本被解成 -4 rad/s，
+                // 而车其实没转）。所以不能声称零误差——claim 零会把先验 sigma
+                // 压到 1.0，窗口和衰减要花 0.6 s 才能把它掰回来。
+                slope_error = clampd(0.5 * std::fabs(omega), 0.5, 3.0);
                 spin_from_positions = true;
                 circle_phase_last = std::atan2(
                     lock_samples_.back().position.y() - circle.cy,
