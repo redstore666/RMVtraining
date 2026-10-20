@@ -622,6 +622,8 @@ int main(int argc, char **argv)
     long refine_count{0};
     long ekf_rejected{0};
     int ekf_relock_count{0};
+    int ekf_realigns{0};
+    int last_realigns{0};
     int ekf_target_switches{0};
     int last_ekf_id{0};
     std::string last_phase{"idle"};
@@ -668,6 +670,11 @@ int main(int argc, char **argv)
             std::cerr << "无法写入 CSV: " << args.csv_path << "\n";
             return 1;
         }
+        // x/y/z 是 pose.position_camera_m，即 OpenCV 光学系（x 右 / y 下 / z 前），
+        // 既不是世界系也不是云台系。分析时最容易踩的坑：把 z 当成"高度"（它其实是
+        // 深度，数值≈dist_m），或把 y 当成"东西向位置"（它其实是图像向下的偏移）。
+        // 正确用法：仰角 = atan2(-y, z)，方位 = atan2(x, z)。实测两组目标都稳定在
+        // 0~5° 仰角，说明回放里 GimbalState{}(pitch=0) 的假设是自洽的。
         csv << "frame,time_s,id,size,conf,x,y,z,dist_m,yaw_deg,reproj_px,motion,"
                "ekf_phase,ekf_state,ekf_aim,ekf_id,ekf_yaw_deg,ekf_pitch_deg,ekf_dist_m,ekf_fire\n";
     }
@@ -1214,6 +1221,12 @@ int main(int argc, char **argv)
             }
             if (diagnostics.relock_count > ekf_relock_count)
                 ekf_relock_count = diagnostics.relock_count;
+            // 单板重锚是"硬对齐"：每次都把状态直接搬到观测上，观感就是
+            // "转一部分又卡回去"。它和 relock_count 一样会在 reset 里清零，
+            // 所以按单帧增量累加。
+            if (diagnostics.single_plate_realigns > last_realigns)
+                ekf_realigns += diagnostics.single_plate_realigns - last_realigns;
+            last_realigns = diagnostics.single_plate_realigns;
             for (double r : frame_model_residuals)
             {
                 aim_errors_m.push_back(r);
@@ -1831,7 +1844,8 @@ int main(int argc, char **argv)
                   << "，Stable 帧数: " << ekf_stable_frames << "/" << frames_processed << "\n";
         std::cout << "  接收更新 " << ekf_accepted << "，未用于更新的观测 " << ekf_rejected
                   << "（含其它目标的板），重锁 " << ekf_relock_count
-                  << "，目标切换 " << ekf_target_switches << "\n";
+                  << "，目标切换 " << ekf_target_switches
+                  << "，单板重锚 " << ekf_realigns << "\n";
         std::cout << "  末态阶段: " << phaseName(final_diagnostics.phase)
                   << "，锁定半径 " << final_diagnostics.locked_radius_m
                   << "（" << (final_diagnostics.radius_from_data ? "数据估计" : "先验") << "）";
