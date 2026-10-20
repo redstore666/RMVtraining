@@ -177,6 +177,9 @@ struct Rig
     int target_id{7};
     double bias_s{0.0};
     double sigma_position_m{0.01};
+    // 板面法向噪声：实拍小目标（v4 的 0.2 m 板、1.5 m 距离）实测抖到 ±20°，
+    // 默认 0.02 rad 只适合合成场景。转速自我判别的回归测试会把它调大。
+    double sigma_normal_rad{0.02};
     // 传给跟踪器的"本帧视觉处理延迟"，用于验证预测时域包含它。
     double latency_s{0.0};
     // 最近一帧生成的观测（跟踪器已经消费过）。给俯视图之类的可视化用，
@@ -242,7 +245,8 @@ struct Rig
         std::vector<ArmorPose> observations;
         if (provide_observations)
         {
-            observations = observe(plates, gimbal_state, id, rng, sigma_position_m);
+            observations = observe(plates, gimbal_state, id, rng, sigma_position_m,
+                                   sigma_normal_rad);
         }
         last_observations = observations;
         return tracker.step(observations, gimbal_state, time_s, latency_s);

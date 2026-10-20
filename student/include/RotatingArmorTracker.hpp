@@ -72,7 +72,22 @@ struct TrackerConfig
     // 转速窗口的关联门限：比位置门严得多。同一台车/相邻车的同编号板可能只差
     // 0.2~0.4 m（实拍 v4 的斜置副板），混进窗口会把相位序列扯成假高速旋转。
     double rate_associate_gate_m{0.15};          // 观测离预测板超过它就不算"自己这台车"
-    double rate_sigma_floor_rad_s{0.15}; // 斜率标准误下限，避免过度自信
+    double rate_sigma_floor_rad_s{0.15};
+    // 反证据：窗口超过这么久没给出有效斜率，就喂一个"没在转"的弱伪量测
+    // （omega -> 0，sigma 见下）。没有这一条时 omega 会被位置更新经由协方差
+    // 耦合慢慢推到 -6 rad/s（回放 v4 实测），模型整块板跟着自转——正是用户
+    // 看到的"圆心偏了"。数据支持不了旋转时，停在 0 才是安全解。
+    double rate_decay_after_s{0.60};
+    // 衰减项是一次"omega=0"的伪量测，sigma 取大一点：它只负责在长时间没有
+    // 任何斜率证据时把 omega 慢慢拉回 0，压不过一次真实量测（sigma 0.15 量级）。
+    double rate_decay_sigma_rad_s{2.00};
+    // 斜率标准误上限：超过这个值说明这一窗数据根本说明不了转速（v4 静态目标
+    // 上法向乱翻，MAD 给出 ±2-3 rad/s），宁可不用这一帧，让衰减项把 omega
+    // 留在 0，也不要把噪声当证据。
+    double rate_max_sigma_rad_s{2.00};
+    // 两路证据（法向斜率 vs 板相对车心的方位角斜率）允许的差；超过就当
+    // "这一窗说法向不可信"，直接不更新。
+    double rate_agreement_rad_s{1.50};
 
     // === 锁定 ===
     int lock_min_samples{8};         // 至少攒到的帧数（只收带法向的观测）
@@ -291,6 +306,9 @@ struct TrackerDiagnostics
     double rate_obs_rad_s{0.0};
     double rate_obs_sigma_rad_s{0.0};
     int rate_obs_samples{0};
+    int rate_window_samples{0};
+    // 第二路证据（板相对车心的方位角斜率），用来和法向斜率互相校验。
+    double rate_bearing_rad_s{0.0};
     double last_nis{0.0};
     double best_gate_distance_m{0.0}; // 本帧所有(观测,槽位)对里最近的位置残差（诊断用）
     double best_gate_nis{0.0};       // 本帧最小 NIS（诊断用）
@@ -435,11 +453,15 @@ private:
     // 转速窗口估计：见 TrackerConfig 里 rate_* 的说明。
     // 上一帧真正被接受的更新数；重锚要求"连续更新不进去"，单帧离群不行。
     int last_updates_{0};
+    double last_rate_update_s_{-1.0e9};
     struct RateSample
     {
         double timestamp_s{0.0};
         double unwrapped_yaw{0.0};
         Eigen::Vector3d position{Eigen::Vector3d::Zero()};
+        // 采样时刻的车心估计：用"板相对车心的方位角"做第二路转速证据时，
+        // 每个样本必须配它自己的车心，否则目标平移会被当成旋转。
+        Eigen::Vector2d center{Eigen::Vector2d::Zero()};
     };
     std::deque<RateSample> rate_samples_{};
     void updateYawRateFromWindow(const std::vector<WorldObservation>& world,

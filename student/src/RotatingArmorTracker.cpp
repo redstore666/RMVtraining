@@ -48,6 +48,52 @@ double clampd(double value, double low, double high)
     return std::min(std::max(value, low), high);
 }
 
+// Theil-Sen 斜率：取所有"时间跨度 >= min_pair_dt"点对斜率的中位数。
+// 对 ≤30% 的野值免疫，配合 MAD 当误差用；点数不足或全非有限时返回 NaN。
+double theilSenSlope(const std::vector<double> &times, const std::vector<double> &values,
+                     double min_pair_dt, double *sigma_out)
+{
+    const int count = static_cast<int>(times.size());
+    if (count < 4)
+    {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    std::vector<double> slopes;
+    slopes.reserve(static_cast<std::size_t>(count) * 2);
+    for (int i = 0; i < count; ++i)
+    {
+        for (int j = i + 1; j < count; ++j)
+        {
+            const double dt = times[j] - times[i];
+            if (dt < min_pair_dt)
+            {
+                continue;
+            }
+            slopes.push_back((values[j] - values[i]) / dt);
+        }
+    }
+    if (slopes.size() < 5)
+    {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    auto middle = slopes.begin() + static_cast<long>(slopes.size() / 2);
+    std::nth_element(slopes.begin(), middle, slopes.end());
+    const double slope = *middle;
+    std::vector<double> deviations;
+    deviations.reserve(slopes.size());
+    for (const double value : slopes)
+    {
+        deviations.push_back(std::fabs(value - slope));
+    }
+    auto dev_middle = deviations.begin() + static_cast<long>(deviations.size() / 2);
+    std::nth_element(deviations.begin(), dev_middle, deviations.end());
+    if (sigma_out != nullptr)
+    {
+        *sigma_out = 1.4826 * (*dev_middle);
+    }
+    return slope;
+}
+
 // 某块板相对云台准星（光轴）的角距离：yaw 与 pitch 里取大的那个。
 // 用来回答"现在准星压在谁身上"——自瞄应该瞄准星上的车，而不是检测列表里
 // 碰巧排第一的那台（实拍 v4 两台车同时在画面里，旧逻辑会永远锁在右边那台）。
@@ -1072,23 +1118,56 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
         }
         if (chosen == nullptr)
         {
+            // 换板（云台甩到另一块板上，快速自转时每几十帧一次）：位置跳变
+            // 超过最近邻门限，但法向差恰好是 2π/N 的整数倍——四块板共享同一个
+            // 车体朝向，折叠后是连续的。这种情况接上去，窗口不中断（G 组
+            // 8 rad/s 靠这一条）。反例是 v4 的斜置副板：它离正板 0.38 m，
+            // 但法向差只有 26°、不是 90° 的整数倍，不会被接上。
+            double handoff = config_.position_gate_m;
+            for (const WorldObservation &observation : world)
+            {
+                if (observation.target_id != target_id_ || !observation.has_yaw ||
+                    !observation.position.allFinite())
+                {
+                    continue;
+                }
+                const double jump = std::fabs(foldPeriod(
+                    observation.yaw - rate_samples_.back().unwrapped_yaw, period));
+                if (jump > 0.30)
+                {
+                    continue;
+                }
+                const double distance =
+                    (observation.position - rate_samples_.back().position).norm();
+                if (distance < handoff)
+                {
+                    handoff = distance;
+                    chosen = &observation;
+                }
+            }
+        }
+        if (chosen == nullptr)
+        {
             // 这块板这一帧没被看到（被挡/漏检）：窗口保留，等下一帧；
             // 间断太久由下面的 rate_max_gap_s 清空。
             if (timestamp_s - rate_samples_.back().timestamp_s > config_.rate_max_gap_s)
             {
                 rate_samples_.clear();
+                last_rate_update_s_ = -1.0e9;
             }
             return;
         }
     }
     if (chosen == nullptr)
     {
+        diagnostics_.rate_window_samples = static_cast<int>(rate_samples_.size());
         return;
     }
     if (!rate_samples_.empty() &&
         timestamp_s - rate_samples_.back().timestamp_s > config_.rate_max_gap_s)
     {
         rate_samples_.clear();
+        last_rate_update_s_ = -1.0e9;
     }
 
     // 2) 解缠：折叠掉换板造成的 2pi/N 整数倍。
@@ -1108,7 +1187,8 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
             unwrapped = rate_samples_.back().unwrapped_yaw + delta;
         }
     }
-    rate_samples_.push_back({timestamp_s, unwrapped, chosen->position});
+    rate_samples_.push_back({timestamp_s, unwrapped, chosen->position,
+                             Eigen::Vector2d(ekf_.state()(0), ekf_.state()(2))});
     while (!rate_samples_.empty() &&
            timestamp_s - rate_samples_.front().timestamp_s > config_.rate_window_s)
     {
@@ -1122,6 +1202,7 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
     //    对 ≤30% 的野值免疫；误差取中位绝对偏差（MAD），野值多时报出的 sigma
     //    很大，滤波器自然不会被它拖走——这就是"由数据自己决定转不转"。
     const int count = static_cast<int>(rate_samples_.size());
+    diagnostics_.rate_window_samples = count;
     if (count < config_.rate_min_samples)
     {
         return;
@@ -1132,44 +1213,57 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
         return;
     }
     const double min_pair_dt = 0.5 * span;
-    std::vector<double> pair_slopes;
-    pair_slopes.reserve(static_cast<std::size_t>(count) * 2);
+
+    // 3a) 第一路证据：法向斜率（Theil-Sen + MAD）。
+    std::vector<double> times(static_cast<std::size_t>(count));
+    std::vector<double> yaws(static_cast<std::size_t>(count));
+    std::vector<double> bearings(static_cast<std::size_t>(count));
+    double bearing_unwrapped = 0.0;
     for (int i = 0; i < count; ++i)
     {
-        for (int j = i + 1; j < count; ++j)
+        const RateSample &sample = rate_samples_[static_cast<std::size_t>(i)];
+        times[static_cast<std::size_t>(i)] = sample.timestamp_s;
+        yaws[static_cast<std::size_t>(i)] = sample.unwrapped_yaw;
+        const double dx = sample.position.x() - sample.center.x();
+        const double dy = sample.position.y() - sample.center.y();
+        const double bearing = std::atan2(-dy, -dx);
+        if (i == 0)
         {
-            const double dt = rate_samples_[j].timestamp_s - rate_samples_[i].timestamp_s;
-            if (dt < min_pair_dt)
-            {
-                continue;
-            }
-            pair_slopes.push_back((rate_samples_[j].unwrapped_yaw -
-                                   rate_samples_[i].unwrapped_yaw) /
-                                  dt);
+            bearing_unwrapped = bearing;
         }
+        else
+        {
+            bearing_unwrapped += foldPeriod(bearing - bearing_unwrapped, period);
+        }
+        bearings[static_cast<std::size_t>(i)] = bearing_unwrapped;
     }
-    if (pair_slopes.size() < 5)
-    {
-        return;
-    }
-    const auto middle = pair_slopes.begin() + static_cast<long>(pair_slopes.size() / 2);
-    std::nth_element(pair_slopes.begin(), middle, pair_slopes.end());
-    const double slope = *middle;
-    std::vector<double> deviations;
-    deviations.reserve(pair_slopes.size());
-    for (const double value : pair_slopes)
-    {
-        deviations.push_back(std::fabs(value - slope));
-    }
-    const auto dev_middle = deviations.begin() + static_cast<long>(deviations.size() / 2);
-    std::nth_element(deviations.begin(), dev_middle, deviations.end());
-    const double mad = *dev_middle;
+    double mad = 0.0;
+    const double slope = theilSenSlope(times, yaws, min_pair_dt, &mad);
     if (!std::isfinite(slope) || !std::isfinite(mad))
     {
         return;
     }
-    const double sigma =
-        std::max(1.4826 * mad, config_.rate_sigma_floor_rad_s);
+    const double sigma = std::max(1.4826 * mad, config_.rate_sigma_floor_rad_s);
+    if (sigma > config_.rate_max_sigma_rad_s)
+    {
+        return;
+    }
+
+    // 3b) 第二路证据：板相对车心的方位角斜率。
+    //
+    //     法向在实拍小目标上会"整段地"漂（v4 的板心在 ±45° 折叠边界附近来回
+    //     翻，解缠后是每帧 +5° 的锯齿，Theil-Sen 也救不了——实测斜率 -10 rad/s，
+    //     而车其实没转）。位置没有这个问题：目标平移时板与车心一起动，方位角
+    //     不变。两路证据打架时以"说不清"处理：不更新，让衰减项把 omega 停在 0。
+    const double bearing_slope = theilSenSlope(times, bearings, min_pair_dt, nullptr);
+    diagnostics_.rate_bearing_rad_s = std::isfinite(bearing_slope) ? bearing_slope : 0.0;
+    const double tolerance = std::max(config_.rate_agreement_rad_s,
+                                      0.5 * std::fabs(slope));
+    if (std::isfinite(bearing_slope) && std::fabs(slope - bearing_slope) > tolerance)
+    {
+        return;
+    }
+
     if (!ekf_.updateYawRate(slope, sigma))
     {
         return;
@@ -2196,6 +2290,14 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
     // 先用窗口化的法向斜率把 omega 拉正，再做位置更新：顺序反过来会让位置
     // 更新先按错误的 omega 外推、把中心推歪，再靠斜率量测去救。
     updateYawRateFromWindow(world, timestamp_seconds);
+    // 证据持续缺席时把 omega 慢慢拉回 0：转速由数据决定，数据说不转就不转。
+    // 窗口很弱（sigma 2.0），压不过一次真实的斜率量测（sigma 0.15 量级）。
+    if (config_.rate_update_enabled &&
+        timestamp_seconds - last_rate_update_s_ > config_.rate_decay_after_s &&
+        std::fabs(ekf_.state()(7)) > 0.05)
+    {
+        ekf_.updateYawRate(0.0, config_.rate_decay_sigma_rad_s);
+    }
     updateRadiusFromPairs(world);
     const int updates = associateAndUpdate(world, timestamp_seconds);
     diagnostics_.updates_this_frame = updates;

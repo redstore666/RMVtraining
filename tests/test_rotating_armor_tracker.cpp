@@ -527,6 +527,59 @@ void scenarioFastSpin(double omega)
     }
 }
 
+// ------------------------------------------------------------------ H
+// 转速的"自我判别"：目标到底转不转，不能靠调用方声明，也不该被法向噪声带跑。
+// 实拍里板面法向在小目标上抖 ±20°，而"静止"和"慢转"在单帧上根本分不开。
+void scenarioSelfClassifiedRotation()
+{
+    std::printf("\n[H] 转速自我判别（不靠调用方声明，法向噪声决定信不信）\n");
+    struct Case
+    {
+        const char *name;
+        double omega;
+        double vx;
+        double vy;
+        double sigma_normal_rad;
+        double tolerance;
+    };
+    const Case cases[] = {
+        // 实拍小目标法向抖 ±20°：静止/平移都必须判成"没在转"。
+        {"静止+噪声法向", 0.0, 0.0, 0.0, 0.35, 0.45},
+        {"平移+噪声法向", 0.0, 0.0, 0.50, 0.35, 0.45},
+        // 法向干净时，慢转必须真的被跟到（不能一律往 0 压）。
+        {"慢转+干净法向", 1.5, 0.0, 0.0, 0.05, 0.80},
+    };
+    for (const Case &test_case : cases)
+    {
+        State truth;
+        truth << 3.0, test_case.vx, 0.0, test_case.vy, 0.35, 0.0, 0.40, test_case.omega, 0.20;
+        // 用生产默认配置（半径钉死）：合成测试默认放开半径是为了验证"坏初值
+        // 能收敛"，但半径与中心在单板观测下是耦合的，法向噪声大时半径会被
+        // 位置残差拉着塌掉（实测 R 从 0.25 掉到 0.017），那不是这里要测的东西。
+        rotating_armor::TrackerConfig config;
+        sim::Rig rig(truth, config);
+        rig.sigma_normal_rad = test_case.sigma_normal_rad;
+        rig.gimbal.yaw = rotating_armor::vectorYaw(Eigen::Vector3d(3.0, 0.0, 0.0));
+        rig.gimbal.pitch = rotating_armor::vectorPitch(Eigen::Vector3d(3.0, 0.0, 0.35));
+        // 云台追"车心"而不是追某块板：追板会让云台在 4 块板之间来回跳，
+        // 世界系法向变成锯齿，那是夹具的 artifact，不是被测对象。
+        for (int frame = 0; frame < 420; ++frame)
+        {
+            rig.gimbal.chase(Eigen::Vector3d(rig.truth(0), rig.truth(2), rig.truth(4)), rig.dt);
+            rig.step(true, false);
+        }
+        const auto &estimate = rig.tracker.ekf().state();
+        const double omega_error = std::fabs(estimate(7) - test_case.omega);
+        std::printf("  %-16s sigma_yaw=%.2f rad  omega 估计=%+.2f（真值 %+.2f，差 %.2f）"
+                    "R=%.3f 车心误差=%.3f m\n",
+                    test_case.name, test_case.sigma_normal_rad, estimate(7), test_case.omega,
+                    omega_error, estimate(8),
+                    std::hypot(estimate(0) - rig.truth(0), estimate(2) - rig.truth(2)));
+        check(omega_error <= test_case.tolerance,
+              "H 转速自我判别：omega 估计落在真值附近（误差 <= tolerance）");
+    }
+}
+
 } // namespace
 
 int main()
@@ -542,6 +595,7 @@ int main()
     scenarioFastSpin(4.0);
     scenarioFastSpin(6.0);
     scenarioFastSpin(8.0);
+    scenarioSelfClassifiedRotation();
     if (g_failures != 0)
     {
         std::printf("\n%d 项失败\n", g_failures);
