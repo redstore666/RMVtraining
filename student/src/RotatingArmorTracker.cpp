@@ -1345,8 +1345,13 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
     {
         return;
     }
-    used_sigma = std::min(std::max(used_sigma, config_.rate_sigma_floor_rad_s),
-                          config_.rate_max_sigma_rad_s);
+    // sigma 超过上限说明这一窗的斜率散到没有信息（换板、漏检混在一起），
+    // 把它硬压到上限反而让"离谱值"以中等权重进滤波器——宁可不采信。
+    if (used_sigma > config_.rate_max_sigma_rad_s)
+    {
+        return;
+    }
+    used_sigma = std::max(used_sigma, config_.rate_sigma_floor_rad_s);
 
     if (!ekf_.updateYawRate(used_slope, used_sigma))
     {
@@ -1640,6 +1645,10 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
     int accepted = 0;
     std::vector<bool> used(world.size(), false);
     std::vector<int> slot_of_observation(world.size(), -1);
+    // 同一帧里两块不同的板不能更新到同一个槽位：v4 实拍中一台车同时露出两块
+    // 相邻板（相距 0.40 m），若两帧都判给同一个槽位，中心会被来回拉、相位永远
+    // 定不住。按距离贪心分配，已用过的槽位本帧不再接受第二块板。
+    std::vector<bool> slot_used(static_cast<std::size_t>(plate_count), false);
     diagnostics_.rejected_this_frame = 0;
     diagnostics_.best_gate_distance_m = std::numeric_limits<double>::infinity();
     diagnostics_.best_gate_nis = std::numeric_limits<double>::infinity();
@@ -1669,6 +1678,10 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
             observation.sigma_position_m = observationSigma(world[i].sigma_position_m);
             for (int slot = 0; slot < plate_count; ++slot)
             {
+                if (slot_used[static_cast<std::size_t>(slot)])
+                {
+                    continue;
+                }
                 const Eigen::Vector3d predicted = platePosition(ekf_.state(), slot, plate_count);
                 const double distance = (world[i].position - predicted).norm();
                 // 换板（更新的不是当前瞄准槽位）时观测更不可信：板编号只到
@@ -1729,6 +1742,7 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
             break;
         }
         const WorldObservation &chosen = world[static_cast<std::size_t>(best_observation)];
+        slot_used[static_cast<std::size_t>(best_slot)] = true;
         ArmorObservation observation;
         if (!smoothObservation(chosen, best_slot, timestamp_s, observation))
         {

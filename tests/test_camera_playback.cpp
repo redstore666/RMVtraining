@@ -17,7 +17,8 @@
 //   --stride N       每 N 帧处理 1 帧（默认 1）
 //   --start N --end N  只处理 [start, end) 帧（挑片段用）
 //   --max-frames N   最多处理 N 帧
-//   --wait MS        窗口模式每帧等待毫秒（默认 0，按视频帧率跑）
+//   --wait MS        每帧等待毫秒（慢速回放；窗口模式用 waitKey，headless 用 sleep）
+//   --fps N          等价于 --wait (1000/N)，按指定帧率慢放
 //   --csv PATH       逐帧导出 CSV（表头见文件第一行）
 //   --bias S         模拟控制器前馈补偿（秒），写入云台快照的 prediction_bias_s
 //   --config PATH    相机参数文件（默认 config/camera.yaml，或 RMV_CAMERA_CONFIG）
@@ -50,6 +51,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <thread>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -230,6 +232,11 @@ namespace
                 args.max_frames = std::max(0, std::atoi(next("--max-frames").c_str()));
             else if (arg == "--wait")
                 args.wait_ms = std::max(0, std::atoi(next("--wait").c_str()));
+            else if (arg == "--fps")
+            {
+                const double fps = std::atof(next("--fps").c_str());
+                args.wait_ms = fps > 0.0 ? static_cast<int>(1000.0 / fps + 0.5) : 0;
+            }
             else if (arg == "--bias")
                 args.bias_s = std::atof(next("--bias").c_str());
             else if (arg == "--csv")
@@ -407,7 +414,7 @@ namespace
     {
         std::cerr << "用法: " << program << " <video> [--red|--blue] [--ekf] [--headless]\n"
                   << "        [--stride N] [--start N] [--end N] [--max-frames N]\n"
-                  << "        [--wait MS] [--csv PATH] [--bias S] [--config PATH] [--dump-every N]\n"
+                  << "        [--wait MS] [--fps N] [--csv PATH] [--bias S] [--config PATH] [--dump-every N]\n"
                   << "        [--topdown] [--topdown-world] [--topdown-ppm P] [--topdown-out DIR]\n";
     }
 
@@ -868,6 +875,23 @@ int main(int argc, char **argv)
             {
                 nearest_distance = distance;
                 nearest = &pose;
+            }
+            if (std::getenv("OV_DEBUG") != nullptr && !pose.detection.corners.empty())
+            {
+                cv::Point2f box(0.0f, 0.0f);
+                for (const cv::Point2f &corner : pose.detection.corners) box += corner;
+                box /= static_cast<float>(pose.detection.corners.size());
+                const cv::Vec3d p_cam = gimbalToCameraPoint(
+                    camera, cv::Vec3d(pose.position_gimbal_m[0], pose.position_gimbal_m[1],
+                                      pose.position_gimbal_m[2]));
+                std::vector<cv::Point3d> pts{cv::Point3d(p_cam[0], p_cam[1], p_cam[2])};
+                std::vector<cv::Point2d> proj;
+                cv::projectPoints(pts, cv::Vec3d(0, 0, 0), cv::Vec3d(0, 0, 0),
+                                  camera.camera_matrix, cv::noArray(), proj);
+                std::fprintf(stderr, "[ov] f=%d id=%d box=(%.0f,%.0f) proj=(%.0f,%.0f) d=%.1f reproj=%.2f\n",
+                             frame_index, pose.detection.target_id, box.x, box.y,
+                             proj[0].x, proj[0].y, cv::norm(box - cv::Point2f(proj[0])),
+                             pose.reprojection_error);
             }
             const std::pair<int, int> key{pose.detection.target_id,
                                           static_cast<int>(pose.detection.size)};
@@ -1362,8 +1386,15 @@ int main(int argc, char **argv)
                         }
                     }
                 };
-                draw_body(ekf_state, diagnostics.aim_slot, cv::Scalar(235, 120, 60),
-                          cv::Scalar(0, 200, 255), 2, cv::Scalar(-1, -1, -1));
+                // 只有已经锁定（Tracking 且 EKF 初始化）时才画模型板：collecting
+                // 阶段 ekf().state() 还是零向量（R=0），四块板会全塌在世界原点，
+                // 投影出一堆与真实板无关的线段——看起来就像"蓝板和绿板对不上"。
+                if (diagnostics.phase == rotating_armor::LockPhase::Tracking &&
+                    active_tracker->initialized())
+                {
+                    draw_body(ekf_state, diagnostics.aim_slot, cv::Scalar(235, 120, 60),
+                              cv::Scalar(0, 200, 255), 2, cv::Scalar(-1, -1, -1));
+                }
                 // 多目标：其它车也画出来（细线、紫灰），一眼看出"两台都被跟住了"。
                 for (const rotating_armor::TopDownFrame &body : extra_bodies)
                 {
@@ -1635,6 +1666,11 @@ int main(int argc, char **argv)
         {
             std::cout << "[回放] " << frames_processed << " 帧  det=" << detections.size()
                       << "  detect " << detect_ms << "ms  solve " << solve_ms << "ms\n";
+        }
+        // 无窗口时的慢速回放：--wait 在 headless 下同样生效，用 sleep 而不是 waitKey。
+        if (!show && args.wait_ms > 0)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(args.wait_ms));
         }
 
         frame_index += args.stride;
