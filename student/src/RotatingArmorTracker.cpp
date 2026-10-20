@@ -1255,15 +1255,7 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
     }
     double mad = 0.0;
     const double slope = theilSenSlope(times, yaws, min_pair_dt, &mad);
-    if (!std::isfinite(slope) || !std::isfinite(mad))
-    {
-        return;
-    }
     const double sigma = std::max(1.4826 * mad, config_.rate_sigma_floor_rad_s);
-    if (sigma > config_.rate_max_sigma_rad_s)
-    {
-        return;
-    }
 
     // 3b) 第二路证据：板相对车心的方位角斜率。
     //
@@ -1271,16 +1263,42 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
     //     翻，解缠后是每帧 +5° 的锯齿，Theil-Sen 也救不了——实测斜率 -10 rad/s，
     //     而车其实没转）。位置没有这个问题：目标平移时板与车心一起动，方位角
     //     不变。两路证据打架时以"说不清"处理：不更新，让衰减项把 omega 停在 0。
-    const double bearing_slope = theilSenSlope(times, bearings, min_pair_dt, nullptr);
+    double bearing_mad = 0.0;
+    const double bearing_slope = theilSenSlope(times, bearings, min_pair_dt, &bearing_mad);
     diagnostics_.rate_bearing_rad_s = std::isfinite(bearing_slope) ? bearing_slope : 0.0;
-    const double tolerance = std::max(config_.rate_agreement_rad_s,
-                                      0.5 * std::fabs(slope));
-    if (std::isfinite(bearing_slope) && std::fabs(slope - bearing_slope) > tolerance)
+
+    // 3c) 以"位置相位"为主证据。
+    //
+    //     法向斜率是主证据这件事，在实拍小目标上不成立：v4 左车（真转速 ~5 rad/s）
+    //     的法向在 ±45° 折叠边界来回翻，Theil-Sen 给出的是锯齿斜率，符号都可能反。
+    //     位置相位没有这个问题——板心到车心的方位角每帧只走 ω·dt（166fps、5rad/s
+    //     时 0.03 rad，远小于折叠半周期 45°），位置噪声 1-3cm 又比法向噪声
+    //     （~20°）小一个量级。法向斜率只在它和位置相位一致时用来抬高可信度。
+    const double bearing_sigma =
+        std::max(1.4826 * bearing_mad, config_.rate_sigma_floor_rad_s);
+    double used_slope = bearing_slope;
+    double used_sigma = bearing_sigma;
+    if (std::isfinite(slope) && std::isfinite(bearing_slope))
+    {
+        const double tolerance = std::max(config_.rate_agreement_rad_s,
+                                          0.5 * std::fabs(bearing_slope));
+        if (std::fabs(slope - bearing_slope) <= tolerance)
+        {
+            // 两路一致：按方差加权，瘦一下 sigma。
+            const double w_n = 1.0 / (sigma * sigma);
+            const double w_b = 1.0 / (bearing_sigma * bearing_sigma);
+            used_slope = (w_n * slope + w_b * bearing_slope) / (w_n + w_b);
+            used_sigma = std::sqrt(1.0 / (w_n + w_b));
+        }
+    }
+    if (!std::isfinite(used_slope) || !std::isfinite(used_sigma))
     {
         return;
     }
+    used_sigma = std::min(std::max(used_sigma, config_.rate_sigma_floor_rad_s),
+                          config_.rate_max_sigma_rad_s);
 
-    if (!ekf_.updateYawRate(slope, sigma))
+    if (!ekf_.updateYawRate(used_slope, used_sigma))
     {
         return;
     }
