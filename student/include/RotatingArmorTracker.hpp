@@ -211,6 +211,11 @@ struct TrackerConfig
     // 默认关闭；需要时打开（合成夹具与 v4 的静止车都不需要它）。
     bool contradiction_check{false};
     int max_updates_per_frame{2}; // 同一帧最多用几块板更新（防止病态约束）
+    // 每个槽位是否各自学"半径/角度/高度"偏移（只影响显示用的模型板位置）。
+    // 打开时四块模型板各有圆心，单块板能贴得很紧，代价是它们不再是一个刚体：
+    // 槽位分配在两块同号板之间跳时偏移量跟着跳，画出来就是"转一半又卡回"。
+    // 关掉后四块板严格共享 (cx, cy, R, phase)，同速度同方向同圆心。
+    bool slot_offsets_enabled{false};
 
     // === 状态机 ===
     int stable_updates{12};          // 连续接受多少帧才允许报 Stable
@@ -340,6 +345,10 @@ struct TrackerDiagnostics
     bool radius_from_data{false};
     bool phase_flipped{false};
     std::uint64_t accepted_updates{0};
+    // 单板重锚（rotatePhase+shiftCenter 硬对齐）触发次数。每次触发都会让
+    // 状态瞬间跳到观测上，观感就是"转一部分又卡回去"；这个计数用来区分
+    // "滤波器在跟踪"和"滤波器被硬覆盖"。
+    std::uint64_t single_plate_realigns{0};
     int consecutive_updates{0};
     int missed_frames{0};
     double observation_noise_m{0.0}; // 本帧使用的观测噪声 sigma（m）
@@ -527,6 +536,11 @@ private:
         // 采样时刻的车心估计：用"板相对车心的方位角"做第二路转速证据时，
         // 每个样本必须配它自己的车心，否则目标平移会被当成旋转。
         Eigen::Vector2d center{Eigen::Vector2d::Zero()};
+        // true = 这一帧的观测是从上一帧那块板**位置连续**续接来的（最近邻 <
+        // rate_associate_gate_m）。换板续接（handoff）的样本位置会跳半块板，
+        // 方位角差近 90°，混进方位角序列会解缠出几十 rad/s 的假转速，所以
+        // 方位角证据只用连续样本；法向证据仍可用全部样本（折叠后连续）。
+        bool continuous{true};
     };
     std::deque<RateSample> rate_samples_{};
     void updateYawRateFromWindow(const std::vector<WorldObservation>& world,

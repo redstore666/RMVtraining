@@ -273,6 +273,7 @@ void RotatingArmorTracker::reset()
 
 void RotatingArmorTracker::dropTarget(const char *reason)
 {
+    std::fprintf(stderr, "[drop] %s\n", reason);
     resetRateWindow();
     if (config_.relock_reuse_enabled && ekf_.initialized())
     {
@@ -1103,6 +1104,7 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
     //    观测间最近邻与模型无关，副板只在"目标板消失"时才会被误续接，
     //    而那种情况位置跳变 >0.15 m，直接重起窗口。
     const WorldObservation *chosen = nullptr;
+    bool continuous = true;
     if (rate_samples_.empty())
     {
         for (const WorldObservation &observation : world)
@@ -1159,6 +1161,7 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
                 {
                     handoff = distance;
                     chosen = &observation;
+                    continuous = false;
                 }
             }
         }
@@ -1168,6 +1171,8 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
             // 间断太久由下面的 rate_max_gap_s 清空。
             if (timestamp_s - rate_samples_.back().timestamp_s > config_.rate_max_gap_s)
             {
+                std::fprintf(stderr, "[cleargap] ts=%.3f back=%.3f n=%zu\n", timestamp_s,
+                             rate_samples_.back().timestamp_s, rate_samples_.size());
                 rate_samples_.clear();
                 last_rate_update_s_ = -1.0e9;
             }
@@ -1176,12 +1181,16 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
     }
     if (chosen == nullptr)
     {
+        std::fprintf(stderr, "[nopick] ts=%.3f n=%zu obs=%zu\n", timestamp_s,
+                     rate_samples_.size(), world.size());
         diagnostics_.rate_window_samples = static_cast<int>(rate_samples_.size());
         return;
     }
     if (!rate_samples_.empty() &&
         timestamp_s - rate_samples_.back().timestamp_s > config_.rate_max_gap_s)
     {
+        std::fprintf(stderr, "[cleargap2] ts=%.3f back=%.3f n=%zu\n", timestamp_s,
+                     rate_samples_.back().timestamp_s, rate_samples_.size());
         rate_samples_.clear();
         last_rate_update_s_ = -1.0e9;
     }
@@ -1222,7 +1231,7 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
         }
     }
     rate_samples_.push_back({timestamp_s, unwrapped, chosen->position,
-                             Eigen::Vector2d(ekf_.state()(0), ekf_.state()(2))});
+                             Eigen::Vector2d(ekf_.state()(0), ekf_.state()(2)), continuous});
     while (!rate_samples_.empty() &&
            timestamp_s - rate_samples_.front().timestamp_s > config_.rate_window_s)
     {
@@ -1262,7 +1271,13 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
     // 车心固定、当时车心的抖动才是噪声源。按当前转速选极点。
     const bool spinning_now = std::fabs(ekf_.state()(7)) >= 0.5;
     const Eigen::Vector2d pole(ekf_.state()(0), ekf_.state()(2));
+    // 方位角序列只收"位置连续的同一块板"的样本（见 RateSample::continuous）。
+    std::vector<double> bearing_times;
+    std::vector<double> bearing_values;
+    bearing_times.reserve(static_cast<std::size_t>(count));
+    bearing_values.reserve(static_cast<std::size_t>(count));
     double bearing_unwrapped = 0.0;
+    bool bearing_started = false;
     for (int i = 0; i < count; ++i)
     {
         const RateSample &sample = rate_samples_[static_cast<std::size_t>(i)];
@@ -1272,14 +1287,26 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
         const double dx = sample.position.x() - center.x();
         const double dy = sample.position.y() - center.y();
         const double bearing = std::atan2(-dy, -dx);
-        if (i == 0)
+        if (!bearing_started)
         {
             bearing_unwrapped = bearing;
+            bearing_started = true;
         }
         else
         {
-            bearing_unwrapped += foldPeriod(bearing - bearing_unwrapped, period);
+            // 换板是几何上真实的 90° 跳变（折叠后≈0），同一块板的自转每帧只走
+            // ω·dt（5 rad/s、166fps 时 0.03 rad）。折叠后仍然跳 >0.6 rad 的样本
+            // 只可能来自"另一台车/非刚性副板"，从方位角序列里剔除，但它仍留在
+            // 窗口里供法向证据使用——不需要清窗。
+            const double step = foldPeriod(bearing - bearing_unwrapped, period);
+            if (std::fabs(step) > 0.60)
+            {
+                continue;
+            }
+            bearing_unwrapped += step;
         }
+        bearing_times.push_back(sample.timestamp_s);
+        bearing_values.push_back(bearing_unwrapped);
         bearings[static_cast<std::size_t>(i)] = bearing_unwrapped;
     }
     // 法向序列里可能夹着 NaN（那一帧法向是野值，见上面的说明），只保留有效的。
@@ -1308,7 +1335,10 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
     //     而车其实没转）。位置没有这个问题：目标平移时板与车心一起动，方位角
     //     不变。两路证据打架时以"说不清"处理：不更新，让衰减项把 omega 停在 0。
     double bearing_mad = 0.0;
-    const double bearing_slope = theilSenSlope(times, bearings, min_pair_dt, &bearing_mad);
+    const double bearing_slope =
+        bearing_times.size() >= 8
+            ? theilSenSlope(bearing_times, bearing_values, 0.5 * (bearing_times.back() - bearing_times.front()), &bearing_mad)
+            : std::numeric_limits<double>::quiet_NaN();
     diagnostics_.rate_bearing_rad_s = std::isfinite(bearing_slope) ? bearing_slope : 0.0;
 
     // 3c) 以"位置相位"为主证据。
@@ -1335,23 +1365,8 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
             used_sigma = std::sqrt(1.0 / (w_n + w_b));
         }
     }
-    if (!std::isfinite(used_slope) || !std::isfinite(used_sigma))
-    {
-        return;
-    }
-    // 12 rad/s 已经是四板模型在这个距离下能分辨的上限（再快单帧就跨过折叠半周期）。
-    // 超过它只可能是解缠跳板/换车，宁可不更新，交给衰减项处理。
-    if (std::fabs(used_slope) > 12.0)
-    {
-        return;
-    }
-    // sigma 超过上限说明这一窗的斜率散到没有信息（换板、漏检混在一起），
-    // 把它硬压到上限反而让"离谱值"以中等权重进滤波器——宁可不采信。
-    if (used_sigma > config_.rate_max_sigma_rad_s)
-    {
-        return;
-    }
-    used_sigma = std::max(used_sigma, config_.rate_sigma_floor_rad_s);
+    std::fprintf(stderr, "[ev] n=%d yaw=%+.2f(%.2f) bear=%+.2f(%.2f) used=%+.2f\n", count,
+                 slope, mad, bearing_slope, bearing_mad, used_slope);
 
     if (!ekf_.updateYawRate(used_slope, used_sigma))
     {
@@ -1745,7 +1760,7 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
         slot_used[static_cast<std::size_t>(best_slot)] = true;
         // 学这个槽位相对车体中心的高度偏移（只在已初始化时才有意义）。纯显示量，
         // 不参与滤波；EMA 系数小一点，避免单帧深度野值把它带跑。
-        if (ekf_.initialized())
+        if (ekf_.initialized() && config_.slot_offsets_enabled)
         {
             const double offset = chosen.position.z() - ekf_.state()(4);
             if (std::fabs(offset) < 0.20)
@@ -1804,6 +1819,7 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                     std::atan2(center_y - chosen.position.y(), center_x - chosen.position.x());
                 const double theta_target = wrapToPi(phase_target - slot_phase);
                 const double delta_theta = wrapToPi(theta_target - ekf_.state()(6));
+                ++diagnostics_.single_plate_realigns;
                 ekf_.rotatePhase(delta_theta);
                 const Eigen::Vector3d plate_after =
                     platePosition(ekf_.state(), best_slot, count);
