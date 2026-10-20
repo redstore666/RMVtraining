@@ -8,6 +8,13 @@ namespace {
 
 constexpr double kPi = 3.141592653589793238462643383279502884;
 
+// 车心到装甲板平面的水平距离（= 旋转半径）的物理区间。
+// 下界 0.05 m：小于它模型退化成"无半径纯旋转"，ω 不可观测，而 update() 的
+// 位置雅可比 H(:,8) 仍能把 R 一路压向 0。上界 0.60 m：远大于任何 RM 全向
+// 底盘（大装甲板 ~0.28，自制道具实测 ~0.28），只用来兜数值发散。
+constexpr double kRadiusMinM = 0.05;
+constexpr double kRadiusMaxM = 0.60;
+
 using Gain = Eigen::Matrix<double, kStateDim, kMeasurementDim>;
 using MeasurementCovariance = Eigen::Matrix3d;
 
@@ -214,8 +221,28 @@ bool RotatingArmorEkf::update(const ArmorObservation& observation, int plate_slo
     const Gain k = covariance_ * h_jacobian.transpose() * s.inverse();
 
     // 残差 (z - h) 走的是 cos/sin，本来就不需要 wrap；只有状态里的 yaw 需要。
-    state_ = state_ + k * (observation.position - h);
-    state_(6) = wrapAngle(state_(6));
+    // 先算到临时量里再提交：半径被推成 <=0 时整条更新必须丢弃，不能留下半个
+    // 被污染的状态。
+    State candidate = state_ + k * (observation.position - h);
+    candidate(6) = wrapAngle(candidate(6));
+
+    // 半径是几何量，必须落在物理区间内：它表示"装甲板在车心坐标系里的偏移长度"。
+    // 位置观测对它的雅可比 H(:,8) = [-cos(phase), -sin(phase), 0] 只约束"板在哪
+    // 一侧"，不约束正负，也不约束大小——单板观测下 R 与相位差 180° 几乎等价，
+    // 增益大或观测少约束时整条链会滑向 R<0 或 R->0 的退化解。<0 时 measurement()
+    // 把每块板投到车心反方向（四块板圆周整体反向，实拍里就是"绿板转心偏高、蓝板
+    // 转一半卡回去"）；->0 时模型退化成"无半径纯旋转"，ω 不可观测。
+    // 实测合成双板交替场景：σ=0.02 时 R 滑到 -0.25，σ=0.05/0.08 时滑到 +0.004
+    // 且 ω 反号。
+    //
+    // 注意这里必须是"钳制"而不是"丢弃这次更新"：试过直接 return false，结果 R
+    // 一旦滑到边界，之后每次更新都被拒，状态冻结在坏值上（σ=0.05 时 ω 跑到
+    // -13 rad/s）。钳制则让滤波继续跑，只是这个方向不再越过物理解。
+    if (!candidate.allFinite()) {
+        return false;
+    }
+    candidate(8) = std::clamp(candidate(8), kRadiusMinM, kRadiusMaxM);
+    state_ = candidate;
 
     // Joseph 形式：数值上比 (I - K H) P 更稳，且保持对称。
     const Covariance i_kh = Covariance::Identity() - k * h_jacobian;
