@@ -164,6 +164,7 @@ namespace
         bool phase_yaw_static{false};
         bool no_aim_extrapolate{false};
         double realign_m{0.25};
+        bool pair_radius{false};
         bool phase_anchor{true};
         double aim_obs{0.012};
         double aim_alpha{0.0};
@@ -277,6 +278,10 @@ namespace
                 args.phase_anchor = false;
             else if (arg == "--sigma-floor")
                 args.sigma_floor = std::atof(next("--sigma-floor").c_str());
+            else if (arg == "--pair-radius")
+            {
+                args.pair_radius = true;
+            }
             else if (arg == "--realign")
             {
                 args.realign_m = std::atof(next("--realign").c_str());
@@ -577,6 +582,11 @@ int main(int argc, char **argv)
     tracker_config.phase_update_when_static = args.phase_yaw_static;
     tracker_config.aim_observation_extrapolate = !args.no_aim_extrapolate;
     tracker_config.single_plate_realign_m = args.realign_m;
+    if (args.pair_radius)
+    {
+        tracker_config.pair_radius_update_enabled = true;
+        tracker_config.freeze_radius = false;
+    }
     rotating_armor::RotatingArmorTracker tracker(tracker_config);
     // 多目标模式下，下游（画模型板、trace、统计）统一走 active_tracker：
     // 单目标时它就是 tracker 本身，多目标时是"当前主目标"那辆车的 tracker。
@@ -1293,36 +1303,67 @@ int main(int argc, char **argv)
                                   camera.camera_matrix, cv::noArray(), projected);
                 // 四块模型板按"板面切线"画成短条：条压在亮着的板上 = 状态对；
                 // 偏出多少，用眼睛就能量。瞄准板画黄、其它三块画蓝细条。
-                for (int slot = 0; slot < 4; ++slot)
-                {
-                    const double phase = ekf_state(6) + 2.0 * 3.141592653589793 * slot / 4.0;
-                    const Eigen::Vector3d tangent(-std::sin(phase), std::cos(phase), 0.0);
-                    const Eigen::Vector3d center_world =
-                        rotating_armor::platePosition(ekf_state, slot, 4);
-                    std::vector<cv::Point3d> ends;
-                    bool in_front = true;
-                    for (double sign : {-1.0, 1.0})
+                // 一辆车的四块模型板 + 车心；aim_slot < 0 表示不标瞄准板。
+                const auto draw_body = [&](const rotating_armor::State &st, int aim_slot,
+                                           cv::Scalar plate_color, cv::Scalar aim_color,
+                                           int thickness, cv::Scalar center_color) {
+                    for (int slot = 0; slot < 4; ++slot)
                     {
-                        const Eigen::Vector3d p_world = center_world + sign * 0.0675 * tangent;
-                        const Eigen::Vector3d p_gimbal = rotating_armor::toGimbal(gimbal, p_world);
-                        const cv::Vec3d p_camera = gimbalToCameraPoint(
-                            camera, cv::Vec3d(p_gimbal.x(), p_gimbal.y(), p_gimbal.z()));
-                        if (!(p_camera[2] > 0.3) || p_camera[2] > 20.0)
+                        const double phase = st(6) + 2.0 * 3.141592653589793 * slot / 4.0;
+                        const Eigen::Vector3d tangent(-std::sin(phase), std::cos(phase), 0.0);
+                        const Eigen::Vector3d center_world =
+                            rotating_armor::platePosition(st, slot, 4);
+                        std::vector<cv::Point3d> ends;
+                        bool in_front = true;
+                        for (double sign : {-1.0, 1.0})
                         {
-                            in_front = false;
-                            break;
+                            const Eigen::Vector3d p_world =
+                                center_world + sign * 0.0675 * tangent;
+                            const Eigen::Vector3d p_gimbal =
+                                rotating_armor::toGimbal(gimbal, p_world);
+                            const cv::Vec3d p_camera = gimbalToCameraPoint(
+                                camera, cv::Vec3d(p_gimbal.x(), p_gimbal.y(), p_gimbal.z()));
+                            if (!(p_camera[2] > 0.3) || p_camera[2] > 20.0)
+                            {
+                                in_front = false;
+                                break;
+                            }
+                            ends.emplace_back(p_camera[0], p_camera[1], p_camera[2]);
                         }
-                        ends.emplace_back(p_camera[0], p_camera[1], p_camera[2]);
+                        if (!in_front)
+                            continue;
+                        std::vector<cv::Point2d> ends_px;
+                        cv::projectPoints(ends, cv::Vec3d(0, 0, 0), cv::Vec3d(0, 0, 0),
+                                          camera.camera_matrix, cv::noArray(), ends_px);
+                        const bool is_aim = slot == aim_slot;
+                        cv::line(frame, ends_px[0], ends_px[1],
+                                 is_aim ? aim_color : plate_color,
+                                 is_aim ? thickness + 1 : thickness, cv::LINE_AA);
                     }
-                    if (!in_front)
-                        continue;
-                    std::vector<cv::Point2d> ends_px;
-                    cv::projectPoints(ends, cv::Vec3d(0, 0, 0), cv::Vec3d(0, 0, 0),
-                                      camera.camera_matrix, cv::noArray(), ends_px);
-                    const bool is_aim = slot == diagnostics.aim_slot;
-                    cv::line(frame, ends_px[0], ends_px[1],
-                             is_aim ? cv::Scalar(0, 200, 255) : cv::Scalar(235, 120, 60),
-                             is_aim ? 3 : 2, cv::LINE_AA);
+                    if (center_color[0] >= 0.0)
+                    {
+                        const Eigen::Vector3d c_world(st(0), st(2), st(4));
+                        const Eigen::Vector3d c_gimbal = rotating_armor::toGimbal(gimbal, c_world);
+                        const cv::Vec3d c_camera = gimbalToCameraPoint(
+                            camera, cv::Vec3d(c_gimbal.x(), c_gimbal.y(), c_gimbal.z()));
+                        if (c_camera[2] > 0.3 && c_camera[2] < 20.0)
+                        {
+                            std::vector<cv::Point2d> c_px;
+                            cv::projectPoints(std::vector<cv::Point3d>{cv::Point3d(
+                                                  c_camera[0], c_camera[1], c_camera[2])},
+                                              cv::Vec3d(0, 0, 0), cv::Vec3d(0, 0, 0),
+                                              camera.camera_matrix, cv::noArray(), c_px);
+                            cv::drawMarker(frame, c_px[0], center_color, cv::MARKER_CROSS, 14, 1);
+                        }
+                    }
+                };
+                draw_body(ekf_state, diagnostics.aim_slot, cv::Scalar(235, 120, 60),
+                          cv::Scalar(0, 200, 255), 2, cv::Scalar(-1, -1, -1));
+                // 多目标：其它车也画出来（细线、紫灰），一眼看出"两台都被跟住了"。
+                for (const rotating_armor::TopDownFrame &body : extra_bodies)
+                {
+                    draw_body(body.state, -1, cv::Scalar(160, 110, 160), cv::Scalar(160, 110, 160),
+                              1, cv::Scalar(150, 60, 150));
                 }
                 // 只把"跟踪中的那块板"(aim slot) 画实：另外 3 块是模型外推到车体
                 // 背面的，本来就看不见，画出来会像"满天飞的点"，容易误判成状态错了。
