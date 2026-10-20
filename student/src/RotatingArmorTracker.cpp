@@ -1190,13 +1190,31 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
     double unwrapped = chosen->yaw;
     if (!rate_samples_.empty())
     {
-        const double delta =
-            foldPeriod(chosen->yaw - rate_samples_.back().unwrapped_yaw, period);
+        double reference = rate_samples_.back().unwrapped_yaw;
+        if (!std::isfinite(reference))
+        {
+            for (auto it = rate_samples_.rbegin(); it != rate_samples_.rend(); ++it)
+            {
+                if (std::isfinite(it->unwrapped_yaw))
+                {
+                    reference = it->unwrapped_yaw;
+                    break;
+                }
+            }
+        }
+        const double delta = std::isfinite(reference)
+                                 ? foldPeriod(chosen->yaw - reference, period)
+                                 : 0.0;
         // 单帧 0.6 rad 在 166 fps 下相当于 100 rad/s，物理上不可能；出现就说明
         // 续接跳到了别的板/别的车，窗口重起，别把跳变当成旋转。
+        // 法向单帧跳 >0.6 rad（166fps 下等价 100 rad/s）说明这一帧的法向是野值
+        // （实拍暗场景里板面法向抖动 ±20° 很常见，delta 经常到 ±0.3）。以前这里
+        // 直接清窗，结果窗口永远长不到 min_samples：法向野值把"位置相位"这条
+        // 更好的证据一起废掉了。现在只把这一帧的**法向**标成无效（NaN），
+        // 位置样本照常保留，方位角证据继续累积。
         if (std::fabs(delta) > 0.60)
         {
-            rate_samples_.clear();
+            unwrapped = std::numeric_limits<double>::quiet_NaN();
         }
         else
         {
@@ -1264,8 +1282,23 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
         }
         bearings[static_cast<std::size_t>(i)] = bearing_unwrapped;
     }
+    // 法向序列里可能夹着 NaN（那一帧法向是野值，见上面的说明），只保留有效的。
+    std::vector<double> yaw_times;
+    std::vector<double> yaw_values;
+    yaw_times.reserve(times.size());
+    yaw_values.reserve(times.size());
+    for (std::size_t i = 0; i < times.size(); ++i)
+    {
+        if (std::isfinite(yaws[i]))
+        {
+            yaw_times.push_back(times[i]);
+            yaw_values.push_back(yaws[i]);
+        }
+    }
     double mad = 0.0;
-    const double slope = theilSenSlope(times, yaws, min_pair_dt, &mad);
+    const double slope = yaw_times.size() >= 4
+                             ? theilSenSlope(yaw_times, yaw_values, min_pair_dt, &mad)
+                             : std::numeric_limits<double>::quiet_NaN();
     const double sigma = std::max(1.4826 * mad, config_.rate_sigma_floor_rad_s);
 
     // 3b) 第二路证据：板相对车心的方位角斜率。
@@ -1303,6 +1336,12 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
         }
     }
     if (!std::isfinite(used_slope) || !std::isfinite(used_sigma))
+    {
+        return;
+    }
+    // 12 rad/s 已经是四板模型在这个距离下能分辨的上限（再快单帧就跨过折叠半周期）。
+    // 超过它只可能是解缠跳板/换车，宁可不更新，交给衰减项处理。
+    if (std::fabs(used_slope) > 12.0)
     {
         return;
     }
