@@ -1997,8 +1997,13 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                 // 相位定了以后中心由任一块板反推：c = p + R*u(theta + s*period)
                 const double angle1 =
                     ekf_.state()(6) + static_cast<double>(slots[0]) * period;
+                // 用两块板各自反推车心再平均：只用一块板时，那块板的 PnP
+                // 深度/横向偏差会原样进到车心里；两块反向平均能抵掉一部分。
+                const double angle2 =
+                    ekf_.state()(6) + static_cast<double>(slots[1]) * period;
                 const Eigen::Vector3d center_measured =
-                    p1 + radius * Eigen::Vector3d(std::cos(angle1), std::sin(angle1), 0.0);
+                    0.5 * ((p1 + radius * Eigen::Vector3d(std::cos(angle1), std::sin(angle1), 0.0)) +
+                           (p2 + radius * Eigen::Vector3d(std::cos(angle2), std::sin(angle2), 0.0)));
                 const double sigma = std::max(
                     config_.pair_center_sigma_m,
                     std::hypot(world[index[0]].sigma_position_m,
