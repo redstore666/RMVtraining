@@ -160,7 +160,7 @@ namespace
         bool score_given{false};
         bool centered_switch{true};
         double sigma_floor{0.06};
-        bool pair_center{false};
+        bool pair_center{true};
         bool aim_obs_horizon{false};
         bool phase_yaw_static{false};
         bool no_aim_extrapolate{false};

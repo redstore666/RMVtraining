@@ -138,7 +138,7 @@ struct TrackerConfig
     double adaptive_noise_max_sigma_m{0.090};
     // 同帧两块板的中点直接给"车体中心"量测：对置板中点恰是圆心（误差 ~sigma/sqrt2），
     // 相邻板中点沿弦法向偏 R*cos45。半径已知时这块观测比单板位置强得多。
-    bool pair_center_update_enabled{false};
+    bool pair_center_update_enabled{true};
     double pair_center_sigma_m{0.05};
 
     // 观测平滑：同一槽位连续命中时，对世界系位置做指数平均后再喂滤波器。

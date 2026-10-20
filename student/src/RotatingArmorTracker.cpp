@@ -1831,7 +1831,11 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
     // 同帧两块板的中点 = 车体中心量测（对置板：中点即圆心；相邻板：沿弦法向
     // 偏 R*cos45）。单板可见时中心与相位是一对规范自由度，滤波器只能二选一；
     // 双板帧把这两个自由度同时钉住，是实拍里唯一能压相位误差的硬约束。
-    if (config_.pair_center_update_enabled && accepted >= 2)
+    // 双板中心/相位更新：两块板的位置直接给出车心（中点）与姿态（弦方向），
+    // 位置噪声 ±5cm 下相位误差约 10°，比单板法向（±25°）好得多。但高速自转时
+    // 两板中点受相位滞后影响、弦方向也在转，单帧直接拉会把估计带偏（合成 G 组
+    // 全挂），所以和半径学习用同一个门：目标连续 10 帧判为 static 才启用。
+    if (config_.pair_center_update_enabled && accepted >= 2 && static_streak_ >= 10)
     {
         int index[2] = {-1, -1};
         int found = 0;
