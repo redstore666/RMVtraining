@@ -1392,6 +1392,52 @@ int main(int argc, char **argv)
                 if (diagnostics.phase == rotating_armor::LockPhase::Tracking &&
                     active_tracker->initialized())
                 {
+                    if (std::getenv("PIX_DEBUG") != nullptr)
+                    {
+                        for (const ArmorPose &pose_x : poses)
+                        {
+                            if (pose_x.detection.target_id != diagnostics.target_id ||
+                                pose_x.detection.corners.empty())
+                            {
+                                continue;
+                            }
+                            const Eigen::Vector3d obs_world(pose_x.position_gimbal_m[0],
+                                                            pose_x.position_gimbal_m[1],
+                                                            pose_x.position_gimbal_m[2]);
+                            int slot_best = -1;
+                            double d_best = 1.0e9;
+                            Eigen::Vector3d best_p = Eigen::Vector3d::Zero();
+                            for (int slot = 0; slot < 4; ++slot)
+                            {
+                                const Eigen::Vector3d p = rotating_armor::platePosition(ekf_state, slot, 4);
+                                const double d = (p - obs_world).norm();
+                                if (d < d_best)
+                                {
+                                    d_best = d;
+                                    slot_best = slot;
+                                    best_p = p;
+                                }
+                            }
+                            const Eigen::Vector3d g = rotating_armor::toGimbal(gimbal, best_p);
+                            const cv::Vec3d c_cam =
+                                gimbalToCameraPoint(camera, cv::Vec3d(g[0], g[1], g[2]));
+                            std::vector<cv::Point3d> pts{cv::Point3d(c_cam[0], c_cam[1], c_cam[2])};
+                            std::vector<cv::Point2d> px;
+                            cv::projectPoints(pts, cv::Vec3d(0, 0, 0), cv::Vec3d(0, 0, 0),
+                                              camera.camera_matrix, cv::noArray(), px);
+                            cv::Point2f box(0.0f, 0.0f);
+                            for (const cv::Point2f &corner : pose_x.detection.corners)
+                            {
+                                box += corner;
+                            }
+                            box /= static_cast<float>(pose_x.detection.corners.size());
+                            std::fprintf(stderr,
+                                         "[pix] f=%d id=%d dx=%+.1f dy=%+.1f d=%.1f slot=%d\n",
+                                         frame_index, pose_x.detection.target_id,
+                                         px[0].x - box.x, px[0].y - box.y,
+                                         cv::norm(cv::Point2f(px[0]) - box), slot_best);
+                        }
+                    }
                     draw_body(ekf_state, diagnostics.aim_slot, cv::Scalar(235, 120, 60),
                               cv::Scalar(0, 200, 255), 2, cv::Scalar(-1, -1, -1));
                 }
