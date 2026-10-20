@@ -1835,23 +1835,52 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
     // 位置噪声 ±5cm 下相位误差约 10°，比单板法向（±25°）好得多。但高速自转时
     // 两板中点受相位滞后影响、弦方向也在转，单帧直接拉会把估计带偏（合成 G 组
     // 全挂），所以和半径学习用同一个门：目标连续 10 帧判为 static 才启用。
-    if (config_.pair_center_update_enabled && accepted >= 2 && static_streak_ >= 10)
+    if (config_.pair_center_update_enabled && static_streak_ >= config_.pair_center_min_static_frames)
     {
+        // 注意：这里刻意不看 used[] / slot_of_observation[]。双板帧里第二块板
+        // 常常因为"第一块板刚更新过、预测已经动过"而被 NIS 门拒掉，可它恰恰是
+        // 最能钉死中心与相位的量测。所以按几何把每块同 id 观测分到最近的模型板
+        // 槽位，只要两块落在不同槽位、弦长与模型构型相符就采用。
+        const double radius = ekf_.state()(8);
         int index[2] = {-1, -1};
+        int slots[2] = {-1, -1};
         int found = 0;
         for (std::size_t i = 0; i < world.size() && found < 2; ++i)
         {
-            if (!used[i] || world[i].target_id != target_id_ ||
-                slot_of_observation[i] < 0)
+            if (world[i].target_id != target_id_ || !world[i].position.allFinite())
             {
                 continue;
             }
-            index[found] = static_cast<int>(i);
-            ++found;
+            int best_slot = -1;
+            double best_distance = 1.0e9;
+            for (int slot = 0; slot < plate_count; ++slot)
+            {
+                const Eigen::Vector3d predicted =
+                    rotating_armor::platePosition(ekf_.state(), slot, plate_count);
+                const double distance = (world[i].position - predicted).norm();
+                if (distance < best_distance)
+                {
+                    best_distance = distance;
+                    best_slot = slot;
+                }
+            }
+            if (best_distance > config_.pair_center_gate_m || best_slot < 0)
+            {
+                continue;
+            }
+            if (found == 0)
+            {
+                index[0] = static_cast<int>(i);
+                slots[0] = best_slot;
+                found = 1;
+            }
+            else if (best_slot != slots[0])
+            {
+                index[1] = static_cast<int>(i);
+                slots[1] = best_slot;
+                found = 2;
+            }
         }
-        const double radius = ekf_.state()(8);
-        const int slots[2] = {found == 2 ? slot_of_observation[index[0]] : -1,
-                              found == 2 ? slot_of_observation[index[1]] : -1};
         if (found == 2 && slots[0] != slots[1] && radius > 0.01)
         {
             const Eigen::Vector3d p1 = world[index[0]].position;

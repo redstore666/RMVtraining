@@ -140,6 +140,8 @@ struct TrackerConfig
     // 相邻板中点沿弦法向偏 R*cos45。半径已知时这块观测比单板位置强得多。
     bool pair_center_update_enabled{true};
     double pair_center_sigma_m{0.05};
+    double pair_center_gate_m{0.45};
+    int pair_center_min_static_frames{10};
 
     // 观测平滑：同一槽位连续命中时，对世界系位置做指数平均后再喂滤波器。
     // 单帧检测抖动（实测 v4 旋转目标相邻帧位移中位 52 mm、静止 3.8 mm）是
