@@ -1905,7 +1905,10 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                 double theta_pair = wrapToPi(mid_angle - slot_mid);
                 // 只有 period 的可辨识度：取离当前相位最近的一支。
                 double delta = wrapToPi(theta_pair - ekf_.state()(6));
-                if (std::fabs(delta) > 0.5 * period)
+                // 相位只有 period（90°）可辨识：把 delta 折到 [-period/2, period/2)。
+                // 这里必须 while——单次 if 在相位已经偏出半个周期以上时折不回来，
+                // 实拍里会出现 -1.5 rad 的"合理"delta 把模型一下转 90°。
+                while (std::fabs(delta) > 0.5 * period)
                 {
                     delta -= std::copysign(period, delta);
                 }
@@ -2010,7 +2013,11 @@ PredictionResult RotatingArmorTracker::buildResult(const GimbalState &gimbal,
     {
         diagnostics_.motion = MotionMode::Static;
     }
-    static_streak_ = (diagnostics_.motion == MotionMode::Static) ? static_streak_ + 1 : 0;
+    // "不转"就够了：平移目标的弦长/中点同样能给出半径与相位，没必要连速度也压到
+    // 静止。早期用 motion == Static，实拍里速度估计的噪声让 streak 反复归零，
+    // 双板更新与半径学习 200 帧只触发 1 次。
+    static_streak_ =
+        std::fabs(ekf_.state()(7)) < config_.static_rate_rad_s ? static_streak_ + 1 : 0;
 
     // 新鲜度按"距上次被接收的更新多少秒"判，不按丢帧数：相机帧率变化时
     // 帧数门限的含义会漂移（166fps 下 2 帧只有 12ms，实拍里会长期卡在 Unstable）。
