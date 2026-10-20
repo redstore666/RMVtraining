@@ -1833,6 +1833,67 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
     diagnostics_.best_gate_distance_m = std::numeric_limits<double>::infinity();
     diagnostics_.best_gate_nis = std::numeric_limits<double>::infinity();
 
+    // 同帧两块板的联合绑定：两块板是同一台车上的两块相邻面，它们的槽位差由
+    // 几何决定，只有 4 种整体旋转可选。逐块"找最近的预测板"是各自独立决策，
+    // 会把两块板绑到互相矛盾的槽位上（v4 实拍里 20 帧同槽、157 帧不同槽，
+    // 一旦同槽就互相拉扯，相位永远定不住）。这里对 4 种槽位整体旋转求和代价，
+    // 取最小的一组，用它把两块板的槽位钉住。
+    std::vector<int> forced_slot(world.size(), -1);
+    if (config_.joint_pair_binding_enabled)
+    {
+        std::vector<int> cand;
+        for (std::size_t i = 0; i < world.size(); ++i)
+        {
+            if (world[i].target_id == target_id_)
+            {
+                cand.push_back(static_cast<int>(i));
+            }
+        }
+        if (cand.size() == 2)
+        {
+            const WorldObservation &wa = world[static_cast<std::size_t>(cand[0])];
+            const WorldObservation &wb = world[static_cast<std::size_t>(cand[1])];
+            const double chord = (wb.position - wa.position).norm();
+            if (wa.has_yaw && wb.has_yaw && std::isfinite(chord) && chord > 0.15 &&
+                chord < 0.90)
+            {
+                const double period = 2.0 * kPi / static_cast<double>(plate_count);
+                int dslot = static_cast<int>(
+                    std::lround(wrapToPi(wb.yaw - wa.yaw) / period));
+                dslot %= plate_count;
+                if (dslot < 0)
+                {
+                    dslot += plate_count;
+                }
+                if (dslot == 1 || dslot == plate_count - 1)
+                {
+                    double best_cost = std::numeric_limits<double>::infinity();
+                    int best_start = -1;
+                    for (int start = 0; start < plate_count; ++start)
+                    {
+                        const int sb = (start + dslot) % plate_count;
+                        const double cost =
+                            (wa.position - platePosition(ekf_.state(), start, plate_count)).norm() +
+                            (wb.position - platePosition(ekf_.state(), sb, plate_count)).norm();
+                        if (cost < best_cost)
+                        {
+                            best_cost = cost;
+                            best_start = start;
+                        }
+                    }
+                    // 代价过大说明这一对本身就不可信（比如其中一块是同一块板的
+                    // 重复检出），不强制绑定，退回原来的逐块贪心。
+                    if (best_start >= 0 && best_cost < config_.joint_pair_binding_max_cost_m)
+                    {
+                        forced_slot[static_cast<std::size_t>(cand[0])] = best_start;
+                        forced_slot[static_cast<std::size_t>(cand[1])] =
+                            (best_start + dslot) % plate_count;
+                    }
+                }
+            }
+        }
+    }
+
     while (accepted < std::max(config_.max_updates_per_frame, 1))
     {
         int best_observation = -1;
@@ -1856,9 +1917,23 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
             ArmorObservation observation;
             observation.position = world[i].position;
             observation.sigma_position_m = observationSigma(world[i].sigma_position_m);
+            if (forced_slot[static_cast<std::size_t>(i)] >= 0)
+            {
+                // 已被联合绑定钉住槽位：只试它，别让逐块贪心把它改到别的面上去。
+                const int only = forced_slot[static_cast<std::size_t>(i)];
+                if (slot_used[static_cast<std::size_t>(only)])
+                {
+                    continue;
+                }
+            }
             for (int slot = 0; slot < plate_count; ++slot)
             {
                 if (slot_used[static_cast<std::size_t>(slot)])
+                {
+                    continue;
+                }
+                if (forced_slot[static_cast<std::size_t>(i)] >= 0 &&
+                    slot != forced_slot[static_cast<std::size_t>(i)])
                 {
                     continue;
                 }

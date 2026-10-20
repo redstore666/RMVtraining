@@ -177,6 +177,11 @@ struct TrackerConfig
     //   半径 R = |d| / sqrt(2)；车心 c = p_a + R u(theta_a)。
     // 这就是"整车建模"的直接体现：一台车只有一个 c、一个 R、一个 yaw，
     // 四块板绕它整体转动，速度和方向天然一致，不存在单板各自漂移。
+    // 同帧两块板的联合绑定：两块板是同一台车上相邻的两个面，槽位差由几何决定，
+    // 只有 4 种整体旋转可选。逐块独立"找最近的预测板"会绑到互相矛盾的槽位上，
+    // 两台更新互相拉扯——这正是"转一部分卡回去"的机制之一。
+    bool joint_pair_binding_enabled{true};
+    double joint_pair_binding_max_cost_m{0.80};
     bool pair_body_solve_enabled{false};
     // 只在慢转/平移时用双板闭式解：高速自转（>=3 rad/s）时同一帧两块板的
     // 曝光不是同一瞬间，弦长和法向差都会被拖尾污染，闭式解反而会把相位推歪。
