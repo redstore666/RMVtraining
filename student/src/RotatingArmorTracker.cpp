@@ -703,8 +703,12 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
     // 0.20，差了 40% 正好越过 30% 的门限，于是每帧都被钉回 0.20——模型四块板
     // 整体小一圈，圆心跟着偏，画面上就是"绿板转心偏高、蓝板转一半卡回去"。
     // 现在先验只当哨兵：拟合值落在物理区间内就用它。
-    if (circle.ok && (!(circle.radius > config_.radius_min_m) ||
-                      !(circle.radius < config_.radius_max_m)))
+    // 注意这是"拟合半径落在物理区间内就用拟合值"，不是反过来：
+    // 写成 !(r > min) || !(r < max) 等于 (r <= min) || (r >= max)，含义完全反了
+    // ——那样只有拟合失败时才用固定半径，而拟合成功时反而被钉回先验（实测 v4
+    // R 拟合 0.284 却被钉在 0.20，模型四块板整体小一圈）。
+    if (circle.ok && circle.radius > config_.radius_min_m &&
+        circle.radius < config_.radius_max_m)
     {
         const CircleFit fixed = fitCenterFixedRadius(lock_samples_, size_prior, circle);
         if (fixed.ok)
