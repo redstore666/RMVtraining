@@ -1524,6 +1524,10 @@ int main(int argc, char **argv)
                             const Eigen::Vector3d obs_world(pose_x.position_gimbal_m[0],
                                                             pose_x.position_gimbal_m[1],
                                                             pose_x.position_gimbal_m[2]);
+                            // 只统计"真的属于这条轨迹"的观测：同帧可能有两块同 id 的板
+                            // 属于两台不同的车，把别人的板算进来会让 PIX 中位数变成两车
+                            // 间距（0.4~1 m，即 100 px 量级），看着像模型全错。
+                            bool associated_out{false};
                             int slot_best = -1;
                             double d_best = 1.0e9;
                             Eigen::Vector3d best_p = Eigen::Vector3d::Zero();
@@ -1558,9 +1562,17 @@ int main(int argc, char **argv)
                                 box += corner;
                             }
                             box /= static_cast<float>(pose_x.detection.corners.size());
+                            // d_best 是这块观测到模型最近板的 3-D 距离。超过 0.25 m
+                            // 就不是"同一条轨迹上的这块板"，多半是同 id 的另一台车，
+                            // 单独记成 [pixx]，不计入 [pix] 的统计。
+                            if (d_best > 0.25)
+                            {
+                                associated_out = true;
+                            }
                             std::fprintf(stderr,
-                                         "[pix] f=%d id=%d dx=%+.1f dy=%+.1f d=%.1f slot=%d "
-                                         "bx=%.0f by=%.0f u=%d rj=%d nis=%.1f gd=%.3f\n",
+                                         associated_out ? "[pixx] f=%d id=%d d=%.1f res=%.3f\n"
+                                                        : "[pix] f=%d id=%d dx=%+.1f dy=%+.1f d=%.1f slot=%d "
+                                                          "bx=%.0f by=%.0f u=%d rj=%d nis=%.1f gd=%.3f\n",
                                          frame_index, pose_x.detection.target_id,
                                          px[0].x - box.x, px[0].y - box.y,
                                          cv::norm(cv::Point2f(px[0]) - box), slot_best, box.x, box.y,
