@@ -168,7 +168,8 @@ namespace
         bool no_aim_extrapolate{false};
         double realign_m{0.25};
         double gate_m{0.0}; // >0 时覆盖 position_gate_m，用来扫门限
-        int slot_phase{-1};  // 1 开 0 关 -1 用默认，控制按槽位一致的相位更新
+        int slot_phase{-1};
+        int pair_body{-1};  // 1 开 0 关 -1 用默认，控制双板整车求解  // 1 开 0 关 -1 用默认，控制按槽位一致的相位更新
         bool pair_radius{false};
         bool phase_anchor{true};
         double aim_obs{0.012};
@@ -301,6 +302,10 @@ namespace
             else if (arg == "--gate")
             {
                 args.gate_m = std::atof(next("--gate").c_str());
+            }
+            else if (arg == "--pair-body")
+            {
+                args.pair_body = std::atoi(next("--pair-body").c_str());
             }
             else if (arg == "--slot-phase")
             {
@@ -611,6 +616,10 @@ int main(int argc, char **argv)
     if (args.slot_phase >= 0)
     {
         tracker_config.slot_phase_update_enabled = args.slot_phase != 0;
+    }
+    if (args.pair_body >= 0)
+    {
+        tracker_config.pair_body_solve_enabled = args.pair_body != 0;
     }
     if (args.pair_radius)
     {
@@ -1413,7 +1422,11 @@ int main(int argc, char **argv)
                     }
                     if (center_color[0] >= 0.0)
                     {
-                        const Eigen::Vector3d c_world(st(0), st(2), st(4));
+                        // 中心抬到四块板高偏移的均值上：state(4) 本身跟着"最近
+                        // 更新的那块板"的 z 走，直接用它会画出一个随板上下跳的白叉。
+                        const Eigen::Vector3d c_world(
+                            st(0), st(2),
+                            st(4) + (active_tracker != nullptr ? active_tracker->slotZOffsetMean() : 0.0));
                         const Eigen::Vector3d c_gimbal = rotating_armor::toGimbal(gimbal, c_world);
                         const cv::Vec3d c_camera = gimbalToCameraPoint(
                             camera, cv::Vec3d(c_gimbal.x(), c_gimbal.y(), c_gimbal.z()));
@@ -1519,10 +1532,15 @@ int main(int argc, char **argv)
                             }
                             box /= static_cast<float>(pose_x.detection.corners.size());
                             std::fprintf(stderr,
-                                         "[pix] f=%d id=%d dx=%+.1f dy=%+.1f d=%.1f slot=%d bx=%.0f by=%.0f\n",
+                                         "[pix] f=%d id=%d dx=%+.1f dy=%+.1f d=%.1f slot=%d "
+                                         "bx=%.0f by=%.0f u=%d rj=%d nis=%.1f gd=%.3f\n",
                                          frame_index, pose_x.detection.target_id,
                                          px[0].x - box.x, px[0].y - box.y,
-                                         cv::norm(cv::Point2f(px[0]) - box), slot_best, box.x, box.y);
+                                         cv::norm(cv::Point2f(px[0]) - box), slot_best, box.x, box.y,
+                                         diagnostics.updates_this_frame,
+                                         diagnostics.rejected_this_frame,
+                                         diagnostics.last_nis,
+                                         diagnostics.best_gate_distance_m);
                         }
                     }
                     draw_body(ekf_state, diagnostics.aim_slot, cv::Scalar(235, 120, 60),

@@ -165,6 +165,26 @@ struct TrackerConfig
     // 道具半径 0.28，按板型先验 0.20 钉死时模型四块板整体小一圈，第二块观测
     // 到模型板的中位误差 12.4 cm；打开后降到 6.8 cm。自由半径更新（freeze_radius
     // = false，位置残差驱动）仍然默认关闭——那个才会塌。
+    // 双板整车求解：同帧看到两块相邻板时，板心位置 + 板面法向给出一个精确的
+    // (车心 c, 半径 R, 车体相位 yaw) 闭式解，不依赖半径先验、也不依赖当前状态。
+    //
+    // 推导（四板，相邻相差 period = 90 度，p_i = c - R u(theta_i)）：
+    //   d = p_b - p_a = -R (u(theta_b) - u(theta_a))
+    //   相邻 +90 度：u(theta+90) - u(theta) = sqrt(2) u(theta+135)
+    //                => theta_a = atan2(-d) - 135 度
+    //   相邻 -90 度：u(theta-90) - u(theta) = -sqrt(2) u(theta+45)
+    //                => theta_a = atan2(d) - 45 度
+    //   半径 R = |d| / sqrt(2)；车心 c = p_a + R u(theta_a)。
+    // 这就是"整车建模"的直接体现：一台车只有一个 c、一个 R、一个 yaw，
+    // 四块板绕它整体转动，速度和方向天然一致，不存在单板各自漂移。
+    bool pair_body_solve_enabled{false};
+    // 只在慢转/平移时用双板闭式解：高速自转（>=3 rad/s）时同一帧两块板的
+    // 曝光不是同一瞬间，弦长和法向差都会被拖尾污染，闭式解反而会把相位推歪。
+    double pair_body_max_rate_rad_s{3.0};
+    double pair_body_max_phase_error_rad{0.35};
+    double pair_body_center_gain{0.35};
+    double pair_body_yaw_gain{0.5};
+    double pair_body_radius_gain{0.0};
     bool pair_radius_update_enabled{true};
     double radius_update_sigma_m{0.06};
     double radius_update_alpha{0.25}; // freeze_radius 时的低通系数（每帧最多靠拢 1/4）
@@ -357,6 +377,8 @@ struct TrackerDiagnostics
     bool radius_from_data{false};
     bool phase_flipped{false};
     std::uint64_t accepted_updates{0};
+    // 双板整车求解（两块相邻板精确解出 c/R/yaw）生效的帧数。
+    std::uint64_t pair_body_solves{0};
     // 单板重锚（rotatePhase+shiftCenter 硬对齐）触发次数。每次触发都会让
     // 状态瞬间跳到观测上，观感就是"转一部分又卡回去"；这个计数用来区分
     // "滤波器在跟踪"和"滤波器被硬覆盖"。
@@ -421,6 +443,19 @@ public:
     double slotZOffset(int slot) const
     {
         return (slot >= 0 && slot < 4) ? slot_z_offset_[static_cast<std::size_t>(slot)] : 0.0;
+    }
+    // 四个槽位高度偏移的均值。车体中心 state(4) 会被位置更新拉到"最近更新的那块
+    // 板的 z"上，于是它随哪块板可见而上下跳——这就是回放里白叉(中心)比蓝板圈
+    // 偏上/偏下的原因。旋转轴是竖直的，中心应该落在这四条板高偏移的均值上，
+    // 四块板才会对称地绕它转。显示时把中心抬到 state(4) + 这个均值。
+    double slotZOffsetMean() const
+    {
+        double sum = 0.0;
+        for (double v : slot_z_offset_)
+        {
+            sum += v;
+        }
+        return 0.25 * sum;
     }
     // 每个槽位相对车体中心的半径偏移（同样只用于显示）。实拍那台自制道具并不是
     // 正方形：同一帧两块板到车心的距离能差 3-4 cm，单一 R 只能折中，画出来必然
@@ -523,6 +558,8 @@ private:
     bool aim_smoothed_valid_{false};
     // 同帧双板弦长 -> 半径观测（见 .cpp 里的推导）。
     void updateRadiusFromPairs(const std::vector<WorldObservation> &world);
+    // 两块相邻板闭式解 (车心, 半径, 相位) 并软更新到状态上。返回是否生效。
+    bool updateBodyFromPair(const std::vector<WorldObservation> &world);
     // 掉线快照续接（见 config_.relock_reuse_enabled）。
     bool tryRestoreSnapshot(const std::vector<WorldObservation> &world, double timestamp_seconds);
 

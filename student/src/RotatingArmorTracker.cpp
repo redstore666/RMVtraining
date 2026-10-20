@@ -695,7 +695,16 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
     size_prior = clampd(size_prior, config_.radius_min_m, config_.radius_max_m);
     CircleFit circle = fitArmorCircle(lock_samples_);
     bool used_fixed_radius = false;
-    if (circle.ok && std::fabs(circle.radius - size_prior) > 0.3 * size_prior)
+    // 半径优先用"板心圆拟合"算出来的值：四块板共圆，(c, R) 是几何量，本来就该
+    // 从识别到的板位置解出来，而不是拿板型先验去覆盖它。
+    //
+    // 以前这里只要 |circle.radius - size_prior| > 0.3*size_prior 就丢弃拟合半径、
+    // 改用"钉住先验只解圆心"。实拍 v4 的 3 号道具真实半径 0.28，而小装甲板先验
+    // 0.20，差了 40% 正好越过 30% 的门限，于是每帧都被钉回 0.20——模型四块板
+    // 整体小一圈，圆心跟着偏，画面上就是"绿板转心偏高、蓝板转一半卡回去"。
+    // 现在先验只当哨兵：拟合值落在物理区间内就用它。
+    if (circle.ok && (!(circle.radius > config_.radius_min_m) ||
+                      !(circle.radius < config_.radius_max_m)))
     {
         const CircleFit fixed = fitCenterFixedRadius(lock_samples_, size_prior, circle);
         if (fixed.ok)
@@ -1463,6 +1472,162 @@ bool RotatingArmorTracker::reinitializeFromPair(const std::vector<WorldObservati
 // 同帧双板弦长 -> 半径。两块板的法向差 Δψ 与弦长 chord 唯一确定半径：
 // |n_i - n_j| = 2 sin(Δψ/2)，而 chord = R |n_i - n_j|，所以 R = chord / (2 sin(Δψ/2))。
 // 每帧最多吃一条，避免同一帧两条配对观测重复约束同一维。
+bool RotatingArmorTracker::updateBodyFromPair(const std::vector<WorldObservation> &world)
+{
+    if (!config_.pair_body_solve_enabled || target_id_ == 0 || !ekf_.initialized())
+    {
+        return false;
+    }
+    // 刚锁定那几帧车心和相位还没收敛，两支候选解分不开，硬套会把相位整体推歪
+    // （合成 G 组 6/8 rad/s 的瞄准残差会从 1 cm 涨到 35 cm）。等状态站住再解。
+    if (diagnostics_.accepted_updates < 8)
+    {
+        return false;
+    }
+    const int plate_count = config_.ekf.plate_count;
+    if (plate_count < 2)
+    {
+        return false;
+    }
+    const double period = 2.0 * kPi / static_cast<double>(plate_count);
+    if (std::fabs(ekf_.state()(7)) >= config_.pair_body_max_rate_rad_s)
+    {
+        return false;
+    }
+
+    // 找同帧里"两块板"构成的最佳一对：弦长最大、法向差最接近相邻槽位。
+    int best_i = -1;
+    int best_j = -1;
+    int best_dslot = 0;
+    double best_chord = 0.0;
+    double best_score = -1.0;
+    for (std::size_t i = 0; i < world.size(); ++i)
+    {
+        if (world[i].target_id != target_id_ || !world[i].has_yaw)
+        {
+            continue;
+        }
+        for (std::size_t j = i + 1; j < world.size(); ++j)
+        {
+            if (world[j].target_id != target_id_ || !world[j].has_yaw)
+            {
+                continue;
+            }
+            const double chord = (world[j].position - world[i].position).norm();
+            if (!std::isfinite(chord) || chord < 0.15 || chord > 0.90)
+            {
+                continue;
+            }
+            const double dpsi = wrapToPi(world[j].yaw - world[i].yaw);
+            int dslot = static_cast<int>(std::lround(dpsi / period));
+            dslot %= plate_count;
+            if (dslot < 0)
+            {
+                dslot += plate_count;
+            }
+            // 只解相邻板（相差 1 个槽位）：对置板的两条方程退化，R 和 theta 不唯一。
+            if (dslot != 1 && dslot != plate_count - 1)
+            {
+                continue;
+            }
+            const double nslot = (dslot == 1) ? 1.0 : -1.0;
+            const double score = chord - 0.02 * std::fabs(
+                foldPeriod(world[j].yaw - world[i].yaw - nslot * period, 2.0 * kPi));
+            if (score > best_score)
+            {
+                best_score = score;
+                best_i = static_cast<int>(i);
+                best_j = static_cast<int>(j);
+                best_dslot = dslot;
+                best_chord = chord;
+            }
+        }
+    }
+    if (best_i < 0)
+    {
+        return false;
+    }
+
+    const Eigen::Vector3d pa = world[static_cast<std::size_t>(best_i)].position;
+    const Eigen::Vector3d pb = world[static_cast<std::size_t>(best_j)].position;
+    const Eigen::Vector3d d = pb - pa;
+    // 相邻槽位：|d| = 2 R sin(period/2) = sqrt(2) R（四板构型）。
+    const double radius_meas = best_chord / (2.0 * std::sin(0.5 * period));
+    if (!std::isfinite(radius_meas) || radius_meas < config_.radius_min_m ||
+        radius_meas > config_.radius_max_m)
+    {
+        return false;
+    }
+    // theta_a：a 板相对车体相位的槽位角。上面推导的 +-135/45 度只在 period=90
+    // 时成立，这里写成与 period 无关的形式。
+    const double d_angle = std::atan2(d.y(), d.x());
+    // 两个分支对应 b 板比 a 板多一个槽位(逆时针)或少一个槽位(顺时针)。法向差的
+    // 符号能给出分支，但"世界系 yaw 的正方向"在不同数据源里可能镜像，符号并不
+    // 总是可信。这里直接算两个分支、取与当前车心更一致的那个——几何上只有一支
+    // 成立，这个判据不依赖任何符号约定。
+    const double theta_plus = std::atan2(-d.y(), -d.x()) - (kPi - 0.5 * period);
+    const double theta_minus = d_angle - 0.5 * period;
+    const Eigen::Vector2d center_state(ekf_.state()(0), ekf_.state()(2));
+    Eigen::Vector2d center_meas(0.0, 0.0);
+    double theta_a = theta_plus;
+    double best_dev = std::numeric_limits<double>::infinity();
+    for (int branch = 0; branch < 2; ++branch)
+    {
+        const double theta = (branch == 0) ? theta_plus : theta_minus;
+        const Eigen::Vector2d candidate(pa.x() + radius_meas * std::cos(theta),
+                                        pa.y() + radius_meas * std::sin(theta));
+        if (!candidate.allFinite())
+        {
+            continue;
+        }
+        const double dev = (candidate - center_state).norm();
+        if (dev < best_dev)
+        {
+            best_dev = dev;
+            theta_a = theta;
+            center_meas = candidate;
+        }
+    }
+    if (!center_meas.allFinite())
+    {
+        return false;
+    }
+
+    const double yaw_state = ekf_.state()(6);
+    // 四板构型下个体槽位编号本身不可观测（整体转 90 度等价），取与当前相位最近的
+    // 那个编号即可，保证相位修正量落在 +-period/2 内。
+    const int slot_a = static_cast<int>(std::lround((theta_a - yaw_state) / period));
+    const double yaw_meas = theta_a - static_cast<double>(slot_a) * period;
+
+    if ((center_meas - center_state).norm() > 0.35)
+    {
+        return false;
+    }
+    const double dyaw = wrapToPi(yaw_meas - yaw_state);
+    // 只修"小幅偏差"：相位差很大说明状态还没收敛（比如刚锁定时角速度还在爬升），
+    // 这时闭式解的瞬时相位本身不可信，硬拧会把相位整体推歪——四板构型下相位
+    // 有 90 度对称性，推歪之后位置更新再也拉不回来。
+    if (std::fabs(dyaw) > config_.pair_body_max_phase_error_rad)
+    {
+        return false;
+    }
+
+    const Eigen::Vector3d center_delta(config_.pair_body_center_gain * (center_meas.x() - center_state.x()),
+                                       config_.pair_body_center_gain * (center_meas.y() - center_state.y()),
+                                       0.0);
+    ekf_.shiftCenter(center_delta);
+    ekf_.rotatePhase(config_.pair_body_yaw_gain * dyaw);
+    if (config_.pair_body_radius_gain > 0.0)
+    {
+        const double radius_next = std::clamp(
+            ekf_.state()(8) + config_.pair_body_radius_gain * (radius_meas - ekf_.state()(8)),
+            config_.radius_min_m, config_.radius_max_m);
+        ekf_.setRadius(radius_next);
+    }
+    ++diagnostics_.pair_body_solves;
+    return true;
+}
+
 void RotatingArmorTracker::updateRadiusFromPairs(const std::vector<WorldObservation> &world)
 {
     if (!config_.pair_radius_update_enabled || target_id_ == 0 || !ekf_.initialized())
@@ -2610,6 +2775,7 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
     {
         ekf_.updateYawRate(0.0, config_.rate_decay_sigma_rad_s);
     }
+    updateBodyFromPair(world);
     updateRadiusFromPairs(world);
     const int updates = associateAndUpdate(world, timestamp_seconds);
     diagnostics_.updates_this_frame = updates;
