@@ -159,12 +159,12 @@ namespace
         bool aim_obs_horizon{false};
         bool phase_yaw_static{false};
         bool no_aim_extrapolate{false};
-        double realign_m{0.0};
+        double realign_m{0.25};
         bool phase_anchor{true};
         double aim_obs{0.012};
         double aim_alpha{0.0};
         int aim_fit{0};
-        double switch_margin{0.10};
+        double switch_margin{0.30};
         double lock_span{0.18};
         double lock_age{0.50};
         bool radius_given{false};
@@ -876,12 +876,14 @@ int main(int argc, char **argv)
             {
                 const auto &st = tracker.ekf().state();
                 std::printf("[trace] f=%d t=%.3f det=%zu init=%d phase=%d id=%d ok=%llu rej=%d miss=%d "
-                            "relock=%d ls=%d omega=%.2f R=%.3f yaw=%.2f nis=%.1f why=%s stab=%s gd=%.2f gn=%.0f\n",
+                            "relock=%d ls=%d omega=%.2f wobs=%+.2f±%.2f n=%d R=%.3f yaw=%.2f nis=%.1f why=%s stab=%s gd=%.2f gn=%.0f\n",
                             frame_index, time_s, poses.size(), static_cast<int>(tracker.initialized()),
                             static_cast<int>(diagnostics.phase), diagnostics.target_id,
                             static_cast<unsigned long long>(diagnostics.accepted_updates),
                             diagnostics.rejected_this_frame, diagnostics.missed_frames,
-                            diagnostics.relock_count, diagnostics.lock_samples, st(7), st(8), st(6), diagnostics.last_nis,
+                            diagnostics.relock_count, diagnostics.lock_samples, st(7),
+                            diagnostics.rate_obs_rad_s, diagnostics.rate_obs_sigma_rad_s,
+                            diagnostics.rate_obs_samples, st(8), st(6), diagnostics.last_nis,
                             diagnostics.last_reject.c_str(), diagnostics.stability.c_str(),
                             diagnostics.best_gate_distance_m, diagnostics.best_gate_nis);
                         if (diagnostics.phase == rotating_armor::LockPhase::Tracking)

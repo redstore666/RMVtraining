@@ -100,6 +100,12 @@ EkfInitStatus RotatingArmorEkf::initialize(const ArmorObservation& observation,
             return EkfInitStatus::InvalidSpinPrior;
         }
         break;
+    case SpinPriorKind::Unknown:
+        // 不表态：先验可以是 0，也可以非 0，方差由 yaw_rate_sigma_rad_s 给出。
+        if (!std::isfinite(prior.yaw_rate_prior_rad_s)) {
+            return EkfInitStatus::InvalidSpinPrior;
+        }
+        break;
     }
 
     // 有板面法向 -> 初相被观测唯一确定（相位可解释）；
@@ -122,7 +128,9 @@ EkfInitStatus RotatingArmorEkf::initialize(const ArmorObservation& observation,
     x(4) = observation.position(2);
     x(6) = yaw;
     // Static 声明把角速度钉在 0；Spinning 用声明的先验值（上面已保证非零且有限）。
-    x(7) = (prior.spin == SpinPriorKind::Spinning) ? prior.yaw_rate_prior_rad_s : 0.0;
+    x(7) = (prior.spin == SpinPriorKind::Spinning || prior.spin == SpinPriorKind::Unknown)
+               ? prior.yaw_rate_prior_rad_s
+               : 0.0;
     x(8) = prior.radius_m;
     radius_prior_m_ = prior.radius_m;
     radius_fixed_ = prior.radius_fixed;
@@ -289,6 +297,25 @@ bool RotatingArmorEkf::updateCenter(const Eigen::Vector3d& measured_center_m, do
         return false;
     }
     return true;
+}
+
+bool RotatingArmorEkf::updateYawRate(double measured_rad_s, double sigma_rad_s) {
+    if (!initialized_ || !std::isfinite(measured_rad_s) || !std::isfinite(sigma_rad_s) ||
+        !(sigma_rad_s > 0.0)) {
+        return false;
+    }
+    const double s = covariance_(7, 7) + sigma_rad_s * sigma_rad_s;
+    if (!(s > 0.0) || !std::isfinite(s)) {
+        return false;
+    }
+    // 标量更新：H = e7。S 是标量，增益就是 P 的第 7 列 / S。
+    const Eigen::Matrix<double, kStateDim, 1> gain = covariance_.col(7) / s;
+    state_ += gain * (measured_rad_s - state_(7));
+    covariance_ -= gain * covariance_.row(7);
+    // 数值上保持对称（只做下三角 -> 上三角的镜像，避免长期漂移）。
+    covariance_ = 0.5 * (covariance_ + covariance_.transpose()).eval();
+    state_(6) = wrapAngle(state_(6));
+    return state_.allFinite();
 }
 
 bool RotatingArmorEkf::updateRadius(double measured_radius, double sigma_radius) {

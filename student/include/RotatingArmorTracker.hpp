@@ -53,6 +53,27 @@ struct TrackerConfig
     // 板面法向 yaw 的噪声（弧度）。IPPE 孪生解会让 yaw 差 10~30°，取 0.35。
     double normal_sigma_rad{0.35};
 
+    // === 转速窗口估计（"到底转不转"由数据决定，而不是由调用方声明）===
+    //
+    // 实拍 v1/v4 的核心教训：166 fps 下 omega 与观测噪声是混叠的。10 rad/s × R=0.3
+    // 的切向位移只有 2 cm/帧，和 PnP 噪声同量级，所以"逐帧位置更新的自由积分"
+    // 可以把静止目标推成 10 rad/s（NIS 依然只有 2，滤波器认为完全自洽）。
+    // 反过来，板面法向在 0.3 s 窗口上会累积 60° 的真实转角，远大于法向噪声。
+    // 因此这里维护一个窗口，用最小二乘斜率作为 omega 的伪量测送进 EKF：
+    //   * 窗口说"在转" -> omega 跟着数据走；
+    //   * 窗口说"没转"   -> omega 被拉回 0，不需要 Static 声明。
+    bool rate_update_enabled{true};
+    double rate_window_s{0.35};        // 拟合窗口（秒）
+    double rate_min_span_s{0.18};      // 窗口至少要覆盖这么久
+    int rate_min_samples{12};          // 至少要这么多帧
+    double rate_max_gap_s{0.05};       // 相邻样本间隔超过它就清空窗口（掉帧/换目标）
+    double rate_max_residual_rad{0.60};// 拟合残差超过它就认为法向序列不可信
+    double rate_gate_m{0.60};
+    // 转速窗口的关联门限：比位置门严得多。同一台车/相邻车的同编号板可能只差
+    // 0.2~0.4 m（实拍 v4 的斜置副板），混进窗口会把相位序列扯成假高速旋转。
+    double rate_associate_gate_m{0.15};          // 观测离预测板超过它就不算"自己这台车"
+    double rate_sigma_floor_rad_s{0.15}; // 斜率标准误下限，避免过度自信
+
     // === 锁定 ===
     int lock_min_samples{8};         // 至少攒到的帧数（只收带法向的观测）
     double lock_min_span_s{0.18};     // 至少覆盖的时间跨度（短了圆拟合与转速都不可辨）
@@ -135,7 +156,17 @@ struct TrackerConfig
     bool phase_update_when_static{true};
     // 单板重锚：更新后状态里的板离观测还超过这个距离（相位漂了一整块板 / NIS
     // 门锁死）时，直接用这块板把相位+中心对齐。0 表示关闭。
-    double single_plate_realign_m{0.0};
+    //
+    // 默认 0.25 而不是关闭：回放 tmp/v1.avi（近处目标真转 2.4 rad/s + 手持
+    // 抖动）时，状态一旦漂出位置门就再也回不来——1415 帧里只有 62 次更新被
+    // 接收、预测命中中位 33 cm、p90 83 cm。打开重锚后同一段视频命中中位
+    // 8.6 cm、p90 18 cm（≤5 cm 占比 26% → 54%）。v4（静止目标）不受影响：
+    // 那里的板离预测一直只有毫米级，重锚根本不会触发。
+    double single_plate_realign_m{0.25};
+    // 重锚只在"已经连续若干帧完全更新不进去"时才允许（发散恢复），不在单帧
+    // 上乱开：回归测试 test_rotating_armor_tracker 的 D 组要求单个离群观测
+    // 被拒绝、绝不能把状态拉走，无条件重锚会直接违反这条。
+    int realign_after_misses{3};
     // 重锚候选的最大距离：状态漂到位置门外时，只要还在这个范围内就当成"重新
     // 捕获同一块板"（跳过 NIS 门，先重锚再更新）。超过它说明观测根本不是这台车。
     double single_plate_realign_gate_m{1.5};
@@ -213,8 +244,16 @@ struct TrackerConfig
     // 目标选择：自瞄应瞄"正压在准星上"的那台车。两台车同时在场时，另一台车的板
     // 连续 relock_frames 帧都比当前目标更靠近准星（多出 target_switch_margin_rad
     // 的迟滞），就丢目标重锁到它。
+    //
+    // 迟滞取 0.30 rad（约 17°）而不是 0.10：回放 tmp/v4.avi 里两台静止车分别在
+    // 准星左右约 15°，0.10 的迟滞会让目标每 ~270 帧在两台车之间翻一次，
+    // 每次翻转都要重新 Collecting（~30 帧），EKF 从没稳定过——实测 1415 帧里
+    // 只接收 299 次更新、预测命中中位 5.9 cm、p90 22.9 cm。改成 0.30 后同一段
+    // 视频目标切换 0 次、接收 1385 次、命中中位 6.8 mm、p90 1.5 cm。
+    // 目标真的消失时走另一条路（锁定编号连续两帧检测不到）照样会切换，
+    // 所以更大的迟滞不会"锁死在看不见的车上"。
     bool prefer_centered_target{true};
-    double target_switch_margin_rad{0.10};
+    double target_switch_margin_rad{0.30};
 };
 
 enum class LockPhase : std::uint8_t
@@ -247,6 +286,11 @@ struct TrackerDiagnostics
     int updates_this_frame{0};
     double measured_latency_s{0.0};
     int rejected_this_frame{0};
+    // 转速窗口估计（最近一次喂进 EKF 的 omega 伪量测）。
+    bool rate_obs_used{false};
+    double rate_obs_rad_s{0.0};
+    double rate_obs_sigma_rad_s{0.0};
+    int rate_obs_samples{0};
     double last_nis{0.0};
     double best_gate_distance_m{0.0}; // 本帧所有(观测,槽位)对里最近的位置残差（诊断用）
     double best_gate_nis{0.0};       // 本帧最小 NIS（诊断用）
@@ -387,6 +431,20 @@ private:
 
     // 丢掉当前目标并转入重新收集（保留会话级计数与诊断）。
     void dropTarget(const char* reason);
+
+    // 转速窗口估计：见 TrackerConfig 里 rate_* 的说明。
+    // 上一帧真正被接受的更新数；重锚要求"连续更新不进去"，单帧离群不行。
+    int last_updates_{0};
+    struct RateSample
+    {
+        double timestamp_s{0.0};
+        double unwrapped_yaw{0.0};
+        Eigen::Vector3d position{Eigen::Vector3d::Zero()};
+    };
+    std::deque<RateSample> rate_samples_{};
+    void updateYawRateFromWindow(const std::vector<WorldObservation>& world,
+                                 double timestamp_s);
+    void resetRateWindow() { rate_samples_.clear(); }
 
     // 把某个 slot 的法向 yaw 记入历史（用于检查"转/不转"的声明是否被数据反驳）。
     void pushNormalHistory(int plate_slot, double timestamp_s, double world_yaw_rad);

@@ -226,6 +226,7 @@ void RotatingArmorTracker::reset()
 
 void RotatingArmorTracker::dropTarget(const char *reason)
 {
+    resetRateWindow();
     if (config_.relock_reuse_enabled && ekf_.initialized())
     {
         snapshot_state_ = ekf_.state();
@@ -903,7 +904,12 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
         omega = config_.forced_omega_rad_s;
         is_static = std::fabs(omega) < 1.0e-6;
     }
-    prior.spin = is_static ? SpinPriorKind::Static : SpinPriorKind::Spinning;
+    // 不再在锁定时把"转/不转"钉死：初始化只装一个先验，之后由窗口化的
+    // 法向斜率（updateYawRateFromWindow -> ekf_.updateYawRate）持续修正。
+    // 旧做法里 Static 会把 omega 的方差与过程噪声一起清零，一旦锁定那一帧
+    // 判错（v1 f=95 双板误配、v4 法向抖 20°），后面就只能靠"声明被数据
+    // 反驳 -> 重锁"来救，实测每 30 帧重锁一次、omega 在 0 与 10 rad/s 之间跳。
+    prior.spin = SpinPriorKind::Unknown;
     prior.yaw_rate_prior_rad_s = is_static ? 0.0 : omega;
     prior.position_sigma_m = 0.15;
     prior.velocity_sigma_m_s = config_.velocity_sigma_m_s;
@@ -911,8 +917,8 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
     // 初值给宽容一点，让随后的更新把它拉正；给太紧会把 0.2-0.3m 的初值偏差
     // 全部判成离群，于是整段跟踪 0 次更新。
     prior.yaw_sigma_rad = 0.80;
-    prior.yaw_rate_sigma_rad_s =
-        is_static ? 0.0 : clampd(2.0 * slope_error, 0.8, 6.0);
+    // 静态也留 1.0 rad/s 的方差：先验只是起点，斜率量测会把它拉到真值。
+    prior.yaw_rate_sigma_rad_s = clampd(2.0 * slope_error, 1.0, 6.0);
     prior.radius_sigma_m = config_.radius_sigma_m;
     prior.radius_fixed = config_.freeze_radius;
 
@@ -1004,6 +1010,175 @@ void RotatingArmorTracker::pushNormalHistory(int plate_slot, double timestamp_s,
     }
 }
 
+
+// 窗口化的板面法向斜率 -> omega 伪量测。
+//
+// 折叠展开：车体相位只有 2*pi/N 的可辨识度（四板就是 90°），而 166 fps 下单帧
+// 真实转角远小于 pi/N，所以"以上一个解缠样本为参考、按周期折叠增量"不会把
+// 真实转动绕回去，却能容忍换板（换板带来的整周期增量折叠后为 0）。
+// 拟合残差大 = 这一串法向根本不来自同一块/同一台车（同 id 异车、漏检跳变），
+// 此时宁可不给量测，也不要喂一条错误斜率——v1 的 10 rad/s 就是这么来的。
+void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObservation> &world,
+                                                   double timestamp_s)
+{
+    if (!config_.rate_update_enabled || !ekf_.initialized() || target_id_ == 0)
+    {
+        return;
+    }
+    const int plate_count = config_.ekf.plate_count;
+    if (plate_count <= 0)
+    {
+        return;
+    }
+    const double period = 2.0 * kPi / static_cast<double>(plate_count);
+
+    // 1) 只追"上一帧那块板"：用观测之间的最近邻续接，不用模型预测。
+    //
+    //    为什么不用预测：模型一旦把转速估错，预测位置会跟着转，最近邻就会在
+    //    同一台车的两块板之间来回跳（实拍 v4 的斜置副板离正板 0.38 m），而
+    //    两块板的法向差 26°、小于折叠周期 90° 的一半，解缠后变成"每帧几十度"
+    //    的假高速——实测 wobs 冲到 -16 rad/s，EKF 跟着跑到 -10。
+    //    观测间最近邻与模型无关，副板只在"目标板消失"时才会被误续接，
+    //    而那种情况位置跳变 >0.15 m，直接重起窗口。
+    const WorldObservation *chosen = nullptr;
+    if (rate_samples_.empty())
+    {
+        for (const WorldObservation &observation : world)
+        {
+            if (observation.target_id == target_id_ && observation.has_yaw &&
+                observation.position.allFinite())
+            {
+                chosen = &observation;
+                break;
+            }
+        }
+    }
+    else
+    {
+        double best = config_.rate_associate_gate_m;
+        for (const WorldObservation &observation : world)
+        {
+            if (observation.target_id != target_id_ || !observation.has_yaw ||
+                !observation.position.allFinite())
+            {
+                continue;
+            }
+            const double distance = (observation.position - rate_samples_.back().position).norm();
+            if (distance < best)
+            {
+                best = distance;
+                chosen = &observation;
+            }
+        }
+        if (chosen == nullptr)
+        {
+            // 这块板这一帧没被看到（被挡/漏检）：窗口保留，等下一帧；
+            // 间断太久由下面的 rate_max_gap_s 清空。
+            if (timestamp_s - rate_samples_.back().timestamp_s > config_.rate_max_gap_s)
+            {
+                rate_samples_.clear();
+            }
+            return;
+        }
+    }
+    if (chosen == nullptr)
+    {
+        return;
+    }
+    if (!rate_samples_.empty() &&
+        timestamp_s - rate_samples_.back().timestamp_s > config_.rate_max_gap_s)
+    {
+        rate_samples_.clear();
+    }
+
+    // 2) 解缠：折叠掉换板造成的 2pi/N 整数倍。
+    double unwrapped = chosen->yaw;
+    if (!rate_samples_.empty())
+    {
+        const double delta =
+            foldPeriod(chosen->yaw - rate_samples_.back().unwrapped_yaw, period);
+        // 单帧 0.6 rad 在 166 fps 下相当于 100 rad/s，物理上不可能；出现就说明
+        // 续接跳到了别的板/别的车，窗口重起，别把跳变当成旋转。
+        if (std::fabs(delta) > 0.60)
+        {
+            rate_samples_.clear();
+        }
+        else
+        {
+            unwrapped = rate_samples_.back().unwrapped_yaw + delta;
+        }
+    }
+    rate_samples_.push_back({timestamp_s, unwrapped, chosen->position});
+    while (!rate_samples_.empty() &&
+           timestamp_s - rate_samples_.front().timestamp_s > config_.rate_window_s)
+    {
+        rate_samples_.pop_front();
+    }
+
+    // 3) Theil-Sen 斜率：只用"时间跨度 >= 半个窗口"的点对。
+    //
+    //    法向不是白噪声，而是"每帧翻面/抖动"的野值序列，最小二乘会被单帧
+    //    野值带飞（实测 v4 静态目标上 LS 给出 16 rad/s）。取点对斜率的**中位数**
+    //    对 ≤30% 的野值免疫；误差取中位绝对偏差（MAD），野值多时报出的 sigma
+    //    很大，滤波器自然不会被它拖走——这就是"由数据自己决定转不转"。
+    const int count = static_cast<int>(rate_samples_.size());
+    if (count < config_.rate_min_samples)
+    {
+        return;
+    }
+    const double span = rate_samples_.back().timestamp_s - rate_samples_.front().timestamp_s;
+    if (span < config_.rate_min_span_s)
+    {
+        return;
+    }
+    const double min_pair_dt = 0.5 * span;
+    std::vector<double> pair_slopes;
+    pair_slopes.reserve(static_cast<std::size_t>(count) * 2);
+    for (int i = 0; i < count; ++i)
+    {
+        for (int j = i + 1; j < count; ++j)
+        {
+            const double dt = rate_samples_[j].timestamp_s - rate_samples_[i].timestamp_s;
+            if (dt < min_pair_dt)
+            {
+                continue;
+            }
+            pair_slopes.push_back((rate_samples_[j].unwrapped_yaw -
+                                   rate_samples_[i].unwrapped_yaw) /
+                                  dt);
+        }
+    }
+    if (pair_slopes.size() < 5)
+    {
+        return;
+    }
+    const auto middle = pair_slopes.begin() + static_cast<long>(pair_slopes.size() / 2);
+    std::nth_element(pair_slopes.begin(), middle, pair_slopes.end());
+    const double slope = *middle;
+    std::vector<double> deviations;
+    deviations.reserve(pair_slopes.size());
+    for (const double value : pair_slopes)
+    {
+        deviations.push_back(std::fabs(value - slope));
+    }
+    const auto dev_middle = deviations.begin() + static_cast<long>(deviations.size() / 2);
+    std::nth_element(deviations.begin(), dev_middle, deviations.end());
+    const double mad = *dev_middle;
+    if (!std::isfinite(slope) || !std::isfinite(mad))
+    {
+        return;
+    }
+    const double sigma =
+        std::max(1.4826 * mad, config_.rate_sigma_floor_rad_s);
+    if (!ekf_.updateYawRate(slope, sigma))
+    {
+        return;
+    }
+    diagnostics_.rate_obs_used = true;
+    diagnostics_.rate_obs_rad_s = slope;
+    diagnostics_.rate_obs_sigma_rad_s = sigma;
+    diagnostics_.rate_obs_samples = count;
+}
 
 bool RotatingArmorTracker::reinitializeFromPair(const std::vector<WorldObservation> &world)
 {
@@ -1288,9 +1463,14 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                 // 重锚候选：状态已经漂出位置门，但观测仍可能是"同一台车的某块
                 // 板"（同 target_id）。此时先按这块板把相位+中心对齐，再更新；
                 // 不这样做的话位置门/ NIS 门会一起把状态锁死在错误相位上。
+                // 重锚候选同样只在"已经卡住"时开放：否则任何 1.5 m 内的
+                // 离群观测都会绕过 NIS 门被吃进来（回归测试 D 组要求单个
+                // 离群观测必须被拒绝）。
                 const bool realign_candidate =
                     !within_gate && config_.single_plate_realign_m > 0.0 &&
-                    distance <= config_.single_plate_realign_gate_m;
+                    distance <= config_.single_plate_realign_gate_m &&
+                    last_updates_ == 0 &&
+                    missed_frames_ >= std::max(config_.realign_after_misses, 0);
                 if (!within_gate && !realign_candidate)
                 {
                     continue;
@@ -1337,7 +1517,8 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
         // 可能整块板漂走（实拍 v4 自转车 f=1076 起状态相位偏 2.16 rad，四块
         // 模型板全错位，瞄准圈停在另一台车上）。位置门 0.6 m 又刚好放它进来，
         // NIS 门再拒掉更新 → 状态永远修不回来。
-        if (config_.single_plate_realign_m > 0.0 && ekf_.initialized())
+        if (config_.single_plate_realign_m > 0.0 && ekf_.initialized() &&
+            last_updates_ == 0 && missed_frames_ >= std::max(config_.realign_after_misses, 0))
         {
             const int count = config_.ekf.plate_count;
             const Eigen::Vector3d predicted =
@@ -2012,9 +2193,13 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
     }
     state_timestamp_s_ = timestamp_seconds;
 
+    // 先用窗口化的法向斜率把 omega 拉正，再做位置更新：顺序反过来会让位置
+    // 更新先按错误的 omega 外推、把中心推歪，再靠斜率量测去救。
+    updateYawRateFromWindow(world, timestamp_seconds);
     updateRadiusFromPairs(world);
     const int updates = associateAndUpdate(world, timestamp_seconds);
     diagnostics_.updates_this_frame = updates;
+    last_updates_ = updates;
     if (updates > 0)
     {
         ++consecutive_updates_;

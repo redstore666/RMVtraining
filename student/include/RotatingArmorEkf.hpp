@@ -53,6 +53,11 @@ enum class SpinPriorKind : std::uint8_t {
     Static,          // 显式声明目标不转：要求 yaw_rate_prior_rad_s == 0（硬约束：
                      // omega 的初始方差与过程噪声均为 0，目标开始转时必须重新锁定）
     Spinning,        // 显式声明目标在转：要求 yaw_rate_prior_rad_s != 0（含符号）
+    // 不知道转不转：先验按给定的 yaw_rate_prior_rad_s ± yaw_rate_sigma_rad_s 装进去，
+    // 之后由 updateYawRate() 用"窗口化的板面法向斜率"持续修正。这是上层
+    // （RotatingArmorTracker）在实拍里真正使用的模式：转不转由数据说话，
+    // 而不是由初始化那一帧的一句声明决定。
+    Unknown,
 };
 
 // 初始化先验。
@@ -146,6 +151,16 @@ public:
     // 车体中心直接量测（同帧两块板的中点）。状态里中心三维在 0/2/4 行，
     // H = [e0; e2; e4]，与位置量测共用同一份协方差。
     bool updateCenter(const Eigen::Vector3d& measured_center_m, double sigma_m);
+
+    // 用"一段时间窗口里的板面法向斜率"直接观测车体角速度（H = e7）。
+    //
+    // 为什么单独开这条观测通道：166 fps 下 10 rad/s × R=0.3 m 的切向位移只有
+    // 2 cm/帧，和 PnP 噪声同量级——单帧位置观测里"高速自转"与"静止+抖动"
+    // 不可分辨（实拍 v1 就是这样把静止目标的 omega 推到 10 rad/s 的）。
+    // 但法向序列在 0.3 s 窗口上会累积出 60° 的真实转角，远大于法向噪声；
+    // 把这条斜率当伪量测送进来，角速度就由数据决定，且窗口说"没转"时能把
+    // omega 拉回 0，不需要调用方事先声明。
+    bool updateYawRate(double measured_rad_s, double sigma_rad_s);
 
     // 用"同一帧两块板的弦长"直接观测半径：相邻两板 |n_i-n_j| = sqrt(2)，
     // 弦长 = R*|n_i-n_j|，所以 R = chord / |n_i-n_j|，不需要圆拟合。
