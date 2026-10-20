@@ -1291,6 +1291,39 @@ int main(int argc, char **argv)
                 std::vector<cv::Point2d> projected;
                 cv::projectPoints(model_points, cv::Vec3d(0, 0, 0), cv::Vec3d(0, 0, 0),
                                   camera.camera_matrix, cv::noArray(), projected);
+                // 四块模型板按"板面切线"画成短条：条压在亮着的板上 = 状态对；
+                // 偏出多少，用眼睛就能量。瞄准板画黄、其它三块画蓝细条。
+                for (int slot = 0; slot < 4; ++slot)
+                {
+                    const double phase = ekf_state(6) + 2.0 * 3.141592653589793 * slot / 4.0;
+                    const Eigen::Vector3d tangent(-std::sin(phase), std::cos(phase), 0.0);
+                    const Eigen::Vector3d center_world =
+                        rotating_armor::platePosition(ekf_state, slot, 4);
+                    std::vector<cv::Point3d> ends;
+                    bool in_front = true;
+                    for (double sign : {-1.0, 1.0})
+                    {
+                        const Eigen::Vector3d p_world = center_world + sign * 0.0675 * tangent;
+                        const Eigen::Vector3d p_gimbal = rotating_armor::toGimbal(gimbal, p_world);
+                        const cv::Vec3d p_camera = gimbalToCameraPoint(
+                            camera, cv::Vec3d(p_gimbal.x(), p_gimbal.y(), p_gimbal.z()));
+                        if (!(p_camera[2] > 0.3) || p_camera[2] > 20.0)
+                        {
+                            in_front = false;
+                            break;
+                        }
+                        ends.emplace_back(p_camera[0], p_camera[1], p_camera[2]);
+                    }
+                    if (!in_front)
+                        continue;
+                    std::vector<cv::Point2d> ends_px;
+                    cv::projectPoints(ends, cv::Vec3d(0, 0, 0), cv::Vec3d(0, 0, 0),
+                                      camera.camera_matrix, cv::noArray(), ends_px);
+                    const bool is_aim = slot == diagnostics.aim_slot;
+                    cv::line(frame, ends_px[0], ends_px[1],
+                             is_aim ? cv::Scalar(0, 200, 255) : cv::Scalar(235, 120, 60),
+                             is_aim ? 3 : 2, cv::LINE_AA);
+                }
                 // 只把"跟踪中的那块板"(aim slot) 画实：另外 3 块是模型外推到车体
                 // 背面的，本来就看不见，画出来会像"满天飞的点"，容易误判成状态错了。
                 // LED 灯条独立相位量测：两灯条连线 = 板面内水平轴，与竖直轴叉乘得法向。
