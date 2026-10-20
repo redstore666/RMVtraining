@@ -1527,7 +1527,6 @@ int main(int argc, char **argv)
                             // 只统计"真的属于这条轨迹"的观测：同帧可能有两块同 id 的板
                             // 属于两台不同的车，把别人的板算进来会让 PIX 中位数变成两车
                             // 间距（0.4~1 m，即 100 px 量级），看着像模型全错。
-                            bool associated_out{false};
                             int slot_best = -1;
                             double d_best = 1.0e9;
                             Eigen::Vector3d best_p = Eigen::Vector3d::Zero();
@@ -1567,12 +1566,15 @@ int main(int argc, char **argv)
                             // 单独记成 [pixx]，不计入 [pix] 的统计。
                             if (d_best > 0.25)
                             {
-                                associated_out = true;
+                                // 单独一行、单独一套格式参数：混用同一份参数列表会把
+                                // 浮点塞进 %d，print 出来是 -544.9 这种垃圾值。
+                                std::fprintf(stderr, "[pixx] f=%d id=%d res=%.3f\n",
+                                             frame_index, pose_x.detection.target_id, d_best);
+                                continue;
                             }
                             std::fprintf(stderr,
-                                         associated_out ? "[pixx] f=%d id=%d d=%.1f res=%.3f\n"
-                                                        : "[pix] f=%d id=%d dx=%+.1f dy=%+.1f d=%.1f slot=%d "
-                                                          "bx=%.0f by=%.0f u=%d rj=%d nis=%.1f gd=%.3f\n",
+                                         "[pix] f=%d id=%d dx=%+.1f dy=%+.1f d=%.1f slot=%d "
+                                         "bx=%.0f by=%.0f u=%d rj=%d nis=%.1f gd=%.3f\n",
                                          frame_index, pose_x.detection.target_id,
                                          px[0].x - box.x, px[0].y - box.y,
                                          cv::norm(cv::Point2f(px[0]) - box), slot_best, box.x, box.y,
