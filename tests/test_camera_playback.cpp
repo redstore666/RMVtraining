@@ -1454,7 +1454,8 @@ int main(int argc, char **argv)
                             Eigen::Vector3d best_p = Eigen::Vector3d::Zero();
                             for (int slot = 0; slot < 4; ++slot)
                             {
-                                const Eigen::Vector3d p = rotating_armor::platePosition(ekf_state, slot, 4);
+                                Eigen::Vector3d p = rotating_armor::platePosition(ekf_state, slot, 4);
+                                p.z() += active_tracker->slotZOffset(slot);
                                 const double d = (p - obs_world).norm();
                                 if (d < d_best)
                                 {
