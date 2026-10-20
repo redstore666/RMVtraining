@@ -1983,9 +1983,25 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                     diagnostics_.best_gate_nis = std::min(diagnostics_.best_gate_nis, nis);
                     continue;
                 }
-                if (distance < best_distance)
+                // 法向只用来"打破四板对称造成的槽位平局"，不用来拉整帧相位。
+                // 四块板是同一个模子、彼此相差 90 度，位置门（0.6 m）对相隔
+                // 0.4 m 的两块板同时放行——光看位置分不出"这一帧看到的是哪一面"，
+                // 分错的后果就是画面上模型板停在相邻那一面上（相位差 90 度）。
+                // 板面法向直接把"是哪一面"告诉了我们：按角度差加一项代价，
+                // 让槽位选择同时满足位置近和朝向对。
+                double score = distance;
+                if (config_.normal_tiebreak_weight > 0.0 && world[i].has_yaw &&
+                    std::isfinite(world[i].yaw))
                 {
-                    best_distance = distance;
+                    const double period = 2.0 * kPi / static_cast<double>(plate_count);
+                    const double face_yaw =
+                        ekf_.state()(6) + static_cast<double>(slot) * period;
+                    score += config_.normal_tiebreak_weight *
+                             std::fabs(wrapToPi(face_yaw - world[i].yaw));
+                }
+                if (score < best_distance)
+                {
+                    best_distance = score;
                     best_observation = static_cast<int>(i);
                     best_slot = slot;
                     best_nis = nis;

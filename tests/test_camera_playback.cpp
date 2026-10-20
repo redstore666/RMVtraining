@@ -170,6 +170,8 @@ namespace
         double gate_m{0.0}; // >0 时覆盖 position_gate_m，用来扫门限
         int slot_phase{-1};
         int antianchor{-1};
+        double normal_tiebreak{-1.0};
+        int joint_pair{-1};
         int pair_body{-1};  // 1 开 0 关 -1 用默认，控制双板整车求解  // 1 开 0 关 -1 用默认，控制按槽位一致的相位更新
         bool pair_radius{false};
         bool phase_anchor{true};
@@ -307,6 +309,14 @@ namespace
             else if (arg == "--pair-body")
             {
                 args.pair_body = std::atoi(next("--pair-body").c_str());
+            }
+            else if (arg == "--joint-pair")
+            {
+                args.joint_pair = std::atoi(next("--joint-pair").c_str());
+            }
+            else if (arg == "--normal-tiebreak")
+            {
+                args.normal_tiebreak = std::stod(next("--normal-tiebreak"));
             }
             else if (arg == "--no-antianchor")
             {
@@ -617,6 +627,14 @@ int main(int argc, char **argv)
     if (args.gate_m > 0.0)
     {
         tracker_config.position_gate_m = args.gate_m;
+    }
+    if (args.joint_pair >= 0)
+    {
+        tracker_config.joint_pair_binding_enabled = args.joint_pair != 0;
+    }
+    if (args.normal_tiebreak >= 0.0)
+    {
+        tracker_config.normal_tiebreak_weight = args.normal_tiebreak;
     }
     if (args.antianchor >= 0)
     {

@@ -180,6 +180,10 @@ struct TrackerConfig
     // 同帧两块板的联合绑定：两块板是同一台车上相邻的两个面，槽位差由几何决定，
     // 只有 4 种整体旋转可选。逐块独立"找最近的预测板"会绑到互相矛盾的槽位上，
     // 两台更新互相拉扯——这正是"转一部分卡回去"的机制之一。
+    // 槽位选择时把板面法向算进代价（单位 m/rad）：四块板同模、相隔 90 度，
+    // 位置门对相邻两块板同时放行，光看位置分不出这一帧看到的是哪一面，
+    // 分错就等于画面上模型板停在相邻那一面上（相位差 90 度）。
+    double normal_tiebreak_weight{0.0};
     bool joint_pair_binding_enabled{true};
     double joint_pair_binding_max_cost_m{0.80};
     bool pair_body_solve_enabled{false};
