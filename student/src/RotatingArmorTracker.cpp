@@ -1978,7 +1978,9 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                 }
                 // 双板几何配对是最干净的一对观测：顺手把两块板的槽位几何
                 // （半径/角度/高度偏移）学一下，只影响显示，不参与滤波。
-                for (int k = 0; k < 2; ++k)
+                // 受 slot_offsets_enabled 控制：打开时四块模型板各有圆心，
+                // 与"同速度同方向同圆心"的要求冲突；默认关闭。
+                for (int k = 0; config_.slot_offsets_enabled && k < 2; ++k)
                 {
                     const Eigen::Vector3d &pp = world[index[k]].position;
                     const int sl = slots[k];
