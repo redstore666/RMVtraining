@@ -1753,6 +1753,29 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                 double &stored = slot_z_offset_[static_cast<std::size_t>(best_slot)];
                 stored += 0.08 * (offset - stored);
             }
+            // 每个槽位的实际半径也学一下（同上，只用于显示）。
+            const Eigen::Vector2d radial(chosen.position.x() - ekf_.state()(0),
+                                         chosen.position.y() - ekf_.state()(2));
+            const double radius_offset = radial.norm() - ekf_.state()(8);
+            if (std::fabs(radius_offset) < 0.12)
+            {
+                double &stored = slot_radius_offset_[static_cast<std::size_t>(best_slot)];
+                stored += 0.08 * (radius_offset - stored);
+            }
+            if (radial.norm() > 0.05)
+            {
+                const double period = 2.0 * kPi / static_cast<double>(plate_count);
+                const double observed_angle = std::atan2(radial.y(), radial.x());
+                const double model_angle = ekf_.state()(6) +
+                                           static_cast<double>(best_slot) * period + kPi;
+                double deviation = wrapToPi(observed_angle - model_angle);
+                while (std::fabs(deviation) > 0.5 * period)
+                {
+                    deviation -= std::copysign(period, deviation);
+                }
+                double &stored = slot_angle_offset_[static_cast<std::size_t>(best_slot)];
+                stored += 0.08 * (deviation - stored);
+            }
         }
         ArmorObservation observation;
         if (!smoothObservation(chosen, best_slot, timestamp_s, observation))
@@ -1936,6 +1959,39 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                 while (std::fabs(delta) > 0.5 * period)
                 {
                     delta -= std::copysign(period, delta);
+                }
+                // 双板几何配对是最干净的一对观测：顺手把两块板的槽位几何
+                // （半径/角度/高度偏移）学一下，只影响显示，不参与滤波。
+                for (int k = 0; k < 2; ++k)
+                {
+                    const Eigen::Vector3d &pp = world[index[k]].position;
+                    const int sl = slots[k];
+                    const Eigen::Vector2d radial(pp.x() - ekf_.state()(0), pp.y() - ekf_.state()(2));
+                    const double dr = radial.norm() - ekf_.state()(8);
+                    if (std::fabs(dr) < 0.12)
+                    {
+                        double &stored = slot_radius_offset_[static_cast<std::size_t>(sl)];
+                        stored += 0.15 * (dr - stored);
+                    }
+                    if (radial.norm() > 0.05)
+                    {
+                        const double observed_angle = std::atan2(radial.y(), radial.x());
+                        const double model_angle = ekf_.state()(6) +
+                                                   static_cast<double>(sl) * period + kPi;
+                        double dev = wrapToPi(observed_angle - model_angle);
+                        while (std::fabs(dev) > 0.5 * period)
+                        {
+                            dev -= std::copysign(period, dev);
+                        }
+                        double &stored = slot_angle_offset_[static_cast<std::size_t>(sl)];
+                        stored += 0.15 * (dev - stored);
+                    }
+                    const double dz = pp.z() - ekf_.state()(4);
+                    if (std::fabs(dz) < 0.20)
+                    {
+                        double &stored = slot_z_offset_[static_cast<std::size_t>(sl)];
+                        stored += 0.15 * (dz - stored);
+                    }
                 }
                 ekf_.rotatePhase(delta);
                 // 相位定了以后中心由任一块板反推：c = p + R*u(theta + s*period)

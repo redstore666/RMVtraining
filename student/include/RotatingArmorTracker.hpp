@@ -401,6 +401,19 @@ public:
     {
         return (slot >= 0 && slot < 4) ? slot_z_offset_[static_cast<std::size_t>(slot)] : 0.0;
     }
+    // 每个槽位相对车体中心的半径偏移（同样只用于显示）。实拍那台自制道具并不是
+    // 正方形：同一帧两块板到车心的距离能差 3-4 cm，单一 R 只能折中，画出来必然
+    // 一块压住、另一块偏出去。这里按槽位学半径偏移，让四块模型板各自贴自己的板。
+    double slotRadiusOffset(int slot) const
+    {
+        return (slot >= 0 && slot < 4) ? slot_radius_offset_[static_cast<std::size_t>(slot)] : 0.0;
+    }
+    // 每个槽位的角度偏移（弧度，仅用于显示）。道具的板位不是严格的 90°，两块同
+    // 帧可同时看到的板实测能偏 20°；单靠整体 yaw 只能折中，因此按槽位学偏差。
+    double slotAngleOffset(int slot) const
+    {
+        return (slot >= 0 && slot < 4) ? slot_angle_offset_[static_cast<std::size_t>(slot)] : 0.0;
+    }
 
 private:
     // 一帧观测转到跟踪系之后的形态。
@@ -554,6 +567,8 @@ private:
     int last_updated_slot_{-1};
     int radius_updates_{0};   // 本次锁定后已用弦长修正过几次半径
     std::array<double, 4> slot_z_offset_{};
+    std::array<double, 4> slot_radius_offset_{};
+    std::array<double, 4> slot_angle_offset_{};
     int static_streak_{0};    // 连续判为 static 的帧数（半径学习只信它）
 
     std::deque<LockSample> lock_samples_{};

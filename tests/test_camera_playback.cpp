@@ -1348,6 +1348,10 @@ int main(int argc, char **argv)
                         if (owner != nullptr)
                         {
                             center_world.z() += owner->slotZOffset(slot);
+                            const double dr = owner->slotRadiusOffset(slot);
+                            const double dph = owner->slotAngleOffset(slot);
+                            const Eigen::Vector2d dir(std::cos(phase + dph), std::sin(phase + dph));
+                            center_world.head<2>() -= dr * dir;
                         }
                         std::vector<cv::Point3d> ends;
                         bool in_front = true;
@@ -1456,6 +1460,12 @@ int main(int argc, char **argv)
                             {
                                 Eigen::Vector3d p = rotating_armor::platePosition(ekf_state, slot, 4);
                                 p.z() += active_tracker->slotZOffset(slot);
+                                {
+                                    const double dr = active_tracker->slotRadiusOffset(slot);
+                                    const double dph = active_tracker->slotAngleOffset(slot);
+                                    const double ph = ekf_state(6) + 2.0 * 3.141592653589793 * slot / 4.0 + dph;
+                                    p.head<2>() -= dr * Eigen::Vector2d(std::cos(ph), std::sin(ph));
+                                }
                                 const double d = (p - obs_world).norm();
                                 if (d < d_best)
                                 {
