@@ -22,7 +22,8 @@
 //   --bias S         模拟控制器前馈补偿（秒），写入云台快照的 prediction_bias_s
 //   --config PATH    相机参数文件（默认 config/camera.yaml，或 RMV_CAMERA_CONFIG）
 //   --multi-primary N  强制把装甲板编号 N 那辆当主目标（0=自动：优先 Tracking、再近的）
-//   --multi          多目标：按几何把同一帧的板分给多辆车，各自跑一个 EKF，
+//   --single         关掉多目标（旧行为：全局只有一个 EKF，会在两台车之间跳）
+//   --multi          多目标（默认开启）：按几何把同一帧的板分给多辆车，各自跑一个 EKF，
 //                    俯视图里非主目标用暗色画，主目标仍是亮的
 //   --topdown        额外开一个"EKF 俯视图"窗口（红点车心 + 四块模型板 + 绿点实测板，
 //                    风格见 tmp/example.jpg）；跟随车心、自动缩放
@@ -181,7 +182,9 @@ namespace
         int smooth_window{4};
         bool trace{false};
     bool phase_yaw{false};
-    bool multi{false};
+    // 默认多目标：实拍里常常同时有两台车，用户要"两个车分别建模"。
+    // 想回到单目标（旧行为）用 --single。
+    bool multi{true};
     int multi_primary{0};
     double sigma_pos{0.03};
     double handoff_scale{2.5};
@@ -368,6 +371,8 @@ namespace
             }
             else if (arg == "--multi")
                 args.multi = true;
+            else if (arg == "--single")
+                args.multi = false;
             else if (arg == "--multi-primary")
                 args.multi_primary = std::atoi(next("--multi-primary").c_str());
             else if (arg == "--topdown")
