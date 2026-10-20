@@ -167,6 +167,8 @@ namespace
         bool phase_yaw_static{false};
         bool no_aim_extrapolate{false};
         double realign_m{0.25};
+        double gate_m{0.0}; // >0 时覆盖 position_gate_m，用来扫门限
+        int slot_phase{-1};  // 1 开 0 关 -1 用默认，控制按槽位一致的相位更新
         bool pair_radius{false};
         bool phase_anchor{true};
         double aim_obs{0.012};
@@ -295,6 +297,14 @@ namespace
             else if (arg == "--realign")
             {
                 args.realign_m = std::atof(next("--realign").c_str());
+            }
+            else if (arg == "--gate")
+            {
+                args.gate_m = std::atof(next("--gate").c_str());
+            }
+            else if (arg == "--slot-phase")
+            {
+                args.slot_phase = std::atoi(next("--slot-phase").c_str());
             }
             else if (arg == "--no-aim-extrapolate")
             {
@@ -594,6 +604,14 @@ int main(int argc, char **argv)
     tracker_config.phase_update_when_static = args.phase_yaw_static;
     tracker_config.aim_observation_extrapolate = !args.no_aim_extrapolate;
     tracker_config.single_plate_realign_m = args.realign_m;
+    if (args.gate_m > 0.0)
+    {
+        tracker_config.position_gate_m = args.gate_m;
+    }
+    if (args.slot_phase >= 0)
+    {
+        tracker_config.slot_phase_update_enabled = args.slot_phase != 0;
+    }
     if (args.pair_radius)
     {
         tracker_config.pair_radius_update_enabled = true;
