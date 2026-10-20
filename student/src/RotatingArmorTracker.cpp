@@ -2106,6 +2106,35 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
             continue;
         }
         noteObservationForNoise(chosen.position, timestamp_s);
+        // 装甲板法向直接给出"从板心指向转轴"的方向：车心 = 板心 − R·n。
+        // 这条式子不用槽位、不用相位，等于给车心一个只由板朝向量出来的独立量测。
+        // 之前所有位置更新都是拿"滤波自己的相位"去算预测板位，法向只用于相位更新；
+        // 现在把法向当几何约束直接反推车心，正是"整车建模"该用的量。
+        if (config_.center_from_normal_enabled && chosen.has_yaw && std::isfinite(chosen.yaw))
+        {
+            const double radius_now = ekf_.state()(8);
+            // 高速自转时法向更新的预测分支容易选错（合成 G 场景 omega>=4 rad/s 会翻车），
+            // 只在转速不高时相信它。
+            const bool rate_ok = std::fabs(ekf_.state()(7)) <= config_.center_from_normal_max_rate_rad_s;
+            if (radius_now > 0.01 && rate_ok)
+            {
+                const Eigen::Vector2d n(std::cos(chosen.yaw), std::sin(chosen.yaw));
+                const Eigen::Vector2d p_xy(chosen.position.x(), chosen.position.y());
+                const Eigen::Vector2d c_pred(ekf_.state()(0), ekf_.state()(2));
+                // PnP 法向符号可能翻，两只候选 c = p ∓ R·n 取离预测近的那只，
+                // 这不是先验，只是在两个候选里做出选择。
+                const Eigen::Vector2d c_a = p_xy - radius_now * n;
+                const Eigen::Vector2d c_b = p_xy + radius_now * n;
+                const Eigen::Vector2d c =
+                    ((c_a - c_pred).norm() <= (c_b - c_pred).norm()) ? c_a : c_b;
+                if ((c - c_pred).norm() <= config_.center_from_normal_gate_m)
+                {
+                    ekf_.updateCenter(Eigen::Vector3d(c.x(), c.y(), ekf_.state()(4)),
+                                      config_.center_from_normal_sigma_m);
+                    ++diagnostics_.center_from_normal_updates;
+                }
+            }
+        }
         // "看见过"=这块板真的被用来更新了（或者观测就落在这块板的预测位置上）。
         // 只按位置门判定会把相邻板也算成看见：四块板相距 0.35 m，位置门 0.6 m，
         // 于是"没看见的板"也进了瞄准候选，又挑回离云台最近的那块去了。

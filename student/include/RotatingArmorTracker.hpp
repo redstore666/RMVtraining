@@ -221,6 +221,12 @@ struct TrackerConfig
     // 画面上就是"蓝板转一部分然后卡回去"。
     // 默认关闭：合成 A/G/H 全部回归（见 git log），只在"按槽位一致 + 双板
     // 共同约束"完整实现后才能打开。
+        bool slot_from_normal_enabled{false};
+    // 由板法向反推车心：c = p − R·n（true = 用，默认开）。
+    bool center_from_normal_enabled{false};
+    double center_from_normal_sigma_m{0.05};
+    double center_from_normal_gate_m{0.15};
+    double center_from_normal_max_rate_rad_s{2.5};
     bool slot_phase_update_enabled{false};
     // 槽位相位更新的触发下界。用 static_rate_rad_s(1.2) 会让静止车上的 omega
     // 抖动也偶尔触发（实测 id=1 的 PIX 样本数 516 -> 279）。但取 3.0 会让转子
@@ -392,6 +398,7 @@ struct TrackerDiagnostics
     // 状态瞬间跳到观测上，观感就是"转一部分又卡回去"；这个计数用来区分
     // "滤波器在跟踪"和"滤波器被硬覆盖"。
     std::uint64_t single_plate_realigns{0};
+    std::uint64_t center_from_normal_updates{0};
     int consecutive_updates{0};
     int missed_frames{0};
     double observation_noise_m{0.0}; // 本帧使用的观测噪声 sigma（m）
