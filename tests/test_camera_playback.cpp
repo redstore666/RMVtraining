@@ -169,6 +169,7 @@ namespace
         double realign_m{0.25};
         double gate_m{0.0}; // >0 时覆盖 position_gate_m，用来扫门限
         int slot_phase{-1};
+        int antianchor{-1};
         int pair_body{-1};  // 1 开 0 关 -1 用默认，控制双板整车求解  // 1 开 0 关 -1 用默认，控制按槽位一致的相位更新
         bool pair_radius{false};
         bool phase_anchor{true};
@@ -306,6 +307,10 @@ namespace
             else if (arg == "--pair-body")
             {
                 args.pair_body = std::atoi(next("--pair-body").c_str());
+            }
+            else if (arg == "--no-antianchor")
+            {
+                args.antianchor = 0;
             }
             else if (arg == "--slot-phase")
             {
@@ -612,6 +617,10 @@ int main(int argc, char **argv)
     if (args.gate_m > 0.0)
     {
         tracker_config.position_gate_m = args.gate_m;
+    }
+    if (args.antianchor >= 0)
+    {
+        tracker_config.phase_anti_anchor = args.antianchor != 0;
     }
     if (args.slot_phase >= 0)
     {
