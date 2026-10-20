@@ -1828,7 +1828,11 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
         }
         if (!ekf_.update(observation, best_slot))
         {
-            break;
+            // 更新失败（观测把状态推出物理区间等）：只放弃这一块板，别放弃本帧
+            // 剩下的板。v4 实拍里同一台车常同帧露出两块相邻板（相距 0.394 m），
+            // 第一块失败就 break 会让第二块也白白丢掉。
+            used[static_cast<std::size_t>(best_observation)] = true;
+            continue;
         }
         noteObservationForNoise(chosen.position, timestamp_s);
         // "看见过"=这块板真的被用来更新了（或者观测就落在这块板的预测位置上）。
@@ -1869,7 +1873,18 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                 config_.phase_update_enabled ||
                 (config_.phase_update_when_static && best_slot == last_updated_slot_ &&
                  std::fabs(ekf_.state()(7)) < config_.static_rate_rad_s);
-            if (phase_from_yaw)
+            // 按槽位一致的相位更新：best_slot 已经被位置更新用掉了，相位更新
+            // 用同一个槽位，两者说的是同一件事。旋转目标上必须走这条——折叠版
+            // 只能修 45 度以内，锁不住槽位，实测 v4 上 yaw 单帧跳 140~215 度。
+            // 只在"同帧存在第二块同 id 板"时用槽位锁相位：那正是折叠版的
+            // 90 度歧义真正发作的地方（两块板都能解释观测，相位在解之间翻转）。
+            // 单板帧没有歧义，折叠版已经够用，不用槽位锁去打扰正常演化。
+            // 同帧里被接受进滤波器的观测数（含本帧前面已接受的那几块板）。
+            const bool two_plates_visible = accepted >= 2;
+            const bool slot_phase =
+                config_.slot_phase_update_enabled && best_slot >= 0 && two_plates_visible &&
+                std::fabs(ekf_.state()(7)) >= config_.slot_phase_min_rate_rad_s;
+            if (slot_phase || phase_from_yaw)
             {
                 // 反锚：先记下这块板在模型里的位置，改完 yaw 再把中心平移回去，
                 // 让板留在观测到的位置。单板可见时 (center, yaw) 是规范自由度，
@@ -1877,7 +1892,12 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                 const Eigen::Vector3d plate_before =
                     rotating_armor::platePosition(ekf_.state(), best_slot,
                                                   ekf_.config().plate_count);
-                if (ekf_.updatePhase(chosen.yaw, config_.phase_update_sigma_rad))
+                const bool phase_ok =
+                    slot_phase
+                        ? ekf_.updatePhaseForSlot(chosen.yaw, config_.phase_update_sigma_rad,
+                                                  best_slot)
+                        : ekf_.updatePhase(chosen.yaw, config_.phase_update_sigma_rad);
+                if (phase_ok)
                 {
                     const Eigen::Vector3d plate_after =
                         rotating_armor::platePosition(ekf_.state(), best_slot,

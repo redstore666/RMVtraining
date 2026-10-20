@@ -148,6 +148,19 @@ public:
     // 所以位置关联出错也不会把相位带歪。sigma_rad 取值见上层配置。
     bool updatePhase(double measured_world_yaw, double sigma_rad);
 
+    // 按槽位一致的相位更新：调用方已经知道这块板被分到了哪个槽位。
+    //
+    // 与上面折叠版的关键区别：目标相位是 measured_world_yaw + slot * 2pi/N，
+    // **不做 2pi/N 折叠**。折叠版只能修 45° 以内的抖动，永远改不了"哪块板是
+    // slot 0"；而位置更新没有折叠、能把 yaw 推过 45° 边界，于是两者在槽位分配
+    // 上互相拉扯——实拍 tmp/v4.avi 上表现为 yaw 单帧跳 140°~215°
+    // （f=199 -1.62 -> f=200 +2.13），也就是"转一部分就卡回去"。
+    //
+    // 这里是"按槽位一致"的那个写法：位置更新用 best_slot，相位更新也用同一个
+    // best_slot，两者说的是同一件事，不再打架。残差仍做 wrapToPi 折叠到
+    // ±pi（cos/sin 的固有周期），但 90° 的四板歧义由 slot 明确消除。
+    bool updatePhaseForSlot(double measured_world_yaw, double sigma_rad, int plate_slot);
+
     // 车体中心直接量测（同帧两块板的中点）。状态里中心三维在 0/2/4 行，
     // H = [e0; e2; e4]，与位置量测共用同一份协方差。
     bool updateCenter(const Eigen::Vector3d& measured_center_m, double sigma_m);

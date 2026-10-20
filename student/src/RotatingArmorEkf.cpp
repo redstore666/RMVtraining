@@ -294,6 +294,45 @@ bool RotatingArmorEkf::updatePhase(double measured_world_yaw, double sigma_rad) 
     return true;
 }
 
+bool RotatingArmorEkf::updatePhaseForSlot(double measured_world_yaw, double sigma_rad,
+                                         int plate_slot) {
+    if (!initialized_ || !std::isfinite(measured_world_yaw) || !std::isfinite(sigma_rad) ||
+        !(sigma_rad > 0.0) || config_.plate_count <= 0 || plate_slot < 0 ||
+        plate_slot >= config_.plate_count) {
+        return false;
+    }
+
+    // 已知槽位时，"车体 yaw" = 板面法向 - slot 的相位偏移，是唯一的，不需要
+    // 折叠掉 2pi/N。位置更新用同一个槽位，两者一致。
+    const double period = 2.0 * kPi / static_cast<double>(config_.plate_count);
+    const double target_yaw = measured_world_yaw + static_cast<double>(plate_slot) * period;
+    // 只折叠到 +-pi：这是 cos/sin 观测的固有周期，不是四板歧义。
+    const double residual = foldPeriod(target_yaw - state_(6), 2.0 * kPi);
+    if (!std::isfinite(residual)) {
+        return false;
+    }
+
+    const double s = covariance_(6, 6) + sigma_rad * sigma_rad;
+    if (!(s > 0.0)) {
+        return false;
+    }
+    const Eigen::Matrix<double, kStateDim, 1> k = covariance_.col(6) / s;
+
+    state_ = state_ + k * residual;
+    state_(6) = wrapAngle(state_(6));
+    Eigen::Matrix<double, kStateDim, kStateDim> i_kh =
+        Eigen::Matrix<double, kStateDim, kStateDim>::Identity();
+    i_kh.row(6) -= k.transpose();
+    covariance_ =
+        i_kh * covariance_ * i_kh.transpose() + sigma_rad * sigma_rad * (k * k.transpose());
+
+    if (!state_.allFinite() || !covariance_.allFinite()) {
+        reset();
+        return false;
+    }
+    return true;
+}
+
 bool RotatingArmorEkf::updateCenter(const Eigen::Vector3d& measured_center_m, double sigma_m) {
     if (!initialized_ || !measured_center_m.allFinite() || !std::isfinite(sigma_m) ||
         !(sigma_m > 0.0)) {
