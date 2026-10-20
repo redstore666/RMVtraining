@@ -545,9 +545,14 @@ void scenarioSelfClassifiedRotation()
     const Case cases[] = {
         // 实拍小目标法向抖 ±20°：静止/平移都必须判成"没在转"。
         {"静止+噪声法向", 0.0, 0.0, 0.0, 0.35, 0.45},
+        {"静止+干净法向", 0.0, 0.0, 0.0, 0.02, 0.45},
         {"平移+噪声法向", 0.0, 0.0, 0.50, 0.35, 0.45},
         // 法向干净时，慢转必须真的被跟到（不能一律往 0 压）。
         {"慢转+干净法向", 1.5, 0.0, 0.0, 0.05, 0.80},
+        // v1 的真实现象：车其实是静止的，动的是云台（手持抖动让"报告姿态"和
+        // "真实姿态"差 0.03 rad）。这时候世界系里的板在乱晃，法向每帧转 ~2°，
+        // 任何逐帧微分都会给出假转速——要求 omega 仍被压住。
+        {"静止+云台抖动", 0.0, 0.0, 0.0, 0.12, 0.60},
     };
     for (const Case &test_case : cases)
     {
@@ -559,6 +564,10 @@ void scenarioSelfClassifiedRotation()
         rotating_armor::TrackerConfig config;
         sim::Rig rig(truth, config);
         rig.sigma_normal_rad = test_case.sigma_normal_rad;
+        if (std::strcmp(test_case.name, "静止+云台抖动") == 0)
+        {
+            rig.shake_sigma_rad = 0.030; // 166fps 下相当于云台角速率 ~5 rad/s
+        }
         rig.gimbal.yaw = rotating_armor::vectorYaw(Eigen::Vector3d(3.0, 0.0, 0.0));
         rig.gimbal.pitch = rotating_armor::vectorPitch(Eigen::Vector3d(3.0, 0.0, 0.35));
         // 云台追"车心"而不是追某块板：追板会让云台在 4 块板之间来回跳，

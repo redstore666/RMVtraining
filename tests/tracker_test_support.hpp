@@ -180,6 +180,10 @@ struct Rig
     // 板面法向噪声：实拍小目标（v4 的 0.2 m 板、1.5 m 距离）实测抖到 ±20°，
     // 默认 0.02 rad 只适合合成场景。转速自我判别的回归测试会把它调大。
     double sigma_normal_rad{0.02};
+    // 云台姿态"报告值"和"真实值"的差（rad，每帧独立抽样）。实拍里手持抖动就是
+    // 这个：观测是在真实姿态下拍的，而 EKF 拿到的是云台报告姿态，两者差一个
+    // 列向量旋转——v1 的"目标在世界系里乱晃"就是这么来的。0 表示理想 IMU。
+    double shake_sigma_rad{0.0};
     // 传给跟踪器的"本帧视觉处理延迟"，用于验证预测时域包含它。
     double latency_s{0.0};
     // 最近一帧生成的观测（跟踪器已经消费过）。给俯视图之类的可视化用，
@@ -241,11 +245,18 @@ struct Rig
             gimbal.snapTo(plates[static_cast<std::size_t>(best)].position);
         }
         const GimbalState gimbal_state = gimbal.state(bias_s);
+        // 观测用"真实"姿态生成，EKF 拿到的是报告姿态；两者之差就是抖动。
+        GimbalState observing_gimbal = gimbal_state;
+        if (shake_sigma_rad > 0.0)
+        {
+            observing_gimbal.yaw += static_cast<float>(gauss(rng, shake_sigma_rad));
+            observing_gimbal.pitch += static_cast<float>(gauss(rng, shake_sigma_rad));
+        }
         const int id = (observation_id >= 0) ? observation_id : target_id;
         std::vector<ArmorPose> observations;
         if (provide_observations)
         {
-            observations = observe(plates, gimbal_state, id, rng, sigma_position_m,
+            observations = observe(plates, observing_gimbal, id, rng, sigma_position_m,
                                    sigma_normal_rad);
         }
         last_observations = observations;
