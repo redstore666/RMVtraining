@@ -1335,13 +1335,20 @@ int main(int argc, char **argv)
                 // 一辆车的四块模型板 + 车心；aim_slot < 0 表示不标瞄准板。
                 const auto draw_body = [&](const rotating_armor::State &st, int aim_slot,
                                            cv::Scalar plate_color, cv::Scalar aim_color,
-                                           int thickness, cv::Scalar center_color) {
+                                           int thickness, cv::Scalar center_color,
+                                           const rotating_armor::RotatingArmorTracker *owner) {
                     for (int slot = 0; slot < 4; ++slot)
                     {
                         const double phase = st(6) + 2.0 * 3.141592653589793 * slot / 4.0;
                         const Eigen::Vector3d tangent(-std::sin(phase), std::cos(phase), 0.0);
-                        const Eigen::Vector3d center_world =
+                        Eigen::Vector3d center_world =
                             rotating_armor::platePosition(st, slot, 4);
+                        // 实拍里四块板不在同一高度：补上每个槽位学到的 z 偏移，
+                        // 模型板才会压在真实板上（这只影响显示）。
+                        if (owner != nullptr)
+                        {
+                            center_world.z() += owner->slotZOffset(slot);
+                        }
                         std::vector<cv::Point3d> ends;
                         bool in_front = true;
                         for (double sign : {-1.0, 1.0})
@@ -1470,20 +1477,21 @@ int main(int argc, char **argv)
                             }
                             box /= static_cast<float>(pose_x.detection.corners.size());
                             std::fprintf(stderr,
-                                         "[pix] f=%d id=%d dx=%+.1f dy=%+.1f d=%.1f slot=%d\n",
+                                         "[pix] f=%d id=%d dx=%+.1f dy=%+.1f d=%.1f slot=%d bx=%.0f by=%.0f\n",
                                          frame_index, pose_x.detection.target_id,
                                          px[0].x - box.x, px[0].y - box.y,
-                                         cv::norm(cv::Point2f(px[0]) - box), slot_best);
+                                         cv::norm(cv::Point2f(px[0]) - box), slot_best, box.x, box.y);
                         }
                     }
                     draw_body(ekf_state, diagnostics.aim_slot, cv::Scalar(235, 120, 60),
-                              cv::Scalar(0, 200, 255), 2, cv::Scalar(-1, -1, -1));
+                              cv::Scalar(0, 200, 255), 2, cv::Scalar(-1, -1, -1),
+                              active_tracker);
                 }
                 // 多目标：其它车也画出来（细线、紫灰），一眼看出"两台都被跟住了"。
                 for (const rotating_armor::TopDownFrame &body : extra_bodies)
                 {
                     draw_body(body.state, -1, cv::Scalar(160, 110, 160), cv::Scalar(160, 110, 160),
-                              1, cv::Scalar(150, 60, 150));
+                              1, cv::Scalar(150, 60, 150), nullptr);
                 }
                 // 只把"跟踪中的那块板"(aim slot) 画实：另外 3 块是模型外推到车体
                 // 背面的，本来就看不见，画出来会像"满天飞的点"，容易误判成状态错了。

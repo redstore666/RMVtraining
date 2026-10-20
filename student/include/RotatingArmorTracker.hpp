@@ -394,6 +394,13 @@ public:
     const TrackerDiagnostics& diagnostics() const { return diagnostics_; }
     const TrackerConfig& config() const { return config_; }
     const RotatingArmorEkf& ekf() const { return ekf_; }
+    // 每个槽位相对车体中心的高度偏移（仅用于显示/投影，不参与滤波状态）。
+    // 实拍的装甲板不是一个平面：同四个槽位的 PnP 高度差能到 ±4 cm，单 z 的
+    // 刚体模型画出来就会上下错开。这里用观测跑 EMA 学出来，画模型板时补上。
+    double slotZOffset(int slot) const
+    {
+        return (slot >= 0 && slot < 4) ? slot_z_offset_[static_cast<std::size_t>(slot)] : 0.0;
+    }
 
 private:
     // 一帧观测转到跟踪系之后的形态。
@@ -546,6 +553,7 @@ private:
     // 约束车体 yaw）。
     int last_updated_slot_{-1};
     int radius_updates_{0};   // 本次锁定后已用弦长修正过几次半径
+    std::array<double, 4> slot_z_offset_{};
     int static_streak_{0};    // 连续判为 static 的帧数（半径学习只信它）
 
     std::deque<LockSample> lock_samples_{};

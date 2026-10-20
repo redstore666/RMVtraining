@@ -1743,6 +1743,17 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
         }
         const WorldObservation &chosen = world[static_cast<std::size_t>(best_observation)];
         slot_used[static_cast<std::size_t>(best_slot)] = true;
+        // 学这个槽位相对车体中心的高度偏移（只在已初始化时才有意义）。纯显示量，
+        // 不参与滤波；EMA 系数小一点，避免单帧深度野值把它带跑。
+        if (ekf_.initialized())
+        {
+            const double offset = chosen.position.z() - ekf_.state()(4);
+            if (std::fabs(offset) < 0.20)
+            {
+                double &stored = slot_z_offset_[static_cast<std::size_t>(best_slot)];
+                stored += 0.08 * (offset - stored);
+            }
+        }
         ArmorObservation observation;
         if (!smoothObservation(chosen, best_slot, timestamp_s, observation))
         {
