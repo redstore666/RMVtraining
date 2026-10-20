@@ -258,6 +258,16 @@ P50≈8），不是拍脑袋。
 
 ![多目标：两台车同时画](../docs/figures/topdown_multi.png)
 
+连续回放（v4 帧 660–980，两台车同框）：
+[topdown_multi_seq.mp4](../docs/figures/topdown_multi_seq.mp4)。重新生成：
+
+```bash
+./build/test_camera_playback tmp/v4.avi --red --ekf --headless --multi \
+    --start 660 --max-frames 320 --topdown-out build/tdmulti_seq
+ffmpeg -y -pattern_type glob -i 'build/tdmulti_seq/t*.png' -r 30 \
+    -c:v libx264 -pix_fmt yuv420p docs/figures/topdown_multi_seq.mp4
+```
+
 `--trace` 每帧打印 `phase`（0=Idle/1=Collecting/2=Tracking）、锁定编号、累计接收
 更新数、本帧拒绝数、丢帧数、重锁次数、状态量 `omega/R/yaw`、最近 NIS、
 `why`（最近一次拒绝原因）与 `stab`（本帧 `Stable/Unstable` 的判定理由：
