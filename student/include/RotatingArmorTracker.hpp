@@ -234,6 +234,13 @@ struct TrackerConfig
     int batch_fit_min_samples{12};
     double batch_fit_max_circle_residual_m{0.05};
     double batch_fit_max_phase_residual_rad{0.50};
+    double batch_fit_min_coverage_rad{1.20};
+    // 下面两个开关在理论上更正确，但在 v4 上实测更差（见 docs/任务进度备份.md）：
+    // 打开后合成 A/G/H 的 ω 才能估准，所以保留给合成调试用。
+    bool batch_fit_fold_phase{false};
+    bool batch_fit_alias_gate{false};
+    // 只施加"不足一块板"的相位差，保持槽位标号不跳（合成 G 需要）。
+    bool batch_fit_slot_phase{false};
     bool normal_phase_enabled{false};
     double normal_phase_sigma_rad{0.35};
     double normal_phase_min_facing{0.30};
@@ -559,10 +566,12 @@ private:
         double phase_rad{0.0};        // 窗口起点时刻的相位
         double circle_residual_m{0.0};
         double phase_residual_rad{0.0};
+        double coverage_rad{0.0};
         int used{0};
     };
     static BodyBatchFit fitBodyBatch(const std::deque<LockSample>& samples, int plate_count,
-                                    double omega_hint);
+                                    double omega_hint, double config_coverage_min,
+                                    bool fold_phase, bool alias_gate);
     static CircleFit fitCenterFixedRadius(const std::deque<LockSample>& samples, double radius,
                                           const CircleFit& initial);
 

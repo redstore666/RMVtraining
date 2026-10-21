@@ -395,20 +395,23 @@ RotatingArmorTracker::CircleFit RotatingArmorTracker::fitCenterFixedRadius(
 
 RotatingArmorTracker::BodyBatchFit
 RotatingArmorTracker::fitBodyBatch(const std::deque<LockSample> &samples, int plate_count,
-                                  double omega_hint)
+                                  double omega_hint, double config_coverage_min,
+                                  bool fold_phase, bool alias_gate)
 {
     // 关键：一帧里看到的可能是四块板中的任意一块，所以板心角度只能定到
     // mod (2pi/N)。先按"整周展开"拟合转速是错的（实测会解出 ω≈0），
     // 正确做法是把残留折叠到 2pi/N 再拟合：对 ω 做网格搜索，
     // 每个 ω 用圆均值求 φ，取折叠残差最小的那一组。
     BodyBatchFit out;
-    (void)omega_hint;
     if (samples.size() < 4)
     {
         return out;
     }
     const double period = 2.0 * kPi / static_cast<double>(std::max(plate_count, 1));
     const double t_ref = samples.front().timestamp_s;
+    // 板心角度只能定到 mod 2pi/plate_count，圆均值必须先把角度乘上 plate_count
+    // 再平均（否则四块板各差 90°，求和会互相抵消，均值是任意的）。
+    const double fold_factor = fold_phase ? static_cast<double>(std::max(plate_count, 1)) : 1.0;
     std::deque<LockSample> work = samples;
     CircleFit circle;
     double best_rate = 0.0;
@@ -430,17 +433,19 @@ RotatingArmorTracker::fitBodyBatch(const std::deque<LockSample> &samples, int pl
             tt[i] = work[i].timestamp_s - t_ref;
         }
         best_cost = 1.0e18;
+        std::vector<std::pair<double, double>> candidates; // (rate, cost)
+        candidates.reserve(1300);
         for (double rate = -12.0; rate <= 12.0 + 1.0e-9; rate += 0.02)
         {
             double sum_sin = 0.0;
             double sum_cos = 0.0;
             for (std::size_t i = 0; i < theta.size(); ++i)
             {
-                const double a = theta[i] - rate * tt[i];
+                const double a = (theta[i] - rate * tt[i]) * fold_factor;
                 sum_sin += std::sin(a);
                 sum_cos += std::cos(a);
             }
-            const double mean_angle = std::atan2(sum_sin, sum_cos);
+            const double mean_angle = std::atan2(sum_sin, sum_cos) / fold_factor;
             double cost = 0.0;
             for (std::size_t i = 0; i < theta.size(); ++i)
             {
@@ -448,12 +453,52 @@ RotatingArmorTracker::fitBodyBatch(const std::deque<LockSample> &samples, int pl
                 const double rf = r - period * std::round(r / period);
                 cost += rf * rf;
             }
+            candidates.emplace_back(rate, cost);
             if (cost < best_cost)
             {
                 best_cost = cost;
                 best_rate = rate;
                 best_phase = mean_angle;
             }
+        }
+        // ω 的折叠别名：四块板相隔 2pi/N，ω 与 ω ± (2pi/N)/Δt 在短窗口上几乎
+        // 一样好。取所有代价接近最优的候选里、离 EKF 预测最近的那个，
+        // 否则单板可见时会跳到别名上（合成回归 A/G/H 就是这么挂的）。
+        if (alias_gate && std::isfinite(omega_hint) && !candidates.empty())
+        {
+            double best_score = 1.0e18;
+            for (const auto &cand : candidates)
+            {
+                if (cand.second > best_cost * 1.05 + 1.0e-6)
+                {
+                    continue;
+                }
+                const double score = std::fabs(cand.first - omega_hint);
+                if (score < best_score)
+                {
+                    best_score = score;
+                    best_rate = cand.first;
+                }
+            }
+        }
+        {
+            double sum_sin = 0.0;
+            double sum_cos = 0.0;
+            for (std::size_t i = 0; i < theta.size(); ++i)
+            {
+                const double a = (theta[i] - best_rate * tt[i]) * fold_factor;
+                sum_sin += std::sin(a);
+                sum_cos += std::cos(a);
+            }
+            best_phase = std::atan2(sum_sin, sum_cos) / fold_factor;
+            double cost = 0.0;
+            for (std::size_t i = 0; i < theta.size(); ++i)
+            {
+                const double rr = wrapAngle(theta[i] - best_rate * tt[i] - best_phase);
+                const double r = rr - period * std::round(rr / period);
+                cost += r * r;
+            }
+            best_cost = cost;
         }
         best_rms = std::sqrt(best_cost / static_cast<double>(theta.size()));
         // 剔除折叠残差离群的样本，用内点重拟合圆
@@ -473,7 +518,28 @@ RotatingArmorTracker::fitBodyBatch(const std::deque<LockSample> &samples, int pl
         }
         work.swap(kept);
     }
-    out.ok = circle.residual <= 0.10 && std::isfinite(best_rate) && std::isfinite(best_phase);
+    // 角度覆盖度：静止目标所有样本在同一个角度上，覆盖度≈0；只有板真的
+    // 转起来（覆盖 >= 1.2 rad ≈ 70°）时相位和 ω 才可辨识。
+    double coverage = 0.0;
+    {
+        std::vector<double> ang;
+        ang.reserve(work.size());
+        for (const LockSample &sample : work)
+        {
+            ang.push_back(std::atan2(sample.position.y() - circle.cy,
+                                     sample.position.x() - circle.cx));
+        }
+        std::sort(ang.begin(), ang.end());
+        double max_gap = ang.empty() ? 2.0 * kPi : (ang.front() + 2.0 * kPi - ang.back());
+        for (std::size_t i = 1; i < ang.size(); ++i)
+        {
+            max_gap = std::max(max_gap, ang[i] - ang[i - 1]);
+        }
+        coverage = 2.0 * kPi - max_gap;
+    }
+    out.ok = circle.residual <= 0.10 && std::isfinite(best_rate) && std::isfinite(best_phase) &&
+             coverage >= config_coverage_min;
+    out.coverage_rad = coverage;
     out.center = Eigen::Vector2d(circle.cx, circle.cy);
     out.radius = circle.radius;
     out.rate_rad_s = best_rate;
@@ -3116,16 +3182,18 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
             }
             if (static_cast<int>(window.size()) >= config_.batch_fit_min_samples)
             {
-                const BodyBatchFit fit = fitBodyBatch(window, std::max(config_.ekf.plate_count, 1), ekf_.state()(7));
+                const BodyBatchFit fit = fitBodyBatch(window, std::max(config_.ekf.plate_count, 1),
+                                                 ekf_.state()(7), config_.batch_fit_min_coverage_rad,
+                                                 config_.batch_fit_fold_phase, config_.batch_fit_alias_gate);
                 const double radius_now = ekf_.state()(8);
                 if (std::getenv("BATCH_DEBUG") != nullptr)
                 {
                     std::fprintf(stderr,
                                  "[batch] f=%.2f ok=%d n=%d c=(%.3f,%.3f) R=%.3f om=%+.2f "
-                                 "cres=%.4f pres=%.3f\n",
+                                 "cres=%.4f pres=%.3f cov=%.2f\n",
                                  timestamp_seconds, fit.ok ? 1 : 0, fit.used, fit.center.x(),
                                  fit.center.y(), fit.radius, fit.rate_rad_s, fit.circle_residual_m,
-                                 fit.phase_residual_rad);
+                                 fit.phase_residual_rad, fit.coverage_rad);
                 }
                 if (fit.ok && fit.circle_residual_m <= config_.batch_fit_max_circle_residual_m &&
                     fit.phase_residual_rad <= config_.batch_fit_max_phase_residual_rad &&
@@ -3145,7 +3213,16 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
                     {
                         const double dt = timestamp_seconds - window.front().timestamp_s;
                         const double phase_now = fit.phase_rad + fit.rate_rad_s * dt;
-                        ekf_.rotatePhase(wrapAngle(phase_now - ekf_.state()(6)));
+                        // 只转"不足一块板"的那部分：相位整体差整数个 2pi/N 时，
+                        // 画出来的四块板完全一样，但槽位标号会整体错位，
+                        // 射击点会跳到对面的板上（合成 G 就是这么挂的）。
+                        const double period = 2.0 * kPi / static_cast<double>(std::max(config_.ekf.plate_count, 1));
+                        double delta = wrapAngle(phase_now - ekf_.state()(6));
+                        if (config_.batch_fit_slot_phase)
+                        {
+                            delta -= period * std::round(delta / period);
+                        }
+                        ekf_.rotatePhase(delta);
                     }
                     ++diagnostics_.batch_fits;
                 }
