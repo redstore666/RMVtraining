@@ -15,8 +15,13 @@ constexpr double kPi = 3.141592653589793238462643383279502884;
 constexpr double kRadiusMinM = 0.05;
 constexpr double kRadiusMaxM = 0.60;
 
-using Gain = Eigen::Matrix<double, kStateDim, kMeasurementDim>;
-using MeasurementCovariance = Eigen::Matrix3d;
+// radius_diff（l）/ height_diff（h）的物理区间：前后两对板相对左右两对最多差
+// 半个车身，0.30 m 已经远超任何 RM 底盘，只用兜数值发散。
+constexpr double kPairOffsetMaxM = 0.30;
+
+using Gain = Eigen::Matrix<double, kStateDim, kSphericalMeasurementDim>;
+using MeasurementCovariance = Eigen::Matrix<double, kSphericalMeasurementDim,
+                                             kSphericalMeasurementDim>;
 
 // 先验里的 sigma 来自外部（配置文件/粘合层），可能没填、填 0、填负数或填 NaN。
 // P0 一旦被污染就再也回不来（后续只有 F P F' + Q 与 Joseph 更新，没有任何
@@ -66,7 +71,8 @@ void RotatingArmorEkf::reset() {
 
 bool RotatingArmorEkf::restore(const State &state, const Covariance &covariance,
                                bool phase_resolved, bool spin_pinned) {
-    if (!state.allFinite() || !covariance.allFinite() || !(state(8) > 0.0)) {
+    if (!state.allFinite() || !covariance.allFinite() || !(state(8) > 0.0) ||
+        std::fabs(state(9)) > kPairOffsetMaxM || std::fabs(state(10)) > kPairOffsetMaxM) {
         return false;
     }
     state_ = state;
@@ -139,6 +145,9 @@ EkfInitStatus RotatingArmorEkf::initialize(const ArmorObservation& observation,
                ? prior.yaw_rate_prior_rad_s
                : 0.0;
     x(8) = prior.radius_m;
+    // 前后对偏移初值 0（"先假设四块板共圆共高"），方差给 0.10 m 让它自己走。
+    x(9) = 0.0;
+    x(10) = 0.0;
     radius_prior_m_ = prior.radius_m;
     radius_fixed_ = prior.radius_fixed;
 
@@ -152,12 +161,17 @@ EkfInitStatus RotatingArmorEkf::initialize(const ArmorObservation& observation,
     const double yaw_rate_sigma =
         (prior.spin == SpinPriorKind::Static) ? 0.0 : positiveOr(prior.yaw_rate_sigma_rad_s, 3.0);
     const double radius_sigma = positiveOr(prior.radius_sigma_m, 0.05);
+    // 前后对半径差/高度差的先验不确定度。sp_vision_25 在 P0 里给的是 1.0（方差），
+    // 即完全放开；这里给 0.10 m（方差 0.01），对 0.2~0.3 m 的半径来说已经足够
+    // 让它在一个锁定窗口内收敛，又不至于单帧就把非对称性放大成噪声。
+    const double pair_sigma = 0.10;
 
     Covariance p = Covariance::Zero();
     p.diagonal() << position_sigma * position_sigma, velocity_sigma * velocity_sigma,
         position_sigma * position_sigma, velocity_sigma * velocity_sigma,
         position_sigma * position_sigma, velocity_sigma * velocity_sigma,
-        yaw_sigma * yaw_sigma, yaw_rate_sigma * yaw_rate_sigma, radius_sigma * radius_sigma;
+        yaw_sigma * yaw_sigma, yaw_rate_sigma * yaw_rate_sigma, radius_sigma * radius_sigma,
+        pair_sigma * pair_sigma, pair_sigma * pair_sigma;
 
     state_ = x;
     covariance_ = p;
@@ -204,44 +218,85 @@ bool RotatingArmorEkf::update(const ArmorObservation& observation, int plate_slo
         return false;
     }
 
-    const Measurement h = measurement(state_, plate_slot, config_.plate_count);
-    MeasurementJacobian h_jacobian =
-        measurementJacobian(state_, plate_slot, config_.plate_count);
+    // 量测取球坐标 (yaw, pitch, distance) + 板面法向角，见 sphericalMeasurement()。
+    // 板心 xyz 的直接量测已不再进入 update()：
+    //   * 深度误差沿视线方向，在 xyz 里等于同时污染三个通道；
+    //   * 在 yaw/pitch/distance 里，深度只进 distance 一维，可以用大方差单独表达。
+    const bool has_yaw = observation.has_world_yaw && std::isfinite(observation.world_yaw_rad);
+    const SphericalMeasurement h =
+        sphericalMeasurement(state_, plate_slot, config_.plate_count, has_yaw);
+    SphericalJacobian h_jacobian =
+        sphericalJacobian(state_, plate_slot, config_.plate_count, has_yaw);
     if (radius_fixed_) {
         // 不让位置观测改半径：H 的第 8 列清零后，残差里"半径错了"这一项就
         // 只能由中心/相位去解释，R 保持先验。
         h_jacobian.col(8).setZero();
     }
-    const MeasurementCovariance r = observation.sigma_position_m *
-                                     observation.sigma_position_m *
-                                     MeasurementCovariance::Identity();
+
+    // 自适应量测噪声（形式借鉴 sp_vision_25 target.cpp:192-196）：
+    //   * 角度维由位置噪声按距离折算：sigma_ang = sigma_pos / distance；
+    //   * 测距方差随"板面偏离视线"变大（板越侧向，单帧 PnP 的深度越不可信），
+    //     用 log(1 + |delta_angle|) 表达，delta_angle 是板法向与视线方位的夹角；
+    //   * 法向角方差随距离变大，同样对数增长。
+    // 这三项正好对应我们实测到的误差结构（侧向板深度飘、远处法向糊）。
+    const double distance = std::max(h(2), 0.20);
+    const double sigma_pos = observation.sigma_position_m;
+    const double sigma_ang = sigma_pos / distance;
+    const double bearing = std::atan2(state_(2), state_(0));
+    const double delta_angle =
+        has_yaw ? std::fabs(wrapAngle(observation.world_yaw_rad - bearing)) : 0.0;
+    const double dist_var = sigma_pos * sigma_pos * (1.0 + std::log1p(delta_angle));
+    const double normal_var = sigma_ang * sigma_ang * (1.0 + std::log1p(distance));
+
+    MeasurementCovariance r = MeasurementCovariance::Zero();
+    r(0, 0) = sigma_ang * sigma_ang;
+    r(1, 1) = sigma_ang * sigma_ang;
+    r(2, 2) = dist_var;
+    if (has_yaw) {
+        r(3, 3) = normal_var;
+    } else {
+        // 没有板面法向：把这一维方差放到无穷大，等价于不更新（H 行也是零）。
+        r(3, 3) = 1.0e9;
+    }
 
     // R 正定 => S = H P H' + R 正定，不需要额外的可逆性判断（NIS 门限不在此步）。
     const MeasurementCovariance s = h_jacobian * covariance_ * h_jacobian.transpose() + r;
     const Gain k = covariance_ * h_jacobian.transpose() * s.inverse();
 
-    // 残差 (z - h) 走的是 cos/sin，本来就不需要 wrap；只有状态里的 yaw 需要。
+    SphericalMeasurement residual = SphericalMeasurement::Zero();
+    // 残差 = 观测的球坐标 - 预测的球坐标。yaw 与板法向角按 2pi 折叠；
+    // pitch 物理上不会越过 +-pi，直接相减；distance 是普通标量。
+    const double obs_px = observation.position(0);
+    const double obs_py = observation.position(1);
+    const double obs_pz = observation.position(2);
+    const double obs_rho = std::hypot(obs_px, obs_py);
+    residual(0) = wrapAngle(std::atan2(obs_py, obs_px) - h(0));
+    residual(1) = std::atan2(obs_pz, obs_rho) - h(1);
+    residual(2) = std::sqrt(obs_rho * obs_rho + obs_pz * obs_pz) - h(2);
+    residual(3) = has_yaw ? wrapAngle(observation.world_yaw_rad - h(3)) : 0.0;
+
     // 先算到临时量里再提交：半径被推成 <=0 时整条更新必须丢弃，不能留下半个
     // 被污染的状态。
-    State candidate = state_ + k * (observation.position - h);
+    State candidate = state_ + k * residual;
     candidate(6) = wrapAngle(candidate(6));
 
-    // 半径是几何量，必须落在物理区间内：它表示"装甲板在车心坐标系里的偏移长度"。
-    // 位置观测对它的雅可比 H(:,8) = [-cos(phase), -sin(phase), 0] 只约束"板在哪
-    // 一侧"，不约束正负，也不约束大小——单板观测下 R 与相位差 180° 几乎等价，
-    // 增益大或观测少约束时整条链会滑向 R<0 或 R->0 的退化解。<0 时 measurement()
-    // 把每块板投到车心反方向（四块板圆周整体反向，实拍里就是"绿板转心偏高、蓝板
-    // 转一半卡回去"）；->0 时模型退化成"无半径纯旋转"，ω 不可观测。
-    // 实测合成双板交替场景：σ=0.02 时 R 滑到 -0.25，σ=0.05/0.08 时滑到 +0.004
-    // 且 ω 反号。
-    //
-    // 注意这里必须是"钳制"而不是"丢弃这次更新"：试过直接 return false，结果 R
-    // 一旦滑到边界，之后每次更新都被拒，状态冻结在坏值上（σ=0.05 时 ω 跑到
-    // -13 rad/s）。钳制则让滤波继续跑，只是这个方向不再越过物理解。
     if (!candidate.allFinite()) {
         return false;
     }
+    // 半径是几何量，必须落在物理区间内（理由见文件头 kRadiusMinM 的注释）。
+    // l / h 同样要有界：无界时单帧就能把"前后对偏移"推到米级，四块板散架。
     candidate(8) = std::clamp(candidate(8), kRadiusMinM, kRadiusMaxM);
+    candidate(9) = std::clamp(candidate(9), -kPairOffsetMaxM, kPairOffsetMaxM);
+    candidate(10) = std::clamp(candidate(10), -kPairOffsetMaxM, kPairOffsetMaxM);
+    if (config_.plate_count == 4) {
+        // 奇数槽位用的是 r + l，它也必须落在物理区间内。
+        const double pair_radius = candidate(8) + candidate(9);
+        if (pair_radius < kRadiusMinM) {
+            candidate(9) = kRadiusMinM - candidate(8);
+        } else if (pair_radius > kRadiusMaxM) {
+            candidate(9) = kRadiusMaxM - candidate(8);
+        }
+    }
     state_ = candidate;
 
     // Joseph 形式：数值上比 (I - K H) P 更稳，且保持对称。
@@ -277,13 +332,14 @@ bool RotatingArmorEkf::updatePhase(double measured_world_yaw, double sigma_rad) 
     if (!(s > 0.0)) {
         return false;
     }
-    const Eigen::Matrix<double, 9, 1> k = covariance_.col(6) / s;
+    const Eigen::Matrix<double, kStateDim, 1> k = covariance_.col(6) / s;
 
     state_ = state_ + k * residual;
     state_(6) = wrapAngle(state_(6));
 
     // Joseph 形式（标量观测）：P = (I - k e6') P (I - k e6')' + k sigma^2 k'
-    Eigen::Matrix<double, 9, 9> i_kh = Eigen::Matrix<double, 9, 9>::Identity();
+    Eigen::Matrix<double, kStateDim, kStateDim> i_kh =
+        Eigen::Matrix<double, kStateDim, kStateDim>::Identity();
     i_kh.row(6) -= k.transpose();
     covariance_ = i_kh * covariance_ * i_kh.transpose() + sigma_rad * sigma_rad * (k * k.transpose());
 
@@ -339,7 +395,7 @@ bool RotatingArmorEkf::updateCenter(const Eigen::Vector3d& measured_center_m, do
         return false;
     }
 
-    Eigen::Matrix<double, 3, 9> h = Eigen::Matrix<double, 3, 9>::Zero();
+    Eigen::Matrix<double, 3, kStateDim> h = Eigen::Matrix<double, 3, kStateDim>::Zero();
     h(0, 0) = 1.0;
     h(1, 2) = 1.0;
     h(2, 4) = 1.0;
@@ -348,12 +404,13 @@ bool RotatingArmorEkf::updateCenter(const Eigen::Vector3d& measured_center_m, do
     const Eigen::Vector3d residual = measured_center_m - predicted;
     const Eigen::Matrix3d s = h * covariance_ * h.transpose() +
                               sigma_m * sigma_m * Eigen::Matrix3d::Identity();
-    const Eigen::Matrix<double, 9, 3> k = covariance_ * h.transpose() * s.inverse();
+    const Eigen::Matrix<double, kStateDim, 3> k = covariance_ * h.transpose() * s.inverse();
 
     state_ = state_ + k * residual;
 
     // Joseph 形式，保持协方差对称正定。
-    Eigen::Matrix<double, 9, 9> i_kh = Eigen::Matrix<double, 9, 9>::Identity();
+    Eigen::Matrix<double, kStateDim, kStateDim> i_kh =
+        Eigen::Matrix<double, kStateDim, kStateDim>::Identity();
     i_kh -= k * h;
     covariance_ = i_kh * covariance_ * i_kh.transpose() +
                   sigma_m * sigma_m * (k * k.transpose());
@@ -395,13 +452,14 @@ bool RotatingArmorEkf::updateRadius(double measured_radius, double sigma_radius)
     if (!(s > 0.0)) {
         return false;
     }
-    const Eigen::Matrix<double, 9, 1> k = covariance_.col(8) / s;
+    const Eigen::Matrix<double, kStateDim, 1> k = covariance_.col(8) / s;
     const double residual = measured_radius - state_(8);
     state_ = state_ + k * residual;
     // 半径是物理量：更新后夹回正区间，避免一条噪声观测把它推到 0 或负数。
     state_(8) = std::clamp(state_(8), 0.03, 0.80);
 
-    Eigen::Matrix<double, 9, 9> i_kh = Eigen::Matrix<double, 9, 9>::Identity();
+    Eigen::Matrix<double, kStateDim, kStateDim> i_kh =
+        Eigen::Matrix<double, kStateDim, kStateDim>::Identity();
     i_kh.row(8) -= k.transpose();
     covariance_ = i_kh * covariance_ * i_kh.transpose() +
                   sigma_radius * sigma_radius * (k * k.transpose());
@@ -432,17 +490,43 @@ bool RotatingArmorEkf::innovationNis(const ArmorObservation& observation, int pl
         !(observation.sigma_position_m > 0.0)) {
         return false;
     }
-    const Measurement h = measurement(state_, plate_slot, config_.plate_count);
-    MeasurementJacobian h_jacobian =
-        measurementJacobian(state_, plate_slot, config_.plate_count);
+
+    // 必须和 update() 用同一条量测方程，否则门限判的不是滤波器真正吃进去的那个
+    // 新息。update() 走的是球坐标 (yaw, pitch, distance) + 板法向角，这里照抄。
+    const bool has_yaw = observation.has_world_yaw && std::isfinite(observation.world_yaw_rad);
+    const SphericalMeasurement h =
+        sphericalMeasurement(state_, plate_slot, config_.plate_count, has_yaw);
+    SphericalJacobian h_jacobian =
+        sphericalJacobian(state_, plate_slot, config_.plate_count, has_yaw);
     if (radius_fixed_) {
         h_jacobian.col(8).setZero();
     }
-    const MeasurementCovariance r = observation.sigma_position_m *
-                                     observation.sigma_position_m *
-                                     MeasurementCovariance::Identity();
+
+    const double distance = std::max(h(2), 0.20);
+    const double sigma_pos = observation.sigma_position_m;
+    const double sigma_ang = sigma_pos / distance;
+    const double bearing = std::atan2(state_(2), state_(0));
+    const double delta_angle =
+        has_yaw ? std::fabs(wrapAngle(observation.world_yaw_rad - bearing)) : 0.0;
+
+    MeasurementCovariance r = MeasurementCovariance::Zero();
+    r(0, 0) = sigma_ang * sigma_ang;
+    r(1, 1) = sigma_ang * sigma_ang;
+    r(2, 2) = sigma_pos * sigma_pos * (1.0 + std::log1p(delta_angle));
+    r(3, 3) = has_yaw ? sigma_ang * sigma_ang * (1.0 + std::log1p(distance)) : 1.0e9;
+
+    SphericalMeasurement residual = SphericalMeasurement::Zero();
+    const double obs_px = observation.position(0);
+    const double obs_py = observation.position(1);
+    const double obs_pz = observation.position(2);
+    const double obs_rho = std::hypot(obs_px, obs_py);
+    residual(0) = wrapAngle(std::atan2(obs_py, obs_px) - h(0));
+    residual(1) = std::atan2(obs_pz, obs_rho) - h(1);
+    residual(2) = std::sqrt(obs_rho * obs_rho + obs_pz * obs_pz) - h(2);
+    residual(3) = has_yaw ? wrapAngle(observation.world_yaw_rad - h(3)) : 0.0;
+
     const MeasurementCovariance s = h_jacobian * covariance_ * h_jacobian.transpose() + r;
-    const Measurement residual = observation.position - h;
+    // 没有板法向时第 4 维被 1e9 的方差压成 0 贡献，等价于只用前三维。
     nis = residual.dot(s.ldlt().solve(residual));
     return std::isfinite(nis);
 }

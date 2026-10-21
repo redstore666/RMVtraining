@@ -122,7 +122,10 @@ struct TrackerConfig
 
     // === 关联 / 门限 ===
     double position_gate_m{0.60}; // 单板位置门限（含中心先验不确定的余量）
-    double nis_gate{11.34};      // chi2(3 dof) 99.5%
+    // 新息门限。量测已改成 4 维（yaw/pitch/distance + 板法向角），
+    // chi2(4) 的 99.5% 分位是 14.86；没有板法向时第 4 维方差为 1e9、
+    // 贡献为 0，等价于 chi2(3)，所以取 14.86 是"最多 4 维"的保守上限。
+    double nis_gate{14.86};
     double handoff_sigma_scale{2.5}; // 已废弃（仅保留字段）：换板不再放大 sigma
     // 观测标准差的地板：单板预测的误差里有一块是"模型误差"（半径/相位/中心
     // 的系统性偏差），不体现在 P 里。地板太小 → NIS 门把有信息的帧全拒了
@@ -183,6 +186,17 @@ struct TrackerConfig
     // 槽位选择时把板面法向算进代价（单位 m/rad）：四块板同模、相隔 90 度，
     // 位置门对相邻两块板同时放行，光看位置分不出这一帧看到的是哪一面，
     // 分错就等于画面上模型板停在相邻那一面上（相位差 90 度）。
+    // 关联按"角度"打分（借鉴 sp_vision_25 target.cpp:140-169）：
+    // 四块板彼此相差 90 度、位置门又宽，只比 3-D 距离在原理上就分不清"看到的是
+    // 哪一面"。sp_vision 的做法是先按距离取最近 3 块，再用
+    //     |板法向角差| + |方位角差|
+    // 选出真正的那一块。这里把这套打分接进候选评分：
+    //     score = 距离 + association_angle_weight_m_per_rad * (法向差 + 方位差)
+    // 加距离项是刻意的偏离：sp_vision 是"距离筛完再纯按角度挑"，我们没有两趟
+    // 筛选，所以用距离项兜住"角度碰巧对上但隔了半米"的错配。
+    // 权重单位是 m/rad：0.30 表示 1 rad 的角度差等价于 0.30 m 的位置差。
+    bool association_by_angle_enabled{true};
+    double association_angle_weight_m_per_rad{0.30};
     double normal_tiebreak_weight{0.0};
     bool joint_pair_binding_enabled{true};
     double joint_pair_binding_max_cost_m{0.80};
@@ -318,7 +332,10 @@ struct TrackerConfig
     // 声明反驳检查：法向历史里混入相邻板样本时斜率会失真，实拍里会误杀，
     // 默认关闭；需要时打开（合成夹具与 v4 的静止车都不需要它）。
     bool contradiction_check{false};
-    int max_updates_per_frame{2}; // 同一帧最多用几块板更新（防止病态约束）
+    // 同帧每块匹配上的板都做一次完整 EKF 更新（sp_vision_25 tracker.cpp:286-293
+    // 就是 for-each-armor 依次 update）。四板车体同帧最多可能看到 2~3 块，
+    // 上限设 4 等于不设限，仍保留一个上限防止病态输入。
+    int max_updates_per_frame{4}; // 同一帧最多用几块板更新（防止病态约束）
     // 每个槽位是否各自学"半径/角度/高度"偏移（只影响显示用的模型板位置）。
     // 打开时四块模型板各有圆心，单块板能贴得很紧，代价是它们不再是一个刚体：
     // 槽位分配在两块同号板之间跳时偏移量跟着跳，画出来就是"转一半又卡回"。

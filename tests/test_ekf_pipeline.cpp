@@ -63,7 +63,7 @@ int main()
     translator.message.bias = 0.0F;
 
     State truth;
-    truth << 3.00, 0.05, 0.00, 0.02, 0.35, 0.0, 0.30, 2.50, 0.25;
+    truth << 3.00, 0.05, 0.00, 0.02, 0.35, 0.0, 0.30, 2.50, 0.25, 0.0, 0.0;
 
     sim::GimbalAim gimbal;
     gimbal.yaw = rotating_armor::vectorYaw(Eigen::Vector3d(3.0, 0.0, 0.0));

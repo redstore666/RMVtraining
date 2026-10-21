@@ -64,7 +64,7 @@ State spinningTruth()
 {
     State truth;
     // 车体中心 (3.0, 0.0)，低速平移；z=0.35m；以 2.5rad/s 自转；半径 0.25m。
-    truth << 3.00, 0.05, 0.00, 0.02, 0.35, 0.0, 0.30, 2.50, 0.25;
+    truth << 3.00, 0.05, 0.00, 0.02, 0.35, 0.0, 0.30, 2.50, 0.25, 0.0, 0.0;
     return truth;
 }
 
@@ -72,7 +72,7 @@ State staticTruth()
 {
     State truth;
     // 静止目标：中心 (3.0, 0.40)，yaw=0，半径 0.25m（半径只能靠先验）。
-    truth << 3.00, 0.0, 0.40, 0.0, 0.35, 0.0, 0.0, 0.0, 0.25;
+    truth << 3.00, 0.0, 0.40, 0.0, 0.35, 0.0, 0.0, 0.0, 0.25, 0.0, 0.0;
     return truth;
 }
 
@@ -360,7 +360,7 @@ void scenarioLatencyCompensation()
     std::printf("\n[F] 预测时域包含实测处理延迟\n");
     // 静止不转、以 0.5m/s 平移的目标：延迟只应该把预测位置沿着速度方向推出去。
     State truth;
-    truth << 3.00, 0.50, 0.40, 0.0, 0.35, 0.0, 0.0, 0.0, 0.25;
+    truth << 3.00, 0.50, 0.40, 0.0, 0.35, 0.0, 0.0, 0.0, 0.25, 0.0, 0.0;
     sim::Rig plain(truth);
     sim::Rig delayed(truth);
     plain.gimbal.snapTo(sim::nearestPlatePosition(plain.truth, plain.plate_count, 0.0));
@@ -404,7 +404,7 @@ void scenarioLatencyCompensation()
 void scenarioFastSpin(double omega)
 {
     State truth;
-    truth << 3.00, 0.0, 0.0, 0.0, 0.35, 0.0, 0.30, omega, 0.25;
+    truth << 3.00, 0.0, 0.0, 0.0, 0.35, 0.0, 0.30, omega, 0.25, 0.0, 0.0;
     sim::Rig rig(truth);
     rig.dt = 1.0 / 166.0;
     rig.sigma_position_m = 0.03; // 实拍检测抖动（3cm 量级）
@@ -557,7 +557,7 @@ void scenarioSelfClassifiedRotation()
     for (const Case &test_case : cases)
     {
         State truth;
-        truth << 3.0, test_case.vx, 0.0, test_case.vy, 0.35, 0.0, 0.40, test_case.omega, 0.20;
+        truth << 3.0, test_case.vx, 0.0, test_case.vy, 0.35, 0.0, 0.40, test_case.omega, 0.20, 0.0, 0.0;
         // 用生产默认配置（半径钉死）：合成测试默认放开半径是为了验证"坏初值
         // 能收敛"，但半径与中心在单板观测下是耦合的，法向噪声大时半径会被
         // 位置残差拉着塌掉（实测 R 从 0.25 掉到 0.017），那不是这里要测的东西。

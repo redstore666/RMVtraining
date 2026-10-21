@@ -17,7 +17,7 @@ int main()
     using namespace rotating_armor;
 
     State x;
-    x << 1.0, 0.5, -2.0, 0.2, 1.5, 0.1, 0.3, 1.2, 0.25;
+    x << 1.0, 0.5, -2.0, 0.2, 1.5, 0.1, 0.3, 1.2, 0.25, 0.0, 0.0;
     constexpr double dt = 0.1;
 
     const State xp = transition(x, dt);

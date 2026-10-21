@@ -194,7 +194,7 @@ namespace
         double lock_age{0.50};
         bool radius_given{false};
         bool refine_corners{false};
-        double nis_gate{11.34};
+        double nis_gate{14.86};
         int max_updates{2};
         bool nis_gate_given{false};
         bool smooth{false};
@@ -1521,7 +1521,7 @@ int main(int argc, char **argv)
                                            cv::Scalar plate_color, cv::Scalar aim_color,
                                            int thickness, cv::Scalar center_color,
                                            const rotating_armor::RotatingArmorTracker *owner) {
-                    Eigen::Matrix<double, 9, 1> st_off = st;
+                    rotating_armor::State st_off = st;
                     st_off(6) = st(6) + g_model_phase_off;
                     for (int slot = 0; slot < 4; ++slot)
                     {
@@ -1649,7 +1649,7 @@ int main(int argc, char **argv)
                             int slot_best = -1;
                             double d_best = 1.0e9;
                             Eigen::Vector3d best_p = Eigen::Vector3d::Zero();
-                            Eigen::Matrix<double, 9, 1> ekf_off = ekf_state;
+                            rotating_armor::State ekf_off = ekf_state;
                             ekf_off(6) = ekf_state(6) + g_model_phase_off;
                             for (int slot = 0; slot < 4; ++slot)
                             {

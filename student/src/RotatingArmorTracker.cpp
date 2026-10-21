@@ -2252,6 +2252,22 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                     score += config_.normal_tiebreak_weight *
                              std::fabs(wrapToPi(face_yaw - world[i].yaw));
                 }
+                // 角度项：法向差 + 方位差（见 TrackerConfig::association_by_angle_enabled）
+                if (config_.association_by_angle_enabled && world[i].has_yaw &&
+                    std::isfinite(world[i].yaw))
+                {
+                    const double angle_period = 2.0 * kPi / static_cast<double>(plate_count);
+                    const double face_yaw = rotating_armor::platePhaseToWorldYaw(
+                        ekf_.state()(6) + static_cast<double>(slot) * angle_period);
+                    const double normal_err = std::fabs(wrapToPi(world[i].yaw - face_yaw));
+                    const double obs_bearing =
+                        std::atan2(world[i].position.y(), world[i].position.x());
+                    const double pred_bearing = std::atan2(predicted.y(), predicted.x());
+                    const double bearing_err =
+                        std::fabs(wrapToPi(obs_bearing - pred_bearing));
+                    score += config_.association_angle_weight_m_per_rad *
+                             (normal_err + bearing_err);
+                }
                 if (score < best_distance)
                 {
                     best_distance = score;

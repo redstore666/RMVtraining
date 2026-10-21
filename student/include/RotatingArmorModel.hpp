@@ -4,15 +4,31 @@
 
 namespace rotating_armor {
 
-// State: [cx, vx, cy, vy, z, vz, yaw, yaw_rate, radius]^T
-constexpr int kStateDim = 9;
+// State: [cx, vx, cy, vy, z, vz, yaw, yaw_rate, radius, radius_diff, height_diff]^T
+//
+// radius_diff / height_diff 借鉴 sp_vision_25 的 l / h：
+// 四块装甲板并不共圆、也未必共高——前后两对板比左右两对离车心更远（车体前后长），
+// 高度也常差一点。只用一个半径去画四块板，必然有一对系统性偏内/偏外，
+// 这正是"绿板转心偏高、蓝板转半圈卡回去"的几何来源。
+//
+// 所以：偶数槽位用 radius，奇数槽位用 radius + radius_diff，高度同理。
+// 只增加 2 个参数就表达了这个非对称性，而且它们是**刚体参数**（不随槽位震荡），
+// 不会像 per-slot 自由偏移那样在两块同 id 板交替时来回抖。
+// 板数不为 4（双板平衡车、三板前哨站）时不启用该修正。
+constexpr int kStateDim = 11;
 constexpr int kMeasurementDim = 3;
+
+// 球坐标量测量 (yaw, pitch, distance) + 板面法向角，共 4 维。
+// 与位置量测并存：位置量测给上层做几何/显示，球坐标量测供 update() 使用。
+constexpr int kSphericalMeasurementDim = 4;
 
 using State = Eigen::Matrix<double, kStateDim, 1>;
 using StateJacobian = Eigen::Matrix<double, kStateDim, kStateDim>;
 using Covariance = Eigen::Matrix<double, kStateDim, kStateDim>;
 using Measurement = Eigen::Matrix<double, kMeasurementDim, 1>;
 using MeasurementJacobian = Eigen::Matrix<double, kMeasurementDim, kStateDim>;
+using SphericalMeasurement = Eigen::Matrix<double, kSphericalMeasurementDim, 1>;
+using SphericalJacobian = Eigen::Matrix<double, kSphericalMeasurementDim, kStateDim>;
 
 // Continuous-time white-noise spectral densities.
 //
@@ -36,6 +52,8 @@ struct ProcessNoiseConfig {
     double accel_z{0.01};
     double angular_accel{0.01}; // (rad/s^2)^2 / Hz
     double radius_random_walk{1e-6}; // m^2/s
+    double pair_radius_random_walk{1e-6}; // (m^2/s) radius_diff 的随机游走
+    double pair_height_random_walk{1e-6}; // (m^2/s) height_diff 的随机游走
 };
 
 // Wrap radians into [-pi, pi).
@@ -50,6 +68,21 @@ StateJacobian transitionJacobian(double dt);
 Measurement measurement(const State& x, int plate_slot, int plate_count);
 MeasurementJacobian measurementJacobian(
     const State& x, int plate_slot, int plate_count);
+
+// 同一块板在同样的槽位约定下的球坐标量测 (yaw, pitch, distance, 板法向角)。
+//
+// 为什么用球坐标而不是直接量板心 xyz（借鉴 sp_vision_25 target.cpp:192-222）：
+//   * 板心 xyz 的深度误差会沿着视线方向线性污染横向，误差结构不对；
+//   * yaw/pitch 只和像素方向有关，深度误差基本不进这两维；
+//   * distance 单独一维，可以把"测距不准"用一个大方差表达，而不是让它
+//     同时污染 x、y、z 三个残差。
+// 第 4 维是板面法向角（世界系 yaw）。四块板法向相差 90°，单看它是折叠的，
+// 但配合槽位就唯一确定"这一帧看到的是哪块板"，正是关联与相位需要的量。
+// has_yaw == false 时第 4 维整行置零（调用方负责把该维方差放大到几乎无穷）。
+SphericalMeasurement sphericalMeasurement(const State& x, int plate_slot, int plate_count,
+                                           bool has_yaw);
+SphericalJacobian sphericalJacobian(const State& x, int plate_slot, int plate_count,
+                                    bool has_yaw);
 
 // Process covariance for white-acceleration noise on the (position, velocity)
 // pairs and a random-walk model for the armor radius.
