@@ -227,6 +227,13 @@ struct TrackerConfig
     // 相位用板法向直接量测（default 关，--normal-phase 1 打开）
     bool circle_phase_enabled{false};
     double circle_phase_sigma_rad{0.12};
+    // 多秒窗口联合批处理（default 关，--batch-fit 1 打开）
+    bool batch_fit_enabled{false};
+    double batch_fit_window_s{1.2};
+    int batch_fit_every{10};
+    int batch_fit_min_samples{12};
+    double batch_fit_max_circle_residual_m{0.05};
+    double batch_fit_max_phase_residual_rad{0.50};
     bool normal_phase_enabled{false};
     double normal_phase_sigma_rad{0.35};
     double normal_phase_min_facing{0.30};
@@ -390,6 +397,7 @@ inline const char *motionModeName(MotionMode mode)
 struct TrackerDiagnostics
 {
     LockPhase phase{LockPhase::Idle};
+    std::uint64_t batch_fits{0};   // 多秒窗口联合批处理应用次数
     MotionMode motion{MotionMode::Unknown};
     double speed_m_s{0.0};
     int lock_samples{0};
@@ -536,6 +544,25 @@ private:
         bool ok{false};
     };
     static CircleFit fitArmorCircle(const std::deque<LockSample>& samples);
+
+    // 多秒窗口联合批处理：一次性解 (cx, cy, R, ω, φ)。
+    // 动机：单帧单板只有 2 个方程，相位不可观测；而 1 s 窗口里板心本来就
+    // 落在同一个圆上（实测同窗口圆拟合残差 1.1 cm），数据是自洽的，
+    // 是逐帧滤波器在浪费它。离线验证：窗口拟合预测下一帧的误差 0.086 m
+    //（≈37 px），而逐帧 EKF 的 PIX 中位数是 90 px。
+    struct BodyBatchFit
+    {
+        bool ok{false};
+        Eigen::Vector2d center{Eigen::Vector2d::Zero()};
+        double radius{0.0};
+        double rate_rad_s{0.0};
+        double phase_rad{0.0};        // 窗口起点时刻的相位
+        double circle_residual_m{0.0};
+        double phase_residual_rad{0.0};
+        int used{0};
+    };
+    static BodyBatchFit fitBodyBatch(const std::deque<LockSample>& samples, int plate_count,
+                                    double omega_hint);
     static CircleFit fitCenterFixedRadius(const std::deque<LockSample>& samples, double radius,
                                           const CircleFit& initial);
 
@@ -678,6 +705,7 @@ private:
     double locked_radius_m_{0.0};
     double locked_spin_rad_s_{0.0};
     int body_refit_countdown_{0};
+    int batch_fit_countdown_{0};
     Eigen::Vector2d refit_center_{Eigen::Vector2d::Zero()};
     bool refit_center_valid_{false};
     std::deque<LockSample> body_samples_;

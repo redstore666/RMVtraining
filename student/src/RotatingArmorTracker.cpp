@@ -393,6 +393,98 @@ RotatingArmorTracker::CircleFit RotatingArmorTracker::fitCenterFixedRadius(
     return fit;
 }
 
+RotatingArmorTracker::BodyBatchFit
+RotatingArmorTracker::fitBodyBatch(const std::deque<LockSample> &samples, int plate_count,
+                                  double omega_hint)
+{
+    // 关键：一帧里看到的可能是四块板中的任意一块，所以板心角度只能定到
+    // mod (2pi/N)。先按"整周展开"拟合转速是错的（实测会解出 ω≈0），
+    // 正确做法是把残留折叠到 2pi/N 再拟合：对 ω 做网格搜索，
+    // 每个 ω 用圆均值求 φ，取折叠残差最小的那一组。
+    BodyBatchFit out;
+    (void)omega_hint;
+    if (samples.size() < 4)
+    {
+        return out;
+    }
+    const double period = 2.0 * kPi / static_cast<double>(std::max(plate_count, 1));
+    const double t_ref = samples.front().timestamp_s;
+    std::deque<LockSample> work = samples;
+    CircleFit circle;
+    double best_rate = 0.0;
+    double best_phase = 0.0;
+    double best_cost = 1.0e18;
+    double best_rms = 0.0;
+    for (int pass = 0; pass < 2; ++pass)
+    {
+        circle = fitArmorCircle(work);
+        if (!circle.ok || !(circle.radius > 1.0e-3))
+        {
+            return out;
+        }
+        std::vector<double> theta(work.size(), 0.0);
+        std::vector<double> tt(work.size(), 0.0);
+        for (std::size_t i = 0; i < work.size(); ++i)
+        {
+            theta[i] = std::atan2(work[i].position.y() - circle.cy, work[i].position.x() - circle.cx);
+            tt[i] = work[i].timestamp_s - t_ref;
+        }
+        best_cost = 1.0e18;
+        for (double rate = -12.0; rate <= 12.0 + 1.0e-9; rate += 0.02)
+        {
+            double sum_sin = 0.0;
+            double sum_cos = 0.0;
+            for (std::size_t i = 0; i < theta.size(); ++i)
+            {
+                const double a = theta[i] - rate * tt[i];
+                sum_sin += std::sin(a);
+                sum_cos += std::cos(a);
+            }
+            const double mean_angle = std::atan2(sum_sin, sum_cos);
+            double cost = 0.0;
+            for (std::size_t i = 0; i < theta.size(); ++i)
+            {
+                const double r = wrapAngle(theta[i] - rate * tt[i] - mean_angle);
+                const double rf = r - period * std::round(r / period);
+                cost += rf * rf;
+            }
+            if (cost < best_cost)
+            {
+                best_cost = cost;
+                best_rate = rate;
+                best_phase = mean_angle;
+            }
+        }
+        best_rms = std::sqrt(best_cost / static_cast<double>(theta.size()));
+        // 剔除折叠残差离群的样本，用内点重拟合圆
+        std::deque<LockSample> kept;
+        for (std::size_t i = 0; i < theta.size(); ++i)
+        {
+            const double rr = wrapAngle(theta[i] - best_rate * tt[i] - best_phase);
+            const double r = rr - period * std::round(rr / period);
+            if (std::fabs(r) <= std::max(2.5 * best_rms, 0.10))
+            {
+                kept.push_back(work[i]);
+            }
+        }
+        if (kept.size() < 6 || kept.size() == work.size())
+        {
+            break;
+        }
+        work.swap(kept);
+    }
+    out.ok = circle.residual <= 0.10 && std::isfinite(best_rate) && std::isfinite(best_phase);
+    out.center = Eigen::Vector2d(circle.cx, circle.cy);
+    out.radius = circle.radius;
+    out.rate_rad_s = best_rate;
+    // 模型里 plate = centre − R·[cos,sin](phase) ⇒ 板心角度 = phase + pi
+    out.phase_rad = wrapAngle(best_phase - kPi);
+    out.circle_residual_m = circle.residual;
+    out.phase_residual_rad = best_rms;
+    out.used = static_cast<int>(work.size());
+    return out;
+}
+
 RotatingArmorTracker::CircleFit
 RotatingArmorTracker::fitArmorCircle(const std::deque<LockSample> &samples)
 {
@@ -3000,6 +3092,57 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
                 refit_center_valid_ = true;
                 ++diagnostics_.body_refits;
                 (void)count_now;
+            }
+        }
+    }
+    // 多秒窗口联合批处理：把窗口内的板心一次性解成 (圆心, R, ω, φ)，
+    // 直接把状态钉到这条轨迹上。逐帧位置更新做不到这一点：单板单帧欠定，
+    // 会让相位和车心互相顶，整段下来车心漂 0.4 m。
+    if (config_.batch_fit_enabled && ekf_.initialized() &&
+        diagnostics_.phase == LockPhase::Tracking)
+    {
+        ++batch_fit_countdown_;
+        if (batch_fit_countdown_ >= config_.batch_fit_every)
+        {
+            batch_fit_countdown_ = 0;
+            std::deque<LockSample> window;
+            for (auto it = body_samples_.rbegin(); it != body_samples_.rend(); ++it)
+            {
+                if (timestamp_seconds - it->timestamp_s > config_.batch_fit_window_s)
+                {
+                    break;
+                }
+                window.push_front(*it);
+            }
+            if (static_cast<int>(window.size()) >= config_.batch_fit_min_samples)
+            {
+                const BodyBatchFit fit = fitBodyBatch(window, std::max(config_.ekf.plate_count, 1), ekf_.state()(7));
+                const double radius_now = ekf_.state()(8);
+                if (std::getenv("BATCH_DEBUG") != nullptr)
+                {
+                    std::fprintf(stderr,
+                                 "[batch] f=%.2f ok=%d n=%d c=(%.3f,%.3f) R=%.3f om=%+.2f "
+                                 "cres=%.4f pres=%.3f\n",
+                                 timestamp_seconds, fit.ok ? 1 : 0, fit.used, fit.center.x(),
+                                 fit.center.y(), fit.radius, fit.rate_rad_s, fit.circle_residual_m,
+                                 fit.phase_residual_rad);
+                }
+                if (fit.ok && fit.circle_residual_m <= config_.batch_fit_max_circle_residual_m &&
+                    fit.phase_residual_rad <= config_.batch_fit_max_phase_residual_rad &&
+                    fit.radius > config_.radius_min_m && fit.radius < config_.radius_max_m &&
+                    std::fabs(fit.rate_rad_s) < 12.0 &&
+                    std::fabs(fit.radius - radius_now) < 0.20 &&
+                    (fit.center - Eigen::Vector2d(ekf_.state()(0), ekf_.state()(2))).norm() < 0.60)
+                {
+                    ekf_.shiftCenter(Eigen::Vector3d(fit.center.x() - ekf_.state()(0),
+                                                     fit.center.y() - ekf_.state()(2), 0.0));
+                    ekf_.setRadius(fit.radius);
+                    ekf_.setRate(fit.rate_rad_s);
+                    const double dt = timestamp_seconds - window.front().timestamp_s;
+                    const double phase_now = fit.phase_rad + fit.rate_rad_s * dt;
+                    ekf_.rotatePhase(wrapAngle(phase_now - ekf_.state()(6)));
+                    ++diagnostics_.batch_fits;
+                }
             }
         }
     }

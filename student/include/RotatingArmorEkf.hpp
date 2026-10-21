@@ -209,6 +209,8 @@ public:
     // 把车体相位整体转 delta（换板重绑用）。这是状态空间沿 theta 轴的平移，
     // 误差坐标不变，所以协方差不用动。
     void rotatePhase(double delta) { state_(6) = wrapAngle(state_(6) + delta); }
+    // 由多秒窗口批处理直接给定转速：窗口拟合的 ω 比逐帧差分稳得多。
+    void setRate(double omega) { state_(7) = omega; }
     const Covariance& covariance() const { return covariance_; }
     const EkfConfig& config() const { return config_; }
 

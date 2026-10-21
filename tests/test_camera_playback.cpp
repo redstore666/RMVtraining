@@ -173,6 +173,9 @@ namespace
         double normal_tiebreak{-1.0};
         int joint_pair{-1};
         int circle_phase{-1};
+        int batch_fit{-1};
+        double batch_window{0.0};
+        int batch_every{0};
         int normal_phase{-1};  // 1 开 0 关 -1 用默认：用板法向直接量测相位
         int body_fit{-1};  // 1 开 0 关 -1 用默认：滑窗整车重拟合（校准车心+半径）
         int pair_body{-1};  // 1 开 0 关 -1 用默认，控制双板整车求解  // 1 开 0 关 -1 用默认，控制按槽位一致的相位更新
@@ -308,6 +311,18 @@ namespace
             else if (arg == "--gate")
             {
                 args.gate_m = std::atof(next("--gate").c_str());
+            }
+            else if (arg == "--batch-fit")
+            {
+                args.batch_fit = std::atoi(next("--batch-fit").c_str());
+            }
+            else if (arg == "--batch-window")
+            {
+                args.batch_window = std::atof(next("--batch-window").c_str());
+            }
+            else if (arg == "--batch-every")
+            {
+                args.batch_every = std::max(1, std::atoi(next("--batch-every").c_str()));
             }
             else if (arg == "--circle-phase")
             {
@@ -665,6 +680,18 @@ int main(int argc, char **argv)
     if (args.slot_phase >= 0)
     {
         tracker_config.slot_phase_update_enabled = args.slot_phase != 0;
+    }
+    if (args.batch_fit >= 0)
+    {
+        tracker_config.batch_fit_enabled = args.batch_fit != 0;
+    }
+    if (args.batch_every > 0)
+    {
+        tracker_config.batch_fit_every = args.batch_every;
+    }
+    if (args.batch_window > 0.0)
+    {
+        tracker_config.batch_fit_window_s = args.batch_window;
     }
     if (args.circle_phase >= 0)
     {
