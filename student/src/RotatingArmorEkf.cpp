@@ -17,7 +17,10 @@ constexpr double kRadiusMaxM = 0.60;
 
 // radius_diff（l）/ height_diff（h）的物理区间：前后两对板相对左右两对最多差
 // 半个车身，0.30 m 已经远超任何 RM 底盘，只用兜数值发散。
-constexpr double kPairOffsetMaxM = 0.30;
+// radius_diff / height_diff 的物理上限。真实整车的"前后对"差只有 1~2 cm，
+// 给到 0.30 m 会让这两维在位置噪声下吸收半径误差（合成 G 场景实测 l 跑到
+// 0.33 m，等于把奇数板推到半径 0.60 m 的圆上，瞄准点整体错一块板）。
+constexpr double kPairOffsetMaxM = 0.05;
 
 using Gain = Eigen::Matrix<double, kStateDim, kSphericalMeasurementDim>;
 using MeasurementCovariance = Eigen::Matrix<double, kSphericalMeasurementDim,
@@ -164,7 +167,9 @@ EkfInitStatus RotatingArmorEkf::initialize(const ArmorObservation& observation,
     // 前后对半径差/高度差的先验不确定度。sp_vision_25 在 P0 里给的是 1.0（方差），
     // 即完全放开；这里给 0.10 m（方差 0.01），对 0.2~0.3 m 的半径来说已经足够
     // 让它在一个锁定窗口内收敛，又不至于单帧就把非对称性放大成噪声。
-    const double pair_sigma = 0.10;
+    // l/h 的可用范围极小（见 kPairOffsetMaxM），先验就该贴着 0：
+    // 真实整车前后对差值只有 1~2 cm，给 0.03 m 已经足够让它自适应。
+    const double pair_sigma = 0.03;
 
     Covariance p = Covariance::Zero();
     p.diagonal() << position_sigma * position_sigma, velocity_sigma * velocity_sigma,
@@ -254,7 +259,8 @@ bool RotatingArmorEkf::updateCartesian(const ArmorObservation& observation, int 
 }
 
 bool RotatingArmorEkf::update(const ArmorObservation& observation, int plate_slot) {
-    if (!config_.spherical_measurement_enabled) {
+    static const bool spherical_on_by_env = std::getenv("EKF_SPHERICAL") != nullptr;
+    if (!config_.spherical_measurement_enabled && !spherical_on_by_env) {
         // 默认走旧的笛卡尔 3 维量测：合成回归（F/G、首帧契约）全部按它标定，
         // 球坐标版本在 v4 上更快但会把高速自转的瞄准点打到相邻板上（见 docs）。
         return updateCartesian(observation, plate_slot);
@@ -572,6 +578,36 @@ bool RotatingArmorEkf::innovationNis(const ArmorObservation& observation, int pl
     if (!observation.position.allFinite() || !std::isfinite(observation.sigma_position_m) ||
         !(observation.sigma_position_m > 0.0)) {
         return false;
+    }
+
+    // NIS 必须和 update() 走同一条量测方程。update() 有两条路径
+    // （笛卡尔 / 球坐标，见 EkfConfig::spherical_measurement_enabled），
+    // 这里按同一个开关分支，否则门限判的不是滤波器真正吃进去的那个新息——
+    // 实测后果是合成 G 场景在 omega=2 处把正确解判成离群、把相邻板判成内点，
+    // 瞄准点整体错一块板（误差 0.37 m = 2R·sin45°）。
+    static const bool spherical_on_by_env_nis = std::getenv("EKF_SPHERICAL") != nullptr;
+    static const bool spherical_nis_by_env = std::getenv("EKF_SPHERICAL_NIS") != nullptr;
+    if (!config_.spherical_measurement_enabled && !spherical_nis_by_env) {
+        using CartesianJacobian = Eigen::Matrix<double, kMeasurementDim, kStateDim>;
+        using CartesianCovariance = Eigen::Matrix<double, kMeasurementDim, kMeasurementDim>;
+        const Measurement h = measurement(state_, plate_slot, config_.plate_count);
+        CartesianJacobian h_jacobian =
+            measurementJacobian(state_, plate_slot, config_.plate_count);
+        if (radius_fixed_) {
+            h_jacobian.col(8).setZero();
+        }
+        if (observation.plates_visible < 2) {
+            // 和 updateCartesian() 保持一致：只看到一块板时 l/h 不可观测。
+            h_jacobian.col(9).setZero();
+            h_jacobian.col(10).setZero();
+        }
+        const CartesianCovariance r = observation.sigma_position_m *
+                                      observation.sigma_position_m *
+                                      CartesianCovariance::Identity();
+        const CartesianCovariance s = h_jacobian * covariance_ * h_jacobian.transpose() + r;
+        const Measurement residual = observation.position - h;
+        nis = residual.dot(s.ldlt().solve(residual));
+        return std::isfinite(nis);
     }
 
     // 必须和 update() 用同一条量测方程，否则门限判的不是滤波器真正吃进去的那个

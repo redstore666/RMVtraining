@@ -466,6 +466,15 @@ void scenarioFastSpin(double omega)
             }
         }
         min4_errors.push_back(nearest);
+        if (std::getenv("GD_DEBUG") != nullptr && frame % 30 == 0)
+        {
+            const State& est = rig.tracker.ekf().state();
+            std::printf("[gd] f=%3d om=%.2f(est %.2f) R=%.3f l=%.3f h=%.3f "
+                        "aim=%d near=%d near_err=%.3f strike=%.3f\n",
+                        frame, omega, est(7), est(8), est(9), est(10),
+                        diagnostics.aim_slot, nearest_slot, nearest,
+                        strike_errors.empty() ? -1.0 : strike_errors.back());
+        }
         // "打得到"还必须瞄在朝相机那一面：背面板被车体挡住，命中也只是打在车壳上。
         if (nearest <= 0.03 && nearest_slot >= 0)
         {
