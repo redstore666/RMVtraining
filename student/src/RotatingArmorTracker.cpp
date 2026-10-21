@@ -312,7 +312,10 @@ void RotatingArmorTracker::collectWorldObservations(
         observation.target_id = pose.detection.target_id;
         observation.size = pose.detection.size;
         // 重投影误差越大，位置越不可信：1x ~ 3x 的噪声缩放。
-        const double scale = clampd(1.0 + pose.reprojection_error / 6.0, 1.0, 3.0);
+        // 观测可信度按重投影误差分档：重投影越干净越可信（下限 0.35 倍），
+        // 越脏越不可信。目的是让"好观测"真正拽得动状态，而不是被过程模型压住。
+        const double scale = clampd(0.5 + pose.reprojection_error / config_.position_sigma_quality_gain,
+                                    config_.position_sigma_quality_floor, 3.0);
         observation.sigma_position_m = config_.position_sigma_m * scale;
 
         const Eigen::Vector3d n_gimbal{pose.normal_gimbal[0], pose.normal_gimbal[1],
@@ -3653,6 +3656,13 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
     else
     {
         ++missed_frames_;
+        // 局部预测：已经连续多帧没有任何观测支持时，不要再让角速度自由滑行——
+        // 蓝圈会继续转，而绿圈早就不在了（用户看到的"绿色走了蓝色还在转"）。
+        if (missed_frames_ > config_.coast_decay_after_frames && ekf_.initialized())
+        {
+            const double damped = ekf_.state()(7) * config_.coast_omega_decay;
+            ekf_.setRate(std::fabs(damped) < 1e-3 ? 0.0 : damped);
+        }
         // 连续几帧都被拒、而当前帧恰好露出两块板：用双板几何重定中心与半径。
         // 这是"锁定后 0 次更新"的唯一出路——单板初值偏 R 量级，靠更新拉不回来。
         if (missed_frames_ >= 5 && reinitializeFromPair(world))

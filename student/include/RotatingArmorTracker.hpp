@@ -372,6 +372,12 @@ struct TrackerConfig
     double radius_plausible_max_m{0.34};
     // 无弦长证据时，拟合半径每步最多只能把估计拉动这么多（法向错时拟合值不可信）。
     double radius_fit_nudge_m{0.02};
+    // 观测可信度：sigma = base * clamp(0.5 + reproj/gain, floor, 3.0)
+    double position_sigma_quality_gain{2.0};
+    double position_sigma_quality_floor{0.35};
+    // 局部预测：连续 N 帧无观测后，每帧把角速度乘以 decay（避免无依据地继续转）
+    int coast_decay_after_frames{3};
+    double coast_omega_decay{0.90};
 
     // === 状态机 ===
     int stable_updates{12};          // 连续接受多少帧才允许报 Stable
