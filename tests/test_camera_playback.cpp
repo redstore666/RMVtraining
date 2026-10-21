@@ -176,6 +176,7 @@ namespace
         int batch_fit{-1};
         int tracklet{-1};
         double continuity_gate{-1.0};
+        int pair_static{-1};
         double batch_window{0.0};
         int batch_every{0};
         int normal_phase{-1};  // 1 开 0 关 -1 用默认：用板法向直接量测相位
@@ -313,6 +314,10 @@ namespace
             else if (arg == "--gate")
             {
                 args.gate_m = std::atof(next("--gate").c_str());
+            }
+            else if (arg == "--pair-static")
+            {
+                args.pair_static = std::atoi(next("--pair-static").c_str());
             }
             else if (arg == "--continuity-gate")
             {
@@ -690,6 +695,10 @@ int main(int argc, char **argv)
     if (args.slot_phase >= 0)
     {
         tracker_config.slot_phase_update_enabled = args.slot_phase != 0;
+    }
+    if (args.pair_static >= 0)
+    {
+        tracker_config.pair_center_min_static_frames = args.pair_static;
     }
     if (args.continuity_gate > 0.0)
     {
