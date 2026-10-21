@@ -982,8 +982,16 @@ std::vector<ArmorPose> armor_solve(const std::vector<ArmorDetection> &detections
         const double n_norm = std::sqrt(nx * nx + ny * ny + nz * nz);
         if (n_norm > 1e-9)
         {
-            pose.normal_gimbal = cv::Vec3d(nx / n_norm, ny / n_norm, nz / n_norm);
-            pose.armor_yaw = std::atan2(ny, nx);
+            cv::Vec3d n(nx / n_norm, ny / n_norm, nz / n_norm);
+            // 法向必须"指向相机"（能看见的那一面）：在同一坐标系里 n·p < 0。
+            // 实测 v4 全片段 896 帧，IPPE 给出的物体系 +Z 与 p 同向（n·p 中位 +1.22、
+            // 100% 为正），即法向朝里。这个符号会一路影响：相位初值、按法向反推车心、
+            // 法向关联——不统一就会把车心放到板的近侧，俯视图上模型板/aim 全落在远端。
+            const cv::Vec3d p = pose.position_gimbal_m;
+            if (n[0] * p[0] + n[1] * p[1] + n[2] * p[2] > 0.0)
+                n = cv::Vec3d(-n[0], -n[1], -n[2]);
+            pose.normal_gimbal = n;
+            pose.armor_yaw = std::atan2(n[1], n[0]);
         }
 
         poses.push_back(pose);

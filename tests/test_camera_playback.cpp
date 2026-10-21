@@ -1764,10 +1764,21 @@ int main(int argc, char **argv)
                                     cn_y = p_g.y() - r_now * n_g.y() / nn;
                                 }
                             }
+                            const double nd_dbg =
+                                pose_x.normal_gimbal[0] * pose_x.position_gimbal_m[0] +
+                                pose_x.normal_gimbal[1] * pose_x.position_gimbal_m[1];
+                            const int aim_slot_dbg = diagnostics.aim_slot;
+                            const double aim_period_dbg = 2.0 * 3.141592653589793 / 4.0;
+                            const double aim_phase_dbg =
+                                ekf_state(6) + aim_period_dbg * std::max(aim_slot_dbg, 0);
+                            const double aim_px_dbg = ekf_state(0) - ekf_state(8) * std::cos(aim_phase_dbg);
+                            const double aim_py_dbg = ekf_state(2) - ekf_state(8) * std::sin(aim_phase_dbg);
+                            const double aim_dc_dbg = std::hypot(ekf_state(0), ekf_state(2));
+                            const double aim_dp_dbg = std::hypot(aim_px_dbg, aim_py_dbg);
                             std::fprintf(stderr,
                                          "[pix] f=%d id=%d dx=%+.1f dy=%+.1f d=%.1f slot=%d "
                                          "bx=%.0f by=%.0f u=%d rj=%d nis=%.1f gd=%.3f "
-                                         "c=(%.2f,%.2f,%.2f) R=%.3f yaw=%+.2f om=%+.2f lh=(%+.3f,%+.3f) cn=(%.2f,%.2f) p=(%.2f,%.2f)\n",
+                                         "c=(%.2f,%.2f,%.2f) R=%.3f yaw=%+.2f om=%+.2f lh=(%+.3f,%+.3f) cn=(%.2f,%.2f) p=(%.2f,%.2f) as=%d dc=%.3f dp=%.3f nd=%+.3f\n",
                                          frame_index, pose_x.detection.target_id,
                                          px[0].x - box.x, px[0].y - box.y,
                                          cv::norm(cv::Point2f(px[0]) - box), slot_best, box.x, box.y,
@@ -1779,7 +1790,8 @@ int main(int argc, char **argv)
                                          ekf_state(6), ekf_state(7),
                                          ekf_state(9), ekf_state(10),
                                          cn_x, cn_y,
-                                         pose_x.position_gimbal_m[0], pose_x.position_gimbal_m[1]);
+                                         pose_x.position_gimbal_m[0], pose_x.position_gimbal_m[1],
+                                         aim_slot_dbg, aim_dc_dbg, aim_dp_dbg, nd_dbg);
                         }
                     }
                     if (!args.detected_body)

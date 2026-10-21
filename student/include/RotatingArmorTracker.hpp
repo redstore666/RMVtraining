@@ -243,6 +243,15 @@ struct TrackerConfig
     // 由板法向反推车心：c = p − R·n（true = 用，默认开）。
     bool center_from_normal_enabled{false};
     // 相位用板法向直接量测（default 关，--normal-phase 1 打开）
+    // 本轮（2026-10-21）：深度次序硬约束 —— 由板法向直接定"车心在板的后面"。
+    // 模型 plate = centre − R·u(phase)、外法向 = u(phase+π)，所以观测给出
+    //   phase_slot = atan2(n) + π  =>  yaw = phase_slot − slot·(2π/N)
+    //   centre     = p − R·n
+    // 两者是同一个约束的两种写法，同时落地才能保证"蓝板就画在被看见的那块板上、
+    // 且车心比它更远离相机"（用户反馈：蓝板/aim 一直落在远离 gimbal 的一端）。
+    bool normal_anchor_enabled{false};
+    double normal_anchor_gate_m{0.60};
+    double normal_anchor_center_gain{1.0};
     bool circle_phase_enabled{false};
     double circle_phase_sigma_rad{0.12};
     // 多秒窗口联合批处理（default 关，--batch-fit 1 打开）
@@ -484,6 +493,7 @@ struct TrackerDiagnostics
     // 状态瞬间跳到观测上，观感就是"转一部分又卡回去"；这个计数用来区分
     // "滤波器在跟踪"和"滤波器被硬覆盖"。
     std::uint64_t single_plate_realigns{0};
+    std::uint64_t normal_anchors{0};
     std::uint64_t pair_phase_updates{0};
     std::uint64_t center_from_normal_updates{0};
     std::uint64_t body_refits{0};
