@@ -424,78 +424,72 @@ void drawDetectedBody(const Scene &scene, const TopDownFrame &frame, const TopDo
             cluster_normals.push_back(normals[i]);
         }
 
-        // ---- 3. 法向线最小二乘交点 ----
-        Eigen::Matrix2d A = Eigen::Matrix2d::Zero();
-        Eigen::Vector2d b = Eigen::Vector2d::Zero();
-        Eigen::Vector2d normal_sum = Eigen::Vector2d::Zero();
-        int with_normal = 0;
-        for (std::size_t i = 0; i < cluster_points.size(); ++i)
-        {
-            if (!std::isfinite(cluster_normals[i]))
-                continue;
-            const Eigen::Vector2d n(std::cos(cluster_normals[i]), std::sin(cluster_normals[i]));
-            const Eigen::Matrix2d projection = Eigen::Matrix2d::Identity() - n * n.transpose();
-            A += projection;
-            b += projection * cluster_points[i];
-            normal_sum += n;
-            ++with_normal;
-        }
-
+        // ---- 3. 圆心：用"固定半径 R"的等距约束解，不用法向射线交点 ----
+        // 法向射线交点对法向误差极其敏感（法向偏 20° 就能把圆心推走半个半径），
+        // 而"板心到车心的距离 = R"是硬约束，且 R 已经由弦长证据定量给出。
+        // 单板：等距约束本身是一个圆（圆心不定），只能用 ±R 的两个候选标出来；
+        // 两块板：两圆的交点（唯一），再按"车心必然比朝相机的板更远"选边；
+        // 三块以上：两两求解取平均。
+        const double R = radius_prior;
         Eigen::Vector2d centre = Eigen::Vector2d::Zero();
         bool solved = false;
-        if (with_normal >= 2 && std::fabs(A.determinant()) > 1e-6)
+        if (cluster_points.size() >= 2)
         {
-            centre = A.inverse() * b;
+            Eigen::Vector2d acc = Eigen::Vector2d::Zero();
+            int acc_n = 0;
+            for (std::size_t i = 0; i < cluster_points.size(); ++i)
+            {
+                for (std::size_t j = i + 1; j < cluster_points.size(); ++j)
+                {
+                    const Eigen::Vector2d d = cluster_points[j] - cluster_points[i];
+                    const double half = 0.5 * d.norm();
+                    if (half > R || half < 1e-6)
+                        continue; // 两板间距超过直径，半径/配对有问题，跳过这一对
+                    const Eigen::Vector2d mid = 0.5 * (cluster_points[i] + cluster_points[j]);
+                    const Eigen::Vector2d u(-d.y() / (2.0 * half), d.x() / (2.0 * half));
+                    const double h = std::sqrt(std::max(0.0, R * R - half * half));
+                    const Eigen::Vector2d c1 = mid + h * u;
+                    const Eigen::Vector2d c2 = mid - h * u;
+                    // 车心必须比"朝相机的那块板"更远离相机（相机在原点）。
+                    acc += (c1.norm() > c2.norm()) ? c1 : c2;
+                    ++acc_n;
+                }
+            }
+            if (acc_n > 0)
+            {
+                centre = acc / static_cast<double>(acc_n);
+                solved = true;
+            }
+        }
+        if (!solved && std::isfinite(cluster_normals[0]))
+        {
+            // 单板退化：板心沿外法向后退一个半径就是车心。
+            const Eigen::Vector2d n(std::cos(cluster_normals[0]), std::sin(cluster_normals[0]));
+            centre = cluster_points[0] - R * n;
             solved = true;
         }
-        else if (std::isfinite(cluster_normals[0]))
+        if (!solved && frame.has_state && frame.state.allFinite())
         {
-            // 单板退化：从板心沿法向后退一个半径。选让圆心更远离相机（原点）的那一侧，
-            // 因为车心必须比朝相机的板更远。
-            const Eigen::Vector2d n(std::cos(cluster_normals[0]), std::sin(cluster_normals[0]));
-            const Eigen::Vector2d a = cluster_points[0] - radius_prior * n;
-            const Eigen::Vector2d c = cluster_points[0] + radius_prior * n;
-            centre = (a.norm() > c.norm()) ? a : c;
-            solved = true;
+            // 连法向都没有（PnP 没给出有效法向）时，用滤波器车心只作为"方向"：
+            // 车心仍然被约束在距板心 R 的圆上，不会飞走。
+            const Eigen::Vector2d guess(frame.state(0), frame.state(2));
+            Eigen::Vector2d dir = guess - cluster_points[0];
+            const double len = dir.norm();
+            if (len > 1e-6)
+            {
+                centre = cluster_points[0] + R * (dir / len);
+                solved = true;
+            }
         }
         if (!solved || !centre.allFinite())
             continue;
 
-        // 只有一块板时，法向线定不出圆心：把 ±R 两个候选都画出来并明确标注，
-        // 不要假装"算出了圆心"——这正是单帧深度歧义的几何本质。
-        if (with_normal < 2)
-        {
-            const cv::Scalar dim = mix(scene.bg, kOtherColor, 0.45);
-            for (int side = -1; side <= 1; side += 2)
-            {
-                const Eigen::Vector2d candidate =
-                    cluster_points[0] + side * radius_prior *
-                                            Eigen::Vector2d(std::cos(cluster_normals[0]),
-                                                            std::sin(cluster_normals[0]));
-                const cv::Point2d px = scene.toPx(candidate.x(), candidate.y());
-                cv::circle(canvas, ip(px), static_cast<int>(std::lround(0.012 * scene.ppm)), dim, 1,
-                           cv::LINE_AA);
-                cv::line(canvas, ip(px), ip(scene.toPx(cluster_points[0].x(), cluster_points[0].y())),
-                         dim, 1, cv::LINE_AA);
-            }
-            textAt(canvas, "1 plate: center ambiguous",
-                   ip(scene.toPx(cluster_points[0].x(), cluster_points[0].y())) + cv::Point(12, -14),
-                   0.36 * scene.scale, dim, 1.0);
-            continue; // 圆心不唯一，不画圆也不要假装有车心
-        }
+        const double measured_radius = R; // 圆和蓝圈共用同一个 R，两个圆必然同大小
 
-        // ---- 4. 半径也是测出来的：板心到圆心的中位距离 ----
-        std::vector<double> distances;
-        for (const Eigen::Vector2d &point : cluster_points)
-            distances.push_back((point - centre).norm());
-        std::sort(distances.begin(), distances.end());
-        const double measured_radius = distances[distances.size() / 2];
-
-        // 主车（离相机最近）画亮一点，其它车暗一点。
         if (std::getenv("DET_DEBUG") != nullptr)
-            std::fprintf(stderr, "[det] cluster=%d n=%zu with_normal=%d c=(%.3f,%.3f) R=%.3f prior=%.3f\n",
-                         k, cluster_points.size(), with_normal, centre.x(), centre.y(),
-                         measured_radius, radius_prior);
+            std::fprintf(stderr, "[det] cluster=%d n=%zu c=(%.3f,%.3f) R=%.3f prior=%.3f\n",
+                         k, cluster_points.size(), centre.x(), centre.y(), measured_radius,
+                         radius_prior);
         const bool primary = centre.norm() <= radius_prior * 3.0 + 1.0;
         const cv::Scalar color = primary ? kObsColor : kOtherColor;
 
