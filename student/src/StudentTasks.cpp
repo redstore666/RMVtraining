@@ -715,12 +715,27 @@ namespace
         if (count >= 2 && std::isfinite(errors[0]) && std::isfinite(errors[1]) &&
             std::fabs(errors[0] - errors[1]) <= 3.0)
         {
-            if (history.has_normal)
+            const char *mode = std::getenv("IPPE_PICK");
+            if (mode != nullptr && std::strcmp(mode, "0") == 0)
+                pick = 0;
+            else if (mode != nullptr && std::strcmp(mode, "1") == 0)
+                pick = 1;
+            else if (mode != nullptr && std::strcmp(mode, "nohist") == 0)
+                pick = std::fabs(normals[0][1]) <= std::fabs(normals[1][1]) ? 0 : 1;
+            else if (history.has_normal)
                 pick = normals[0].dot(history.normal) >= normals[1].dot(history.normal) ? 0 : 1;
             else
                 pick = std::fabs(normals[0][1]) <= std::fabs(normals[1][1]) ? 0 : 1;
             if (!std::isfinite(errors[static_cast<std::size_t>(pick)]))
                 pick = best_error_index;
+            if (std::getenv("IPPE_DEBUG") != nullptr)
+            {
+                std::fprintf(stderr,
+                             "[ippe] id=%d e0=%.3f e1=%.3f z0=%.3f z1=%.3f dz=%.3f pick=%d\n",
+                             target_id, errors[0], errors[1], tvecs[0].at<double>(2),
+                             tvecs[1].at<double>(2),
+                             std::fabs(tvecs[0].at<double>(2) - tvecs[1].at<double>(2)), pick);
+            }
         }
 
         rvec = rvecs[static_cast<std::size_t>(pick)].clone();
