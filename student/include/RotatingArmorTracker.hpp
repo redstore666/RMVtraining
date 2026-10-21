@@ -245,6 +245,13 @@ struct TrackerConfig
     bool batch_fit_alias_gate{false};
     // 只施加"不足一块板"的相位差，保持槽位标号不跳（合成 G 需要）。
     bool batch_fit_slot_phase{false};
+    // 用相邻两帧观测的切向位移直接估 ω：自转目标每帧沿切向走 |Δp|，
+    // ω = (Δp · v̂)/R，v̂ 只依赖当前观测相对车心的角度，不依赖槽位。
+    // EKF 自己的 ω 在单板自转时会衰减到 ~0（位置更新不断把相位拉回），
+    // 导致模型落后真实旋转，这是 v4 相位残差的主要来源。
+    bool tangent_rate_enabled{true};
+    double tangent_rate_alpha{0.25};
+    double tangent_rate_max_step_m{0.15};
     bool normal_phase_enabled{false};
     double normal_phase_sigma_rad{0.35};
     double normal_phase_min_facing{0.30};
@@ -699,6 +706,10 @@ private:
     // 上一次被接受更新的槽位：用来判断"同一块板连续可见"（换板时不能用板面法向
     // 约束车体 yaw）。
     int last_updated_slot_{-1};
+    // 相邻两帧观测的位移 → 切向速度 → ω（不依赖相位/槽位，见 docs）
+    Eigen::Vector2d tangent_last_position_{0.0, 0.0};
+    double tangent_last_time_s_{-1.0};
+    bool tangent_has_last_{false};
     int radius_updates_{0};   // 本次锁定后已用弦长修正过几次半径
     std::array<double, 4> slot_z_offset_{};
     std::array<double, 4> slot_radius_offset_{};

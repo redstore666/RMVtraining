@@ -2372,6 +2372,37 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
         used[static_cast<std::size_t>(best_observation)] = true;
         slot_of_observation[static_cast<std::size_t>(best_observation)] = best_slot;
         last_updated_slot_ = best_slot;
+        if (config_.tangent_rate_enabled && ekf_.initialized())
+        {
+            const Eigen::Vector2d p_now(chosen.position.x(), chosen.position.y());
+            const Eigen::Vector2d c_now(ekf_.state()(0), ekf_.state()(2));
+            const double radius = ekf_.state()(8);
+            const double dt = tangent_has_last_ ? timestamp_s - tangent_last_time_s_ : 0.0;
+            if (tangent_has_last_ && dt > 1.0e-3 && dt < 0.20 && radius > 1.0e-3)
+            {
+                const Eigen::Vector2d step = p_now - tangent_last_position_;
+                const double step_norm = step.norm();
+                if (step_norm < config_.tangent_rate_max_step_m && step_norm > 1.0e-5)
+                {
+                    // 观测处的切向单位向量：p = c - R*u(theta) =>
+                    // u(theta) = (c - p)/R，omega>0 时板速度方向 = (sin, -cos)
+                    const double ux = (c_now.x() - p_now.x()) / radius;
+                    const double uy = (c_now.y() - p_now.y()) / radius;
+                    const Eigen::Vector2d tangent_unit(uy, -ux);
+                    const double rate_meas = step.dot(tangent_unit) / (radius * dt);
+                    if (std::isfinite(rate_meas) && std::fabs(rate_meas) < 12.0)
+                    {
+                        const double alpha = std::clamp(config_.tangent_rate_alpha, 0.0, 1.0);
+                        const double rate_new =
+                            (1.0 - alpha) * ekf_.state()(7) + alpha * rate_meas;
+                        ekf_.setRate(rate_new);
+                    }
+                }
+            }
+            tangent_last_position_ = p_now;
+            tangent_last_time_s_ = timestamp_s;
+            tangent_has_last_ = true;
+        }
         ++accepted;
         diagnostics_.last_nis = best_nis;
         if (chosen.has_yaw)
