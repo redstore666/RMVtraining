@@ -249,6 +249,15 @@ struct TrackerConfig
     // ω = (Δp · v̂)/R，v̂ 只依赖当前观测相对车心的角度，不依赖槽位。
     // EKF 自己的 ω 在单板自转时会衰减到 ~0（位置更新不断把相位拉回），
     // 导致模型落后真实旋转，这是 v4 相位残差的主要来源。
+    // 同板轨迹段联合解 (c, ω)：相邻帧位移小于阈值的连续片段必属同一块板，
+    // 给定 R 后只剩 3 个未知数，且角度沿片段连续、可无歧义展开 —— ω 因此可观测。
+    // 这是 v4 上唯一有望修掉"每帧相位落后 0.16 rad"的结构性手段。
+    bool tracklet_rate_enabled{false};
+    double tracklet_max_step_m{0.15};
+    int tracklet_min_samples{12};
+    double tracklet_min_duration_s{0.25};
+    double tracklet_min_arc_rad{1.00};
+    double tracklet_max_residual_m{0.03};
     bool tangent_rate_enabled{false};
     double tangent_rate_alpha{0.25};
     double tangent_rate_max_step_m{0.15};
@@ -415,7 +424,8 @@ inline const char *motionModeName(MotionMode mode)
 struct TrackerDiagnostics
 {
     LockPhase phase{LockPhase::Idle};
-    std::uint64_t batch_fits{0};   // 多秒窗口联合批处理应用次数
+    std::uint64_t batch_fits{0};
+    std::uint64_t tracklet_rates{0};   // 多秒窗口联合批处理应用次数
     MotionMode motion{MotionMode::Unknown};
     double speed_m_s{0.0};
     int lock_samples{0};
@@ -563,6 +573,12 @@ private:
         bool ok{false};
     };
     static CircleFit fitArmorCircle(const std::deque<LockSample>& samples);
+
+    // 沿一段"同一块板"的轨迹：中心固定后，各样本相对中心的角度连续可展开，
+    // 对 (t, theta) 做最小二乘斜率即得 ω；arc 为展开后的总转角，
+    // resid 为样本到圆心的径向残差 rms。
+    static bool estimateRateAlongTracklet(const std::deque<LockSample>& samples, const CircleFit& centre,
+                                          double* rate_rad_s, double* arc_rad, double* residual_m);
 
     // 多秒窗口联合批处理：一次性解 (cx, cy, R, ω, φ)。
     // 动机：单帧单板只有 2 个方程，相位不可观测；而 1 s 窗口里板心本来就
@@ -734,6 +750,7 @@ private:
     Eigen::Vector2d refit_center_{Eigen::Vector2d::Zero()};
     bool refit_center_valid_{false};
     std::deque<LockSample> body_samples_;
+    std::deque<LockSample> tracklet_samples_;
     bool has_pair_relock_{false};
     double last_pair_relock_s_{0.0};
     double timestamp_s_{0.0};

@@ -551,6 +551,80 @@ RotatingArmorTracker::fitBodyBatch(const std::deque<LockSample> &samples, int pl
     return out;
 }
 
+bool RotatingArmorTracker::estimateRateAlongTracklet(const std::deque<LockSample> &samples,
+                                                     const CircleFit &centre, double *rate_rad_s,
+                                                     double *arc_rad, double *residual_m)
+{
+    if (!centre.ok || samples.size() < 3)
+    {
+        return false;
+    }
+    const std::size_t n = samples.size();
+    std::vector<double> t(n), th(n);
+    double prev = 0.0;
+    double unwrapped = 0.0;
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        const double dx = samples[i].position.x() - centre.cx;
+        const double dy = samples[i].position.y() - centre.cy;
+        const double angle = std::atan2(dy, dx);
+        if (i == 0)
+        {
+            unwrapped = angle;
+        }
+        else
+        {
+            double step = angle - prev;
+            step -= 2.0 * kPi * std::round(step / (2.0 * kPi));
+            unwrapped += step;
+        }
+        prev = angle;
+        t[i] = samples[i].timestamp_s - samples.front().timestamp_s;
+        th[i] = unwrapped;
+    }
+    double mean_t = 0.0;
+    double mean_th = 0.0;
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        mean_t += t[i];
+        mean_th += th[i];
+    }
+    mean_t /= static_cast<double>(n);
+    mean_th /= static_cast<double>(n);
+    double num = 0.0;
+    double den = 0.0;
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        num += (t[i] - mean_t) * (th[i] - mean_th);
+        den += (t[i] - mean_t) * (t[i] - mean_t);
+    }
+    if (!(den > 1.0e-9))
+    {
+        return false;
+    }
+    const double rate = num / den;
+    double sq = 0.0;
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        const double model = mean_th + rate * (t[i] - mean_t);
+        sq += (th[i] - model) * (th[i] - model);
+    }
+    const double angle_rms = std::sqrt(sq / static_cast<double>(n));
+    if (rate_rad_s != nullptr)
+    {
+        *rate_rad_s = rate;
+    }
+    if (arc_rad != nullptr)
+    {
+        *arc_rad = th.back() - th.front();
+    }
+    if (residual_m != nullptr)
+    {
+        *residual_m = centre.radius * angle_rms;
+    }
+    return true;
+}
+
 RotatingArmorTracker::CircleFit
 RotatingArmorTracker::fitArmorCircle(const std::deque<LockSample> &samples)
 {
@@ -2311,6 +2385,14 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
         // 整车重拟合用的滑窗样本（板心轨迹 = 一个圆）
         body_samples_.push_back(
             LockSample{timestamp_s, chosen.position, chosen.yaw, chosen.target_id, chosen.size, false});
+        // 同板轨迹段：一旦相邻帧位移超过阈值就说明换板了，从新的一块开始
+        if (!tracklet_samples_.empty() &&
+            (chosen.position - tracklet_samples_.back().position).norm() > config_.tracklet_max_step_m)
+        {
+            tracklet_samples_.clear();
+        }
+        tracklet_samples_.push_back(
+            LockSample{timestamp_s, chosen.position, chosen.yaw, chosen.target_id, chosen.size, false});
         while (!body_samples_.empty() &&
                timestamp_s - body_samples_.front().timestamp_s > config_.body_refit_window_s)
         {
@@ -3032,6 +3114,10 @@ PredictionResult RotatingArmorTracker::buildResult(const GimbalState &gimbal,
     {
         return PredictionResult{};
     }
+    if (const char *force = std::getenv("FORCE_RATE"))
+    {
+        ekf_.setRate(std::atof(force));
+    }
     return result;
 }
 
@@ -3242,6 +3328,35 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
     // 多秒窗口联合批处理：把窗口内的板心一次性解成 (圆心, R, ω, φ)，
     // 直接把状态钉到这条轨迹上。逐帧位置更新做不到这一点：单板单帧欠定，
     // 会让相位和车心互相顶，整段下来车心漂 0.4 m。
+    // 同板轨迹段联合解 (c, ω)，见 TrackerConfig::tracklet_rate_enabled
+    if (config_.tracklet_rate_enabled && ekf_.initialized() &&
+        diagnostics_.phase == LockPhase::Tracking &&
+        static_cast<int>(tracklet_samples_.size()) >= config_.tracklet_min_samples &&
+        timestamp_seconds - tracklet_samples_.front().timestamp_s >= config_.tracklet_min_duration_s)
+    {
+        const double radius_now = ekf_.state()(8);
+        CircleFit init = fitArmorCircle(tracklet_samples_);
+        CircleFit centre_fit = fitCenterFixedRadius(tracklet_samples_, radius_now, init);
+        double rate = 0.0;
+        double arc = 0.0;
+        double resid = 1.0e9;
+        if (centre_fit.ok && estimateRateAlongTracklet(tracklet_samples_, centre_fit, &rate, &arc, &resid) &&
+            std::fabs(arc) >= config_.tracklet_min_arc_rad && resid <= config_.tracklet_max_residual_m &&
+            std::fabs(rate) < 12.0)
+        {
+            if (std::getenv("TRACKLET_DEBUG") != nullptr)
+            {
+                std::fprintf(stderr, "[tl] f=%.2f n=%d c=(%.3f,%.3f) R=%.3f om=%+.2f arc=%+.2f res=%.4f\n",
+                             timestamp_seconds, static_cast<int>(tracklet_samples_.size()),
+                             centre_fit.cx, centre_fit.cy, radius_now, rate, arc, resid);
+            }
+            // 只喂 ω，不动车心：轨迹段的车心精度远不如多秒窗口批处理，
+            // 实测强行 shiftCenter 会把状态踹偏（v4 90.0 -> 98.4 px）。
+            ekf_.setRate(rate);
+            ++diagnostics_.tracklet_rates;
+            tracklet_samples_.clear();
+        }
+    }
     if (config_.batch_fit_enabled && ekf_.initialized() &&
         diagnostics_.phase == LockPhase::Tracking)
     {

@@ -174,6 +174,7 @@ namespace
         int joint_pair{-1};
         int circle_phase{-1};
         int batch_fit{-1};
+        int tracklet{-1};
         double batch_window{0.0};
         int batch_every{0};
         int normal_phase{-1};  // 1 开 0 关 -1 用默认：用板法向直接量测相位
@@ -311,6 +312,10 @@ namespace
             else if (arg == "--gate")
             {
                 args.gate_m = std::atof(next("--gate").c_str());
+            }
+            else if (arg == "--tracklet")
+            {
+                args.tracklet = std::atoi(next("--tracklet").c_str());
             }
             else if (arg == "--batch-fit")
             {
@@ -680,6 +685,10 @@ int main(int argc, char **argv)
     if (args.slot_phase >= 0)
     {
         tracker_config.slot_phase_update_enabled = args.slot_phase != 0;
+    }
+    if (args.tracklet >= 0)
+    {
+        tracker_config.tracklet_rate_enabled = args.tracklet != 0;
     }
     if (args.batch_fit >= 0)
     {
