@@ -800,7 +800,8 @@ int main(int argc, char **argv)
         // 深度，数值≈dist_m），或把 y 当成"东西向位置"（它其实是图像向下的偏移）。
         // 正确用法：仰角 = atan2(-y, z)，方位 = atan2(x, z)。实测两组目标都稳定在
         // 0~5° 仰角，说明回放里 GimbalState{}(pitch=0) 的假设是自洽的。
-        csv << "frame,time_s,id,size,conf,x,y,z,dist_m,yaw_deg,reproj_px,motion,"
+        csv << "frame,time_s,id,size,conf,x,y,z,dist_m,yaw_deg,reproj_px,box_w,box_h,motion,"
+               "c0x,c0y,c1x,c1y,c2x,c2y,c3x,c3y,"
                "ekf_phase,ekf_state,ekf_aim,ekf_id,ekf_yaw_deg,ekf_pitch_deg,ekf_dist_m,ekf_fire\n";
     }
 
@@ -1434,7 +1435,15 @@ int main(int argc, char **argv)
                     << pose.detection.confidence << ',' << p[0] << ',' << p[1] << ',' << p[2]
                     << ',' << distance << ','
                     << pose.armor_yaw * 180.0 / 3.141592653589793 << ','
-                    << pose.reprojection_error << ',' << motion << ',';
+                    << pose.reprojection_error << ','
+                    // 检测框的像素宽高（诊断用：判断 PnP 深度是否被框大小抖动带偏）
+                    << (cv::norm(pose.detection.corners[1] - pose.detection.corners[0])) << ','
+                    << (cv::norm(pose.detection.corners[3] - pose.detection.corners[0])) << ',' << motion
+                    << ',';
+                for (int c = 0; c < 4; ++c)
+                {
+                    csv << pose.detection.corners[c].x << ',' << pose.detection.corners[c].y << ',';
+                }
                 if (args.ekf)
                 {
                     csv << phaseName(diagnostics.phase) << ',' << stateName(prediction.state) << ','

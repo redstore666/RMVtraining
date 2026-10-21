@@ -636,6 +636,16 @@ namespace
             half_w = 0.135f / 2;
         else
             half_w = 0.230f / 2;
+        // 诊断开关：板上实际尺寸未知时，用环境变量扫一遍尺寸对 PnP 深度的影响
+        // （v4 的手写"3"板明显比 135mm 大，框宽中位 156px 对应 ~0.25m）
+        if (const char *ow = std::getenv("ARMOR_HALF_W"))
+        {
+            half_w = std::atof(ow);
+        }
+        if (const char *oh = std::getenv("ARMOR_HALF_H"))
+        {
+            half_h = std::atof(oh);
+        }
         const cv::Point3f TL(-half_w, -half_h, 0.0F);
         const cv::Point3f TR(+half_w, -half_h, 0.0F);
         const cv::Point3f BR(+half_w, +half_h, 0.0F);
