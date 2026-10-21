@@ -2016,6 +2016,9 @@ void RotatingArmorTracker::noteChordRadius(const std::vector<WorldObservation>& 
             const double radius = chord / (2.0 * std::sin(half));
             if (!(radius > config_.radius_min_m && radius < config_.radius_max_m))
                 continue;
+            if (radius < config_.radius_plausible_min_m ||
+                radius > config_.radius_plausible_max_m)
+                continue; // 法向判错导致的离谱半径，不进证据集
             LockSample sample{};
             sample.timestamp_s = timestamp_s;
             sample.position = Eigen::Vector3d(radius, 0.0, 0.0);
@@ -2058,15 +2061,22 @@ void RotatingArmorTracker::applySlowRadius(double candidate_radius)
         chords.reserve(chord_radius_samples_.size());
         for (const LockSample& s : chord_radius_samples_)
             chords.push_back(s.position.x());
-        const std::size_t mid = chords.size() / 2;
-        std::nth_element(chords.begin(), chords.begin() + static_cast<std::ptrdiff_t>(mid),
+        // 低分位：错误法向解出来的大半径被排除在外，只信"一致偏小"的那一簇。
+        const double q = std::clamp(config_.radius_chord_quantile, 0.0, 0.9);
+        const std::size_t idx = static_cast<std::size_t>(q * static_cast<double>(chords.size() - 1));
+        std::nth_element(chords.begin(), chords.begin() + static_cast<std::ptrdiff_t>(idx),
                          chords.end());
-        target = chords[mid];
+        target = chords[idx];
         // 弦长本身很准，收敛可以稍快一点。
         radius_track_m_ += std::min(1.0, 2.0 * alpha) * (target - radius_track_m_);
     }
     else
     {
+        // 没有弦长证据时，拟合值只允许在既有估计附近小幅修正（±2 cm）。
+        // 拟合值依赖板法向，法向错时会把圆心和半径一起解歪——正是要压制的那类噪声。
+        const double lo = radius_track_m_ - config_.radius_fit_nudge_m;
+        const double hi = radius_track_m_ + config_.radius_fit_nudge_m;
+        target = std::clamp(target, lo, hi);
         radius_track_m_ += alpha * (target - radius_track_m_);
     }
     radius_track_m_ = std::max(config_.radius_min_m, std::min(config_.radius_max_m, radius_track_m_));

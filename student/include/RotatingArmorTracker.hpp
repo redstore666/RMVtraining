@@ -362,6 +362,16 @@ struct TrackerConfig
     double radius_track_smooth_alpha{0.06};
     // 弦长证据的滑动窗口（秒）。窗口越长半径越稳，但适应真实尺寸变化越慢。
     double radius_chord_window_s{8.0};
+    // 弦长证据取"低分位"而不是中位/平均：错误板法向会把圆心解歪、把半径解大，
+    // 这些大值不该参与。实测 v4 相邻弦长半径 p05-p90 = 0.262-0.301（中位 0.283），
+    // v1 = 0.247-0.266（中位 0.259），过大的 0.36+ 全是法向错的那几帧。
+    double radius_chord_quantile{0.20};
+    // 物理合理区间：RM 车体中心到板面的半径不会超过这个范围（实测 0.25-0.30，
+    // 小装甲 0.20，大装甲 0.25，底盘再大也就 0.32）。区间外的样本直接丢弃。
+    double radius_plausible_min_m{0.18};
+    double radius_plausible_max_m{0.34};
+    // 无弦长证据时，拟合半径每步最多只能把估计拉动这么多（法向错时拟合值不可信）。
+    double radius_fit_nudge_m{0.02};
 
     // === 状态机 ===
     int stable_updates{12};          // 连续接受多少帧才允许报 Stable

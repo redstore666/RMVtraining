@@ -143,6 +143,7 @@ namespace
         int wait_ms{0};
         double bias_s{0.0};
         int dump_every{0};
+    double chord_q{-1.0};
         int only_id{0};
         double radius_prior{0.25};
         double v_sigma{0.05};
@@ -265,6 +266,10 @@ namespace
                 args.bias_s = std::atof(next("--bias").c_str());
             else if (arg == "--csv")
                 args.csv_path = next("--csv");
+            else if (arg == "--chord-q")
+            {
+                args.chord_q = std::atof(next("--chord-q").c_str());
+            }
             else if (arg == "--dump-every")
                 args.dump_every = std::max(0, std::atoi(next("--dump-every").c_str()));
             else if (arg == "--trace")
