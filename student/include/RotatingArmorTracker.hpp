@@ -393,6 +393,9 @@ struct TrackerConfig
     double rate_tracklet_max_step_m{0.08};
     double rate_tracklet_alpha{0.35};
     // 车本来不转时不要往 omega 里灌噪声：量到的转角和当前估计都接近 0 就不修正。
+    int rate_tracklet_min_streak{20};
+    double rate_tracklet_max_centre_speed_m_s{0.60};
+    double rate_tracklet_consistency_rad_s{3.0};
     double rate_tracklet_min_rate_rad_s{3.0};
     // 先攒够更新再动 omega；每次最多改这么多，避免一两帧噪声把转速带飞。
     int rate_tracklet_min_updates{12};
@@ -417,14 +420,16 @@ struct TrackerConfig
     // 自适应：按"实测 |ω| 的滑动统计"放大角加速度噪声。
     // 依据：v4 上固定 SPIN_Q 从 1 加到 100，EKF ω 从 1.18 涨到 3.64、PIX 91.5→84.5；
     // 而 v1 目标几乎不转，固定大 Q 反而变差，所以只能按实测转速自适应。
-    bool adaptive_spin_q_enabled{false};
+    bool adaptive_spin_q_enabled{true};
     double adaptive_spin_rate_ref_rad_s{1.0}; // 参考转速：|ω| 每高这么多，Q 乘 4
-    double adaptive_spin_q_max{16.0};
+    double adaptive_spin_q_max{6.0};
     double adaptive_spin_alpha{0.25};
+    double adaptive_spin_decay_rad_s{2.0}; // 没有可信量测时 EMA 每秒回落多少 rad/s
     double rate_tracklet_max_step_rad_s{0.4};
 
     // === 状态机 ===
-    int stable_updates{12};          // 连续接受多少帧才允许报 Stable
+    int stable_updates{12};
+    double stable_min_lock_s{0.60}; // 上锁后至少这么久才允许报 Stable          // 连续接受多少帧才允许报 Stable
     int unstable_after_missed{2};    // 仅供诊断：Stable 的降级判据已改为按秒（见 stale_after_s）
     double stale_after_s{0.10};      // 距上次被接收更新超过此秒数即判 Unstable（上限）
     // 自适应过期窗口：窗口 = min(stale_after_s, max(stale_min_s, stale_min_frames*dt))。
@@ -845,6 +850,10 @@ private:
     double last_accept_s_{0.0};
     double measured_latency_s_{0.0};
     bool has_accept_{false};
+    // 上锁时刻：自转目标需要转过一定角度才能把 ω/相位/半径分开估出来，
+    // 太早报 Stable 会让瞄准点在收敛过程中乱跳（合成 G：ω=4 时前 ~60 帧
+    // ω 还停在 1.2，瞄准误差 6-8 cm）。
+    double lock_start_s_{-1.0};
     // 掉线快照（注销时留一份，短间隔内同编号再现就直接续上）。
     bool has_snapshot_{false};
     State snapshot_state_{State::Zero()};
@@ -859,6 +868,8 @@ private:
     Eigen::Vector2d rate_last_position_{0.0, 0.0};
     double rate_last_time_s_{-1.0};
     double measured_rate_ema_{0.0};
+    double rate_signed_ema_{0.0};
+    int spin_streak_{0};
     bool rate_has_last_{false};
     int other_id_streak_{0};
     int centered_streak_{0};

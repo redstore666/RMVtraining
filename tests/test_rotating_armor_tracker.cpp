@@ -466,7 +466,7 @@ void scenarioFastSpin(double omega)
             }
         }
         min4_errors.push_back(nearest);
-        if (std::getenv("GD_DEBUG") != nullptr && frame % 30 == 0)
+        if (std::getenv("GD_DEBUG") != nullptr && (nearest > 0.03 || frame % 60 == 0))
         {
             const State& est = rig.tracker.ekf().state();
             std::printf("[gd] f=%3d om=%.2f(est %.2f) R=%.3f l=%.3f h=%.3f "

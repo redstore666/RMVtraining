@@ -1305,6 +1305,7 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
     // 旋转目标就完全跟不上：实测 v4 的 3 号板锁定后 104 次更新全被门限拒绝。
     observation.world_yaw_rad =
         pair_ok ? wrapToPi(pair_yaw + kPi) : wrapToPi(phase_last + kPi);
+    lock_start_s_ = timestamp_s;
     if (ekf_.initialize(observation, prior) != EkfInitStatus::Ok)
     {
         lock_samples_.clear();
@@ -2599,14 +2600,25 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                                                      rate_last_position_.x() - c_now.x());
                     const double dtheta = wrapToPi(a_now - a_prev);
                     const double omega_meas = dtheta / dt;
+                    bool rate_ema_updated = false;
+                    // 有符号的滑动平均：真自转方向恒定，平均后仍在；云台抖动正负抵消，
+                    // 平均后接近 0。用它区分"真在转"和"抖出来的大角速度"。
                     if (std::isfinite(omega_meas) && std::fabs(omega_meas) < 12.0)
                     {
-                        measured_rate_ema_ += config_.adaptive_spin_alpha *
-                                              (std::fabs(omega_meas) - measured_rate_ema_);
-                        applyProcessNoise();
+                        rate_signed_ema_ += config_.adaptive_spin_alpha * (omega_meas - rate_signed_ema_);
+                        // 真自转：每一步方向相同，连续计数涨；云台抖动：方向来回变，
+                        // 计数被扣到 0。只有"连续同向"够久才认为真在转。
+                        spin_streak_ = (omega_meas * rate_signed_ema_ > 0.0)
+                                           ? std::min(spin_streak_ + 1, 60)
+                                           : std::max(spin_streak_ - 3, 0);
                     }
-                    const bool spinning = std::fabs(omega_meas) >= config_.rate_tracklet_min_rate_rad_s ||
-                                          std::fabs(ekf_.state()(7)) >= config_.rate_tracklet_min_rate_rad_s;
+                    // 注意：这里不能把"EKF 当前 |ω| 大"也算作 spinning。那样一旦 ω
+                    // 被噪声推大，就会永久自我确认（正反馈），合成 H 的静止+抖动
+                    // 场景就是这么漂到 -1.2 rad/s 的。
+                    const bool spinning =
+                        spin_streak_ >= config_.rate_tracklet_min_streak &&
+                        std::fabs(rate_signed_ema_) >= config_.rate_tracklet_min_rate_rad_s;
+                        std::fabs(ekf_.state()(7)) >= config_.rate_tracklet_min_rate_rad_s;
                     const bool warmed_up = diagnostics_.accepted_updates >=
                                            static_cast<std::uint64_t>(config_.rate_tracklet_min_updates);
                     // 车心还没收敛时，绕它算出来的角度差是垃圾：要求板心到车心的
@@ -2614,8 +2626,18 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                     const double r_now = std::max(ekf_.state()(8), 0.05);
                     const double dist_now = (p_now - c_now).norm();
                     const bool on_circle = std::fabs(dist_now - r_now) <= 0.06;
-                    if (warmed_up && on_circle && spinning && std::isfinite(omega_meas) &&
-                        std::fabs(omega_meas) < 12.0)
+                    // 量测必须和"持续趋势"同号、且不偏离太远：单帧抖动常常符号相反
+                    // 或幅度离谱，放进来会把 omega 撑到 1 rad/s 以上（合成 H 静止+抖动）。
+                    const bool consistent =
+                        omega_meas * rate_signed_ema_ > 0.0 &&
+                        std::fabs(omega_meas - rate_signed_ema_) <=
+                            config_.rate_tracklet_consistency_rad_s;
+                    // 车心自己在快速移动（云台抖动/世界系晃）时，绕它算的角度差不可信。
+                    const bool centre_still =
+                        std::hypot(ekf_.state()(1), ekf_.state()(3)) <=
+                        config_.rate_tracklet_max_centre_speed_m_s;
+                    if (warmed_up && on_circle && spinning && centre_still &&
+                        std::isfinite(omega_meas) && std::fabs(omega_meas) < 12.0)
                     {
                         // 作为 EKF 的第 5 维量测（带方差）灌进去，而不是 setRate 硬写：
                         // 硬写会把 omega 的不确定度信息抹掉，合成 F/G/H 就是这么失准的。
@@ -2639,6 +2661,22 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                         const double sigma_used = std::max(sigma_omega, sig_floor);
                         ekf_.updateRate(omega_meas, sigma_used);
                         diagnostics_.rate_measurements += 1;
+                        // 只有"真的在转 + 板心确实在半径上"的量测才用来调 Q：
+                        // 静止目标遇到云台抖动时，噪声差分会一路灌到 12 rad/s，
+                        // 把 Q 顶得很高，omega 就自己飘到 -1.4（合成 H 就是这样挂的）。
+                        measured_rate_ema_ = std::fabs(rate_signed_ema_);
+                        rate_ema_updated = true;
+                        applyProcessNoise();
+                    }
+                    if (!rate_ema_updated)
+                    {
+                        // 没有可信量测时让 Q 慢慢回落，别把一次抖动的记忆一直留着。
+                        const double decay = config_.adaptive_spin_decay_rad_s * std::max(0.0, dt);
+                        if (measured_rate_ema_ > 0.0)
+                        {
+                            measured_rate_ema_ = std::max(0.0, measured_rate_ema_ - decay);
+                            applyProcessNoise();
+                        }
                     }
                     static const bool rate_dbg = std::getenv("RATE_DEBUG") != nullptr;
                     if (rate_dbg)
@@ -3154,7 +3192,9 @@ PredictionResult RotatingArmorTracker::buildResult(const GimbalState &gimbal,
     diagnostics_.stability = stable_reason(consecutive_updates_ >= config_.stable_updates,
                                              ekf_.phase_resolved(), fresh_enough,
                                              timestamp_s - last_accept_s_);
-    const bool stable = consecutive_updates_ >= config_.stable_updates &&
+    const bool lock_mature = lock_start_s_ < 0.0 ||
+                             (timestamp_s - lock_start_s_) >= config_.stable_min_lock_s;
+    const bool stable = lock_mature && consecutive_updates_ >= config_.stable_updates &&
                         ekf_.phase_resolved() && fresh_enough &&
                         (timestamp_s - last_accept_s_ <= config_.timeout_s);
     result.state = stable ? TrackingState::Stable : TrackingState::Unstable;
