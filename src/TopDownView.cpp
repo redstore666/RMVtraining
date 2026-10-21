@@ -484,7 +484,7 @@ void drawDetectedBody(const Scene &scene, const TopDownFrame &frame, const TopDo
         if (!solved || !centre.allFinite())
             continue;
 
-        const double measured_radius = R; // 圆和蓝圈共用同一个 R，两个圆必然同大小
+        double measured_radius = R; // 圆和蓝圈共用同一个 R，两个圆必然同大小
 
         if (std::getenv("DET_DEBUG") != nullptr)
             std::fprintf(stderr, "[det] cluster=%d n=%zu c=(%.3f,%.3f) R=%.3f prior=%.3f\n",
@@ -492,6 +492,16 @@ void drawDetectedBody(const Scene &scene, const TopDownFrame &frame, const TopDo
                          radius_prior);
         const bool primary = centre.norm() <= radius_prior * 3.0 + 1.0;
         const cv::Scalar color = primary ? kObsColor : kOtherColor;
+        // 主目标优先用"窗口圆"：单帧两块板的解抖 2-6 cm，而同一窗口的板心
+        // 本来就在一条半径稳定的圆上（残差 ~1 cm）。窗口圆只用于显示。
+        const bool use_window_circle =
+            primary && frame.diagnostics.detected_circle_valid &&
+            frame.diagnostics.detected_circle_samples >= 8;
+        if (use_window_circle)
+        {
+            centre = frame.diagnostics.detected_circle_center;
+            measured_radius = frame.diagnostics.detected_circle_radius;
+        }
 
         cv::circle(canvas, ip(scene.toPx(centre.x(), centre.y())),
                    static_cast<int>(std::lround(measured_radius * scene.ppm)),
@@ -540,6 +550,21 @@ void drawDetectedBody(const Scene &scene, const TopDownFrame &frame, const TopDo
         }
         const double jitter_mm =
             1000.0 * (centre - centre_smooth).norm();
+
+        // 数字交付：把每帧的抖动打到 stdout（DET_JITTER=1），便于统计分布，
+        // 不用靠看图猜"抖不抖"。
+        static const bool jitter_print = std::getenv("DET_JITTER") != nullptr;
+        if (jitter_print && primary)
+        {
+            std::fprintf(stderr,
+                         "[jit] n=%zu R=%.3f jit_mm=%.1f win=%d win_n=%d win_R=%.3f "
+                         "win_res=%.4f\n",
+                         cluster_points.size(), measured_radius, jitter_mm,
+                         use_window_circle ? 1 : 0,
+                         frame.diagnostics.detected_circle_samples,
+                         frame.diagnostics.detected_circle_radius,
+                         frame.diagnostics.detected_circle_residual);
+        }
 
         const cv::Point2d centre_px = scene.toPx(centre.x(), centre.y());
         cv::drawMarker(canvas, ip(centre_px), color, cv::MARKER_TILTED_CROSS,

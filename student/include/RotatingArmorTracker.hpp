@@ -396,6 +396,9 @@ struct TrackerConfig
     double rate_tracklet_min_rate_rad_s{3.0};
     // 先攒够更新再动 omega；每次最多改这么多，避免一两帧噪声把转速带飞。
     int rate_tracklet_min_updates{12};
+    // 绿色窗口圆（仅显示）：窗口长度与最小样本数。
+    double detected_circle_window_s{1.0};
+    int detected_circle_min_samples{8};
     // 角速度量测的噪声：板心角度差的 1-sigma，以及下限（rad/s）。
     double rate_tracklet_sigma_theta_rad{0.06};
     double rate_tracklet_sigma_floor_rad_s{0.35};
@@ -522,6 +525,14 @@ struct TrackerDiagnostics
     std::uint64_t tracklet_rates{0};
     std::uint64_t continuity_rejects{0}; // 观测连续性门拒掉的候选数
     std::uint64_t body_circles{0};       // 每帧板心圆覆盖次数
+    // 绿色（实测反推车体）显示用的窗口圆：窗口内板心的最小二乘圆。
+    // 逐帧单板解会被 PnP 噪声带得抖 2-6 cm；窗口圆残差只有 ~1 cm。
+    // 只用于显示，不写回状态。
+    bool detected_circle_valid{false};
+    Eigen::Vector2d detected_circle_center{0.0, 0.0};
+    double detected_circle_radius{0.0};
+    double detected_circle_residual{0.0};
+    int detected_circle_samples{0};
     MotionMode motion{MotionMode::Unknown};
     double speed_m_s{0.0};
     int lock_samples{0};

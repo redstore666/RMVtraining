@@ -3640,6 +3640,35 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
     // 多秒窗口联合批处理：把窗口内的板心一次性解成 (圆心, R, ω, φ)，
     // 直接把状态钉到这条轨迹上。逐帧位置更新做不到这一点：单板单帧欠定，
     // 会让相位和车心互相顶，整段下来车心漂 0.4 m。
+    // 绿色（实测反推车体）的窗口圆：只写诊断，给俯视图用。
+    // 单帧两块板的解会被 PnP 噪声带得抖 2-6 cm；同一窗口的板心其实落在一条
+    // 半径稳定的圆上（残差 ~1 cm），所以显示层用窗口圆，单帧解只当参考。
+    if (ekf_.initialized() && diagnostics_.phase == LockPhase::Tracking)
+    {
+        std::deque<LockSample> window;
+        for (auto it = body_samples_.rbegin(); it != body_samples_.rend(); ++it)
+        {
+            if (timestamp_seconds - it->timestamp_s > config_.detected_circle_window_s)
+            {
+                continue;
+            }
+            window.push_front(*it);
+        }
+        if (static_cast<int>(window.size()) >= config_.detected_circle_min_samples)
+        {
+            const CircleFit fit = fitArmorCircle(window);
+            if (fit.ok && fit.radius >= config_.radius_min_m &&
+                fit.radius <= config_.radius_max_m)
+            {
+                diagnostics_.detected_circle_valid = true;
+                diagnostics_.detected_circle_center = Eigen::Vector2d(fit.cx, fit.cy);
+                diagnostics_.detected_circle_radius = fit.radius;
+                diagnostics_.detected_circle_residual = fit.residual;
+                diagnostics_.detected_circle_samples = static_cast<int>(window.size());
+            }
+        }
+    }
+
     // 每帧用窗口板心圆覆盖 (c, R)：不碰相位与 ω
     if (config_.body_circle_enabled && ekf_.initialized() &&
         diagnostics_.phase == LockPhase::Tracking)
