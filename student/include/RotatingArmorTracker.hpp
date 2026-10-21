@@ -235,6 +235,9 @@ struct TrackerConfig
     double batch_fit_max_circle_residual_m{0.05};
     double batch_fit_max_phase_residual_rad{0.50};
     double batch_fit_min_phase_residual_rad{0.15};
+    // 双板弦方向的相位量测（不吃 ω，见 docs）
+    bool pair_phase_update_enabled{false};
+    double pair_phase_sigma_rad{0.15};
     double batch_fit_min_coverage_rad{1.20};
     // 下面两个开关在理论上更正确，但在 v4 上实测更差（见 docs/任务进度备份.md）：
     // 打开后合成 A/G/H 的 ω 才能估准，所以保留给合成调试用。
@@ -427,6 +430,7 @@ struct TrackerDiagnostics
     // 状态瞬间跳到观测上，观感就是"转一部分又卡回去"；这个计数用来区分
     // "滤波器在跟踪"和"滤波器被硬覆盖"。
     std::uint64_t single_plate_realigns{0};
+    std::uint64_t pair_phase_updates{0};
     std::uint64_t center_from_normal_updates{0};
     std::uint64_t body_refits{0};
     int consecutive_updates{0};

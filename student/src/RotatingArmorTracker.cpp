@@ -2429,6 +2429,53 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
     // 位置噪声 ±5cm 下相位误差约 10°，比单板法向（±25°）好得多。但高速自转时
     // 两板中点受相位滞后影响、弦方向也在转，单帧直接拉会把估计带偏（合成 G 组
     // 全挂），所以和半径学习用同一个门：目标连续 10 帧判为 static 才启用。
+    // 双板弦方向 → 相位量测（不需要 ω）：两块相邻板连线方向只由相位决定，
+    //   angle(p2-p1) = phi + s1*period - pi/4   (mod 2pi)
+    // 所以 phi 的等价法向 yaw = angle(p2-p1) + pi/4 + pi，与"哪块是哪块"无关
+    // （顺序反了差 2*period，折叠后为零）。弦长 0.40 m 的基线让方向噪声降到
+    // ~0.1 rad，比单板法向的 ±25° 稳得多，而且它不吃 ω，不会像批处理那样发散。
+    if (config_.pair_phase_update_enabled && ekf_.initialized() &&
+        std::fabs(ekf_.state()(7)) >= config_.static_rate_rad_s)
+    {
+        int pair_index[2] = {-1, -1};
+        int pair_count = 0;
+        for (std::size_t i = 0; i < world.size() && pair_count < 2; ++i)
+        {
+            if (target_id_ != 0 && world[i].target_id != target_id_)
+            {
+                continue;
+            }
+            pair_index[pair_count++] = static_cast<int>(i);
+        }
+        if (pair_count == 2 && world.size() == 2)
+        {
+            const Eigen::Vector3d p1 = world[pair_index[0]].position;
+            const Eigen::Vector3d p2 = world[pair_index[1]].position;
+            const double chord = (p2 - p1).norm();
+            const double radius = ekf_.state()(8);
+            const double period = 2.0 * kPi / static_cast<double>(std::max(plate_count, 1));
+            const double expected = radius * 2.0 * std::sin(period * 0.5);
+            if (std::fabs(chord - expected) < 0.15)
+            {
+                const double ang = std::atan2(p2.y() - p1.y(), p2.x() - p1.x());
+                const double measured_world_yaw =
+                    rotating_armor::wrapAngle(ang + 0.25 * period + kPi);
+                const Eigen::Vector3d plate_before =
+                    rotating_armor::platePosition(ekf_.state(), aim_slot_ >= 0 ? aim_slot_ : 0,
+                                                  plate_count);
+                if (ekf_.updatePhase(measured_world_yaw, config_.pair_phase_sigma_rad) &&
+                    config_.phase_anti_anchor)
+                {
+                    const Eigen::Vector3d plate_after =
+                        rotating_armor::platePosition(ekf_.state(), aim_slot_ >= 0 ? aim_slot_ : 0,
+                                                      plate_count);
+                    ekf_.shiftCenter(plate_before - plate_after);
+                }
+                ++diagnostics_.pair_phase_updates;
+            }
+        }
+    }
+
     if (config_.pair_center_update_enabled && static_streak_ >= config_.pair_center_min_static_frames)
     {
         // 注意：这里刻意不看 used[] / slot_of_observation[]。双板帧里第二块板
