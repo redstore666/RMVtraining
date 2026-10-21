@@ -215,6 +215,8 @@ namespace
     double phase_sigma{0.12};
     std::string dump_csv;
     bool topdown{false};
+    // 本轮：只做"实测板 -> 整车"，隐藏 EKF 的四块模型板（蓝），保留 aim 点。
+    bool detected_body{false};
     bool topdown_world{false};
     double topdown_ppm{200.0};
     std::string topdown_out;
@@ -492,6 +494,11 @@ namespace
                 args.multi = false;
             else if (arg == "--multi-primary")
                 args.multi_primary = std::atoi(next("--multi-primary").c_str());
+            else if (arg == "--detected-body")
+            {
+                args.detected_body = std::atoi(next("--detected-body").c_str()) != 0;
+                args.topdown = true;
+            }
             else if (arg == "--topdown")
                 args.topdown = true;
             else if (arg == "--topdown-world")
@@ -912,6 +919,7 @@ int main(int argc, char **argv)
     rotating_armor::TopDownOptions topdown_options;
     topdown_options.follow_target = !args.topdown_world;
     topdown_options.pixels_per_meter = args.topdown_ppm;
+    topdown_options.detected_body_only = args.detected_body;
     rotating_armor::TopDownView topdown_view(topdown_options);
     const std::string topdown_window = "EKF top-down";
     if (topdown_enabled && show)
@@ -1191,6 +1199,8 @@ int main(int argc, char **argv)
                         continue;
                     rotating_armor::TopDownFrame body;
                     body.has_state = true;
+                    // 没检测的旧轨迹不画模型：否则俯视图上会挂着"没有车却还有建模"。
+                    body.fresh = track.diagnostics.missed_frames <= 0;
                     body.state = track.tracker->ekf().state();
                     body.diagnostics = track.diagnostics;
                     body.result = track.result;
@@ -1772,6 +1782,7 @@ int main(int argc, char **argv)
                                          pose_x.position_gimbal_m[0], pose_x.position_gimbal_m[1]);
                         }
                     }
+                    if (!args.detected_body)
                     draw_body(ekf_state, diagnostics.aim_slot, cv::Scalar(235, 120, 60),
                               cv::Scalar(0, 200, 255), 2, cv::Scalar(-1, -1, -1),
                               active_tracker);
@@ -1815,6 +1826,7 @@ int main(int argc, char **argv)
                 // 多目标：其它车也画出来（细线、紫灰），一眼看出"两台都被跟住了"。
                 for (const rotating_armor::TopDownFrame &body : extra_bodies)
                 {
+                    if (!args.detected_body)
                     draw_body(body.state, -1, cv::Scalar(160, 110, 160), cv::Scalar(160, 110, 160),
                               1, cv::Scalar(150, 60, 150), nullptr);
                 }

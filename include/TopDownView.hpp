@@ -70,6 +70,9 @@ struct TopDownOptions
     // 固定原点（非 follow）视图里，目标超出标称缩放范围时自动缩小，保证它还在画面内。
     bool fit_to_target{true};
     bool show_legend{true};
+    // 本轮（2026-10-21）：先只做"实测板 -> 整车"，蓝板（EKF 四块模型板）不再画。
+    // 打开后 drawModel 全部跳过，只留实测板 + 法向线 + 反推出来的圆心/圆。
+    bool detected_body_only{false};
 };
 
 // 视图一帧的输入：EKF 状态 + 诊断 + 预测输出 + 实测板。
@@ -77,6 +80,9 @@ struct TopDownOptions
 struct TopDownFrame
 {
     bool has_state{false};
+    // 本帧这一路是否真有检测。false 的"其它车"不再画模型——
+    // 否则一台早就没有观测的旧轨迹会一直挂在俯视图上（用户反馈的"没有车却还有建模"）。
+    bool fresh{true};
     State state{State::Zero()};
     TrackerDiagnostics diagnostics{};
     PredictionResult result{};

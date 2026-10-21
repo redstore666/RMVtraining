@@ -348,62 +348,180 @@ void drawModel(const Scene &scene, const TopDownFrame &frame, const TopDownOptio
     }
 }
 
-// 检测反推的整车（绿）：只用本帧实测到的 1~2 块板 + 当前半径，按"板位角只定义到
-// 2π/N"的折叠平均算出整车相位，再把四块板画出来。和蓝色（EKF 预测）并排看，
-// 一眼就能判断"滤波器的相位/圆心偏了多少"——这正是肉眼调参最缺的那张图。
+// 检测反推的整车（绿）：本轮按"由实测板自己定圆心"的思路做，不再借用 EKF 的相位。
+//   1) 每块实测板的法向线都过车心 —— 两块板的法向线一交就是圆心；
+//   2) 只有一块板时退化成"从板心沿法向后退一个半径"（方向选让圆心更远离相机的那侧）；
+//   3) 半径取实测板心到圆心的中位距离，因此 R 也是测出来的，不是参数；
+//   4) 先按 3D 邻近做一次聚类，两块不相干的板（比如左右两台车）不会被强行配对。
+// 这里完全不读 EKF 状态，画出来就是"纯检测"的整车，专门用来和模型并排对照。
 void drawDetectedBody(const Scene &scene, const TopDownFrame &frame, const TopDownOptions &options,
-                      double radius)
+                      double fallback_radius)
 {
-    if (!frame.has_state || !frame.state.allFinite() || !(radius > 0.02))
-        return;
     cv::Mat &canvas = *scene.canvas;
-    const double cx = frame.state(0);
-    const double cy = frame.state(2);
-    const int plate_count = 4;
-    const double period = 2.0 * kPi / static_cast<double>(plate_count);
-    const int target_id = frame.diagnostics.target_id;
+    const double radius_prior =
+        (std::isfinite(fallback_radius) && fallback_radius > 0.05) ? fallback_radius
+                                                                  : options.fallback_radius_m;
 
-    std::vector<double> phases;
+    // ---- 1. 收集本帧同一 id 的实测板（世界系）----
+    std::vector<Eigen::Vector2d> points;
+    std::vector<double> normals;
     for (const TopDownObservation &observation : frame.observations)
     {
         if (!observation.position.allFinite())
             continue;
-        if (target_id != 0 && observation.target_id != target_id)
+        if (frame.diagnostics.target_id != 0 &&
+            observation.target_id != frame.diagnostics.target_id)
             continue;
-        // 板心 = 中心 - R*u(phase) => phase = atan2(cy-py, cx-px)。
-        phases.push_back(std::atan2(cy - observation.position.y(), cx - observation.position.x()));
+        points.emplace_back(observation.position.x(), observation.position.y());
+        normals.push_back(observation.normal_yaw);
     }
-    if (phases.empty())
+    if (points.empty())
         return;
 
-    // 折叠平均：相位只定义到 period，先把角度乘 N 再平均，否则四块板互相抵消。
-    double sin_sum = 0.0;
-    double cos_sum = 0.0;
-    for (double phase : phases)
+    // ---- 2. 3D 邻近聚类：两台车相距 0.5 m 以上时不会被并成一台 ----
+    const double cluster_gate = std::max(2.0 * radius_prior + 0.25, 0.45);
+    std::vector<int> label(points.size(), -1);
+    int clusters = 0;
+    for (std::size_t i = 0; i < points.size(); ++i)
     {
-        sin_sum += std::sin(static_cast<double>(plate_count) * phase);
-        cos_sum += std::cos(static_cast<double>(plate_count) * phase);
+        if (label[i] >= 0)
+            continue;
+        label[i] = clusters;
+        bool grew = true;
+        while (grew)
+        {
+            grew = false;
+            for (std::size_t a = 0; a < points.size(); ++a)
+            {
+                if (label[a] != clusters)
+                    continue;
+                for (std::size_t b = 0; b < points.size(); ++b)
+                {
+                    if (label[b] >= 0)
+                        continue;
+                    if ((points[a] - points[b]).norm() <= cluster_gate)
+                    {
+                        label[b] = clusters;
+                        grew = true;
+                    }
+                }
+            }
+        }
+        ++clusters;
     }
-    const double folded = std::atan2(sin_sum, cos_sum) / static_cast<double>(plate_count);
 
-    const int thickness = std::clamp(static_cast<int>(std::lround(0.010 * scene.ppm)), 2, 10);
-    const double half_width = 0.5 * options.plate_width_m;
-    cv::circle(canvas, ip(scene.toPx(cx, cy)), static_cast<int>(std::lround(radius * scene.ppm)),
-               mix(scene.bg, kObsColor, 0.45), 1, cv::LINE_AA);
-    for (int slot = 0; slot < plate_count; ++slot)
+    const int thickness = std::clamp(static_cast<int>(std::lround(0.009 * scene.ppm)), 2, 9);
+
+    for (int k = 0; k < clusters; ++k)
     {
-        const double phase = folded + period * slot;
-        const double cos_phase = std::cos(phase);
-        const double sin_phase = std::sin(phase);
-        const Eigen::Vector2d plate(cx - radius * cos_phase, cy - radius * sin_phase);
-        const Eigen::Vector2d tangent(-sin_phase, cos_phase);
-        const cv::Point2d p0 =
-            scene.toPx(plate.x() - half_width * tangent.x(), plate.y() - half_width * tangent.y());
-        const cv::Point2d p1 =
-            scene.toPx(plate.x() + half_width * tangent.x(), plate.y() + half_width * tangent.y());
-        cv::line(canvas, ip(p0), ip(p1), kObsColor, thickness, cv::LINE_AA);
-        cv::circle(canvas, ip(p0), thickness / 2, kObsColor, -1, cv::LINE_AA);
-        cv::circle(canvas, ip(p1), thickness / 2, kObsColor, -1, cv::LINE_AA);
+        std::vector<Eigen::Vector2d> cluster_points;
+        std::vector<double> cluster_normals;
+        for (std::size_t i = 0; i < points.size(); ++i)
+        {
+            if (label[i] != k)
+                continue;
+            cluster_points.push_back(points[i]);
+            cluster_normals.push_back(normals[i]);
+        }
+
+        // ---- 3. 法向线最小二乘交点 ----
+        Eigen::Matrix2d A = Eigen::Matrix2d::Zero();
+        Eigen::Vector2d b = Eigen::Vector2d::Zero();
+        Eigen::Vector2d normal_sum = Eigen::Vector2d::Zero();
+        int with_normal = 0;
+        for (std::size_t i = 0; i < cluster_points.size(); ++i)
+        {
+            if (!std::isfinite(cluster_normals[i]))
+                continue;
+            const Eigen::Vector2d n(std::cos(cluster_normals[i]), std::sin(cluster_normals[i]));
+            const Eigen::Matrix2d projection = Eigen::Matrix2d::Identity() - n * n.transpose();
+            A += projection;
+            b += projection * cluster_points[i];
+            normal_sum += n;
+            ++with_normal;
+        }
+
+        Eigen::Vector2d centre = Eigen::Vector2d::Zero();
+        bool solved = false;
+        if (with_normal >= 2 && std::fabs(A.determinant()) > 1e-6)
+        {
+            centre = A.inverse() * b;
+            solved = true;
+        }
+        else if (std::isfinite(cluster_normals[0]))
+        {
+            // 单板退化：从板心沿法向后退一个半径。选让圆心更远离相机（原点）的那一侧，
+            // 因为车心必须比朝相机的板更远。
+            const Eigen::Vector2d n(std::cos(cluster_normals[0]), std::sin(cluster_normals[0]));
+            const Eigen::Vector2d a = cluster_points[0] - radius_prior * n;
+            const Eigen::Vector2d c = cluster_points[0] + radius_prior * n;
+            centre = (a.norm() > c.norm()) ? a : c;
+            solved = true;
+        }
+        if (!solved || !centre.allFinite())
+            continue;
+
+        // 只有一块板时，法向线定不出圆心：把 ±R 两个候选都画出来并明确标注，
+        // 不要假装"算出了圆心"——这正是单帧深度歧义的几何本质。
+        if (with_normal < 2)
+        {
+            const cv::Scalar dim = mix(scene.bg, kOtherColor, 0.45);
+            for (int side = -1; side <= 1; side += 2)
+            {
+                const Eigen::Vector2d candidate =
+                    cluster_points[0] + side * radius_prior *
+                                            Eigen::Vector2d(std::cos(cluster_normals[0]),
+                                                            std::sin(cluster_normals[0]));
+                const cv::Point2d px = scene.toPx(candidate.x(), candidate.y());
+                cv::circle(canvas, ip(px), static_cast<int>(std::lround(0.012 * scene.ppm)), dim, 1,
+                           cv::LINE_AA);
+                cv::line(canvas, ip(px), ip(scene.toPx(cluster_points[0].x(), cluster_points[0].y())),
+                         dim, 1, cv::LINE_AA);
+            }
+            textAt(canvas, "1 plate: center ambiguous",
+                   ip(scene.toPx(cluster_points[0].x(), cluster_points[0].y())) + cv::Point(12, -14),
+                   0.36 * scene.scale, dim, 1.0);
+            continue; // 圆心不唯一，不画圆也不要假装有车心
+        }
+
+        // ---- 4. 半径也是测出来的：板心到圆心的中位距离 ----
+        std::vector<double> distances;
+        for (const Eigen::Vector2d &point : cluster_points)
+            distances.push_back((point - centre).norm());
+        std::sort(distances.begin(), distances.end());
+        const double measured_radius = distances[distances.size() / 2];
+
+        // 主车（离相机最近）画亮一点，其它车暗一点。
+        if (std::getenv("DET_DEBUG") != nullptr)
+            std::fprintf(stderr, "[det] cluster=%d n=%zu with_normal=%d c=(%.3f,%.3f) R=%.3f prior=%.3f\n",
+                         k, cluster_points.size(), with_normal, centre.x(), centre.y(),
+                         measured_radius, radius_prior);
+        const bool primary = centre.norm() <= radius_prior * 3.0 + 1.0;
+        const cv::Scalar color = primary ? kObsColor : kOtherColor;
+
+        cv::circle(canvas, ip(scene.toPx(centre.x(), centre.y())),
+                   static_cast<int>(std::lround(measured_radius * scene.ppm)),
+                   mix(scene.bg, color, primary ? 0.55 : 0.30), primary ? 2 : 1, cv::LINE_AA);
+
+        // 法向线：这条线必须过圆心，肉眼一眼能验证"空间关系对不对"。
+        for (std::size_t i = 0; i < cluster_points.size(); ++i)
+        {
+            if (!std::isfinite(cluster_normals[i]))
+                continue;
+            const Eigen::Vector2d n(std::cos(cluster_normals[i]), std::sin(cluster_normals[i]));
+            const Eigen::Vector2d tail = cluster_points[i] - 2.2 * radius_prior * n;
+            const Eigen::Vector2d head = cluster_points[i] + 2.2 * radius_prior * n;
+            cv::line(canvas, ip(scene.toPx(tail.x(), tail.y())),
+                     ip(scene.toPx(head.x(), head.y())), mix(scene.bg, color, 0.35), 1,
+                     cv::LINE_AA);
+        }
+
+        const cv::Point2d centre_px = scene.toPx(centre.x(), centre.y());
+        cv::drawMarker(canvas, ip(centre_px), color, cv::MARKER_TILTED_CROSS,
+                       static_cast<int>(std::lround(0.030 * scene.ppm)), primary ? 2 : 1);
+        textAt(canvas, fmt("det %zu R %.3f", cluster_points.size(), measured_radius),
+               ip(centre_px) + cv::Point(10, 16), (primary ? 0.42 : 0.36) * scene.scale, color,
+               primary ? 1.4 : 1.0);
     }
 }
 
@@ -655,6 +773,8 @@ const cv::Mat &TopDownView::render(const TopDownFrame &frame,
     {
         if (!other.has_state || !other.state.allFinite())
             continue;
+        if (!other.fresh)
+            continue;
         const double other_radius =
             (std::isfinite(other.state(8)) && other.state(8) > 0.02) ? other.state(8)
                                                                      : options_.fallback_radius_m;
@@ -665,13 +785,12 @@ const cv::Mat &TopDownView::render(const TopDownFrame &frame,
         textAt(*scene.canvas, id_label, ip(other_px) + cv::Point(8, -10), 0.42 * scene.scale,
                kOtherPlateColor);
     }
-    if (frame.has_state &&
-        frame.state.allFinite())
+    if (!options_.detected_body_only && frame.has_state && frame.state.allFinite())
         drawModel(scene, frame, options_, radius, kPrimaryPalette);
 
     // ---- 3.5 由实测板反推的整车（绿）：和蓝色模型并排，便于肉眼判断相位偏差 ----
-    if (frame.has_state && frame.state.allFinite())
-        drawDetectedBody(scene, frame, options_, radius);
+    // 只看检测，不看状态：没锁定时也要能画出"真实车体在哪"。
+    drawDetectedBody(scene, frame, options_, radius);
 
     // ---- 4. 实测板（绿）与云台原点 ----
     drawObservations(scene, frame, options_);
