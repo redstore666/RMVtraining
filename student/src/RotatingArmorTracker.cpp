@@ -205,7 +205,13 @@ void RotatingArmorTracker::applyProcessNoise()
     config.process.accel_x = 0.01 * scale;
     config.process.accel_y = 0.01 * scale;
     config.process.accel_z = 0.01 * scale;
-    config.process.angular_accel = 0.01 * scale;
+    static const double spin_env = [] {
+        const char *v = std::getenv("SPIN_Q");
+        return v ? std::atof(v) : -1.0;
+    }();
+    const double spin_scale =
+        spin_env > 0.0 ? spin_env : std::max(1e-6, config_.process_spin_scale);
+    config.process.angular_accel = 0.01 * scale * spin_scale;
     ekf_.setConfig(config);
 }
 
@@ -2501,6 +2507,13 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                 ekf_.shiftCenter(chosen.position - plate_after);
             }
         }
+        // 相位残差的"上坡"就是角速度误差：模型转得比真车慢，残差就单调涨。
+        // 记下更新前的预测板面朝向，用来算这一步的残差（更新后就看不到了）。
+        const double period_now = 2.0 * kPi / static_cast<double>(std::max(config_.ekf.plate_count, 1));
+        const double face_pred =
+            (chosen.has_yaw && std::isfinite(chosen.yaw))
+                ? wrapToPi(ekf_.state()(6) + static_cast<double>(best_slot) * period_now + kPi)
+                : std::numeric_limits<double>::quiet_NaN();
         if (!ekf_.update(observation, best_slot))
         {
             // 更新失败（观测把状态推出物理区间等）：只放弃这一块板，别放弃本帧
@@ -2554,6 +2567,102 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
             }
         }
         noteObservationForNoise(chosen.position, timestamp_s);
+        // 同板角速度量测：只有当这一步和上一步确认是同一块板（位移很小）时，
+        // 板心绕当前车心的转角差才是干净的 ω，不会掺进"换板"造成的 90° 跳变。
+        static const double tracklet_alpha_env = [] {
+            const char *v = std::getenv("RATE_TRACKLET_ALPHA");
+            return v ? std::atof(v) : -1.0;
+        }();
+        const double tracklet_alpha =
+            tracklet_alpha_env >= 0.0 ? tracklet_alpha_env : config_.rate_tracklet_alpha;
+        if (config_.rate_from_tracklet_enabled && ekf_.initialized())
+        {
+            const Eigen::Vector2d p_now(chosen.position.x(), chosen.position.y());
+            const Eigen::Vector2d c_now(ekf_.state()(0), ekf_.state()(2));
+            if (rate_has_last_)
+            {
+                const double step = (p_now - rate_last_position_).norm();
+                const double dt = timestamp_s - rate_last_time_s_;
+                if (step <= config_.rate_tracklet_max_step_m && dt > 1e-3 && dt < 0.2)
+                {
+                    const double a_now = std::atan2(p_now.y() - c_now.y(), p_now.x() - c_now.x());
+                    const double a_prev = std::atan2(rate_last_position_.y() - c_now.y(),
+                                                     rate_last_position_.x() - c_now.x());
+                    const double dtheta = wrapToPi(a_now - a_prev);
+                    const double omega_meas = dtheta / dt;
+                    const bool spinning = std::fabs(omega_meas) >= config_.rate_tracklet_min_rate_rad_s ||
+                                          std::fabs(ekf_.state()(7)) >= config_.rate_tracklet_min_rate_rad_s;
+                    const bool warmed_up = diagnostics_.accepted_updates >=
+                                           static_cast<std::uint64_t>(config_.rate_tracklet_min_updates);
+                    // 车心还没收敛时，绕它算出来的角度差是垃圾：要求板心到车心的
+                    // 距离确实接近当前半径，才认为这个角度有意义。
+                    const double r_now = std::max(ekf_.state()(8), 0.05);
+                    const double dist_now = (p_now - c_now).norm();
+                    const bool on_circle = std::fabs(dist_now - r_now) <= 0.06;
+                    if (warmed_up && on_circle && spinning && std::isfinite(omega_meas) &&
+                        std::fabs(omega_meas) < 12.0)
+                    {
+                        double delta = tracklet_alpha * (omega_meas - ekf_.state()(7));
+                        delta = std::clamp(delta, -config_.rate_tracklet_max_step_rad_s,
+                                           config_.rate_tracklet_max_step_rad_s);
+                        ekf_.setRate(std::clamp(ekf_.state()(7) + delta, -12.0, 12.0));
+                    }
+                }
+            }
+            rate_last_position_ = p_now;
+            rate_last_time_s_ = timestamp_s;
+            rate_has_last_ = true;
+        }
+        // 角速度修正（PLL）：残差斜率 = 真角速度 − 当前估计角速度。
+        if (config_.rate_from_residual_enabled && std::isfinite(face_pred) &&
+            std::isfinite(chosen.yaw) && ekf_.initialized())
+        {
+            const double residual = wrapToPi(chosen.yaw - face_pred);
+            rate_residual_samples_.push_back(RateResidual{timestamp_s, residual});
+            while (!rate_residual_samples_.empty() &&
+                   timestamp_s - rate_residual_samples_.front().timestamp_s >
+                       config_.rate_residual_window_s)
+            {
+                rate_residual_samples_.pop_front();
+            }
+            if (static_cast<int>(rate_residual_samples_.size()) >= config_.rate_residual_min_samples)
+            {
+                double sum_t = 0.0, sum_r = 0.0, sum_tt = 0.0, sum_tr = 0.0;
+                const double t0 = rate_residual_samples_.front().timestamp_s;
+                double prev = 0.0, unwrapped = 0.0;
+                bool first = true;
+                for (const RateResidual &sample : rate_residual_samples_)
+                {
+                    // 残差本身按 2pi 折叠，时间相邻时步长很小，可以直接展开。
+                    if (first)
+                    {
+                        unwrapped = sample.residual_rad;
+                        first = false;
+                    }
+                    else
+                    {
+                        double step = sample.residual_rad - prev;
+                        step = wrapToPi(step);
+                        unwrapped += step;
+                    }
+                    prev = sample.residual_rad;
+                    const double t = sample.timestamp_s - t0;
+                    sum_t += t;
+                    sum_r += unwrapped;
+                    sum_tt += t * t;
+                    sum_tr += t * unwrapped;
+                }
+                const double n = static_cast<double>(rate_residual_samples_.size());
+                const double denom = n * sum_tt - sum_t * sum_t;
+                if (denom > 1e-6)
+                {
+                    const double slope = (n * sum_tr - sum_t * sum_r) / denom;
+                    const double corrected =
+                        ekf_.state()(7) + config_.rate_residual_gain * slope;
+                    ekf_.setRate(std::clamp(corrected, -12.0, 12.0));
+                }
+            }
+        }
         // 整车重拟合用的滑窗样本（板心轨迹 = 一个圆）
         body_samples_.push_back(
             LockSample{timestamp_s, chosen.position, chosen.yaw, chosen.target_id, chosen.size, false});

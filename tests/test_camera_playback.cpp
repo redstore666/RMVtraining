@@ -144,6 +144,7 @@ namespace
         double bias_s{0.0};
         int dump_every{0};
     double chord_q{-1.0};
+    int rate_tracklet{-1};
         int only_id{0};
         double radius_prior{0.25};
         double v_sigma{0.05};
@@ -219,6 +220,7 @@ namespace
     // 本轮：只做"实测板 -> 整车"，隐藏 EKF 的四块模型板（蓝），保留 aim 点。
     bool detected_body{false};
     bool topdown_world{false};
+    bool topdown_follow{false};
     double topdown_ppm{200.0};
     std::string topdown_out;
     };
@@ -266,6 +268,10 @@ namespace
                 args.bias_s = std::atof(next("--bias").c_str());
             else if (arg == "--csv")
                 args.csv_path = next("--csv");
+            else if (arg == "--rate-tracklet")
+            {
+                args.rate_tracklet = std::atoi(next("--rate-tracklet").c_str());
+            }
             else if (arg == "--chord-q")
             {
                 args.chord_q = std::atof(next("--chord-q").c_str());
@@ -506,6 +512,10 @@ namespace
             }
             else if (arg == "--topdown")
                 args.topdown = true;
+            else if (arg == "--topdown-follow")
+            {
+                args.topdown_follow = true;
+            }
             else if (arg == "--topdown-world")
             {
                 args.topdown = true;
@@ -927,7 +937,9 @@ int main(int argc, char **argv)
         std::cerr << "[俯视图] 需要同时给 --ekf，已忽略 --topdown\n";
     }
     rotating_armor::TopDownOptions topdown_options;
-    topdown_options.follow_target = !args.topdown_world;
+    // 用户要求：默认固定相机（世界原点）坐标系，方便把车的抖动和相机抖动分开看。
+    // 想看"跟车放大"时用 --topdown-follow。
+    topdown_options.follow_target = args.topdown_follow && !args.topdown_world;
     topdown_options.pixels_per_meter = args.topdown_ppm;
     topdown_options.detected_body_only = args.detected_body;
     rotating_armor::TopDownView topdown_view(topdown_options);

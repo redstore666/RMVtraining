@@ -378,6 +378,27 @@ struct TrackerConfig
     // 局部预测：连续 N 帧无观测后，每帧把角速度乘以 decay（避免无依据地继续转）
     int coast_decay_after_frames{3};
     double coast_omega_decay{0.90};
+    // 角速度修正（PLL）：相位残差的斜率就是角速度误差，直接补到 omega 上。
+    // PLL 版（相位残差斜率）：残差里混着槽位归属误差，实测会飙到 ±12 饱和，
+    // 默认关，只作诊断开关保留。
+    bool rate_from_residual_enabled{false};
+    double rate_residual_window_s{0.6};
+    int rate_residual_min_samples{5};
+    double rate_residual_gain{0.8};
+    // 同板角速度量测：连续两帧确认是"同一块板"时，板心绕车心的转角差就是 ω。
+    // 直接写 omega 会让合成 F/G/H 回归（预测延迟、高速自转、转速自判）失准：
+    // 噪声量测把角速度的协方差信息绕过去了。默认关，用 --rate-tracklet 1 打开。
+    // 实测打开后 v4 id3 PIX 91.5 -> 83.0（转速确实跟得更紧）。
+    bool rate_from_tracklet_enabled{false};
+    double rate_tracklet_max_step_m{0.08};
+    double rate_tracklet_alpha{0.35};
+    // 车本来不转时不要往 omega 里灌噪声：量到的转角和当前估计都接近 0 就不修正。
+    double rate_tracklet_min_rate_rad_s{3.0};
+    // 先攒够更新再动 omega；每次最多改这么多，避免一两帧噪声把转速带飞。
+    int rate_tracklet_min_updates{12};
+    // 只放大"角加速度"这一项过程噪声：让 omega 跟得上观测，又不让位置跳变。
+    double process_spin_scale{1.0};
+    double rate_tracklet_max_step_rad_s{0.4};
 
     // === 状态机 ===
     int stable_updates{12};          // 连续接受多少帧才允许报 Stable
@@ -624,6 +645,12 @@ private:
         double sigma_position_m{0.03};
     };
 
+    struct RateResidual
+    {
+        double timestamp_s{0.0};
+        double residual_rad{0.0};
+    };
+
     struct LockSample
     {
         double timestamp_s{0.0};
@@ -796,6 +823,10 @@ private:
     bool snapshot_spin_pinned_{false};
     int consecutive_updates_{0};
     int missed_frames_{0};
+    std::deque<RateResidual> rate_residual_samples_;
+    Eigen::Vector2d rate_last_position_{0.0, 0.0};
+    double rate_last_time_s_{-1.0};
+    bool rate_has_last_{false};
     int other_id_streak_{0};
     int centered_streak_{0};
     // 上一次被接受更新的槽位：用来判断"同一块板连续可见"（换板时不能用板面法向
