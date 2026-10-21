@@ -195,6 +195,10 @@ struct TrackerConfig
     // 加距离项是刻意的偏离：sp_vision 是"距离筛完再纯按角度挑"，我们没有两趟
     // 筛选，所以用距离项兜住"角度碰巧对上但隔了半米"的错配。
     // 权重单位是 m/rad：0.30 表示 1 rad 的角度差等价于 0.30 m 的位置差。
+    // 板面法向进量测（借鉴 sp_vision_25）。默认关：PnP 法向噪声实测 ±35°，
+    // 直接当量测喂进去在 v4 上反而变差（84.3 -> 86.7~88.8 px，见 docs）。
+    bool plate_normal_measurement_enabled{false};
+    double plate_normal_sign{1.0};
     bool association_by_angle_enabled{true};
     double association_angle_weight_m_per_rad{0.30};
     double normal_tiebreak_weight{0.0};

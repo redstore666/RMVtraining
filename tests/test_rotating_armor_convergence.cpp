@@ -263,19 +263,24 @@ int main() {
             ++failures;
         }
 
-        // 同圆心的结构性保证：四块模型板到估计中心的距离必须都等于同一个 R。
+        // 整车模型的结构性保证（11 维状态版）：
+        //   偶数槽位(0,2) 共用一个半径 r，奇数槽位(1,3) 共用 r + l，
+        //   l 是 sp_vision 的 radius_diff，用来表达"相邻两板到转轴距离不同"。
+        // 所以这里不能再要求四块板严格同半径，而是要求"同一对内部严格相等"，
+        // 且 l 不能大到离谱（本场景真值四块板同半径，l 应停在小值）。
         const State& est = ekf.state();
-        double r_min = 1.0e9;
-        double r_max = 0.0;
+        double radius[4];
         for (int slot = 0; slot < kPlateCount; ++slot) {
             const Eigen::Vector3d p = measurement(est, slot, kPlateCount);
-            const double r = std::hypot(p.x() - est(0), p.y() - est(2));
-            r_min = std::min(r_min, r);
-            r_max = std::max(r_max, r);
+            radius[slot] = std::hypot(p.x() - est(0), p.y() - est(2));
         }
-        std::cout << "  四块模型板到车心距离: min=" << r_min << " max=" << r_max
-                  << "（差 " << (r_max - r_min) << " m）\n";
-        expect(r_max - r_min <= 1e-9, "四块模型板必须严格共享同一个半径（同圆心）");
+        const double pair_gap = std::max(std::abs(radius[0] - radius[2]),
+                                         std::abs(radius[1] - radius[3]));
+        const double l = est(9);
+        std::cout << "  四块模型板到车心距离: " << radius[0] << " / " << radius[1] << " / "
+                  << radius[2] << " / " << radius[3] << "  l=" << l << "\n";
+        expect(pair_gap <= 1e-9, "同一对（0,2 / 1,3）的模型板必须严格共享半径");
+        expect(std::abs(l) <= 0.02, "四块板同半径的真值下 radius_diff 必须收敛到 <=0.02 m");
     }
 
     if (failures != 0) {

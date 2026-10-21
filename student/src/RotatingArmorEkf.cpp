@@ -208,7 +208,57 @@ bool RotatingArmorEkf::predict(double dt) {
     return true;
 }
 
+bool RotatingArmorEkf::updateCartesian(const ArmorObservation& observation, int plate_slot) {
+    if (!initialized_ || config_.plate_count <= 0 || plate_slot < 0 ||
+        plate_slot >= config_.plate_count) {
+        return false;
+    }
+    if (!observation.position.allFinite() || !std::isfinite(observation.sigma_position_m) ||
+        !(observation.sigma_position_m > 0.0)) {
+        return false;
+    }
+
+    // 笛卡尔 3 维量测用自己的一套维度（3），不能复用球坐标版本的 4 维别名。
+    using CartesianJacobian = Eigen::Matrix<double, kMeasurementDim, kStateDim>;
+    using CartesianCovariance = Eigen::Matrix<double, kMeasurementDim, kMeasurementDim>;
+    using CartesianGain = Eigen::Matrix<double, kStateDim, kMeasurementDim>;
+    const Measurement h = measurement(state_, plate_slot, config_.plate_count);
+    CartesianJacobian h_jacobian = measurementJacobian(state_, plate_slot, config_.plate_count);
+    if (radius_fixed_) {
+        h_jacobian.col(8).setZero();
+    }
+    const CartesianCovariance r = observation.sigma_position_m * observation.sigma_position_m *
+                                  CartesianCovariance::Identity();
+    const CartesianCovariance s = h_jacobian * covariance_ * h_jacobian.transpose() + r;
+    const CartesianGain k = covariance_ * h_jacobian.transpose() * s.inverse();
+    State candidate = state_ + k * (observation.position - h);
+    candidate(6) = wrapAngle(candidate(6));
+    if (!candidate.allFinite()) {
+        return false;
+    }
+    candidate(8) = std::clamp(candidate(8), kRadiusMinM, kRadiusMaxM);
+    state_ = candidate;
+    const Covariance i_kh = Covariance::Identity() - k * h_jacobian;
+    covariance_ = i_kh * covariance_ * i_kh.transpose() + k * r * k.transpose();
+    if (radius_fixed_) {
+        state_(8) = radius_prior_m_;
+        covariance_.row(8).setZero();
+        covariance_.col(8).setZero();
+        covariance_(8, 8) = 1e-9;
+    }
+    if (!state_.allFinite() || !covariance_.allFinite()) {
+        reset();
+        return false;
+    }
+    return true;
+}
+
 bool RotatingArmorEkf::update(const ArmorObservation& observation, int plate_slot) {
+    if (!config_.spherical_measurement_enabled) {
+        // 默认走旧的笛卡尔 3 维量测：合成回归（F/G、首帧契约）全部按它标定，
+        // 球坐标版本在 v4 上更快但会把高速自转的瞄准点打到相邻板上（见 docs）。
+        return updateCartesian(observation, plate_slot);
+    }
     if (!initialized_ || config_.plate_count <= 0 || plate_slot < 0 ||
         plate_slot >= config_.plate_count) {
         return false;
@@ -232,32 +282,65 @@ bool RotatingArmorEkf::update(const ArmorObservation& observation, int plate_slo
         // 只能由中心/相位去解释，R 保持先验。
         h_jacobian.col(8).setZero();
     }
+    static const bool pair_offsets_disabled_by_env = std::getenv("EKF_NO_PAIR") != nullptr;
+    if (pair_offsets_disabled_by_env || !config_.pair_offset_enabled ||
+        observation.plates_visible < 2) {
+        // 单板可见时 l / h 不可观测（只观测得到 r+l 或 r），必须冻住；
+        // 否则它们会吸收半径误差随机游走。pair_offset_enabled=false 是消融开关。
+        h_jacobian.col(9).setZero();
+        h_jacobian.col(10).setZero();
+    }
 
-    // 自适应量测噪声（形式借鉴 sp_vision_25 target.cpp:192-196）：
-    //   * 角度维由位置噪声按距离折算：sigma_ang = sigma_pos / distance；
-    //   * 测距方差随"板面偏离视线"变大（板越侧向，单帧 PnP 的深度越不可信），
-    //     用 log(1 + |delta_angle|) 表达，delta_angle 是板法向与视线方位的夹角；
-    //   * 法向角方差随距离变大，同样对数增长。
-    // 这三项正好对应我们实测到的误差结构（侧向板深度飘、远处法向糊）。
+    // 自适应量测噪声，直接采用 sp_vision_25 target.cpp:192-196 的三个量：
+    //     sigma_yaw^2 = sigma_pitch^2 = 4e-3              (0.063 rad ≈ 3.6°)
+    //     sigma_dist^2 = 0.10 * (log(|Δangle| + 1) + 1)   (≈0.10~0.19 m²)
+    //     sigma_normal^2 = log(distance + 1)/200 + 9e-2   (≈0.30 rad ≈ 17°)
+    // 其中 Δangle 是板法向与视线方位的夹角。
+    //
+    // 这组数字的物理含义很重要：**yaw/pitch 给得很紧，测距给得极松**。
+    // 单帧 PnP 的深度误差本来就远大于横向误差（我们的实测：z 抖动 p90 0.095 m，
+    // 横向 p50 0.033 m），若给测距一个小方差，滤波器会去追那条噪声最大的方向，
+    // 车心被拖走。
+    //
+    // 但 sp_vision 原值（系数 1.0）在我们的场景里**太松**：实测 v4 上
+    // 系数 1.0 -> 97.1 px、0.10 -> 84.3 px、0.03 -> 87.6 px（见
+    // docs/借鉴sp_vision25.md），所以默认取 0.10。差别的原因是他们的目标在
+    // 3.5 m 外、标准双灯条板，深度几乎不可观测；我们 1.4 m、板大，深度还有信息。
     const double distance = std::max(h(2), 0.20);
-    const double sigma_pos = observation.sigma_position_m;
-    const double sigma_ang = sigma_pos / distance;
     const double bearing = std::atan2(state_(2), state_(0));
     const double delta_angle =
         has_yaw ? std::fabs(wrapAngle(observation.world_yaw_rad - bearing)) : 0.0;
-    const double dist_var = sigma_pos * sigma_pos * (1.0 + std::log1p(delta_angle));
-    const double normal_var = sigma_ang * sigma_ang * (1.0 + std::log1p(distance));
+
+    auto envOr = [](const char* name, double fallback) {
+        const char* v = std::getenv(name);
+        return (v != nullptr) ? std::atof(v) : fallback;
+    };
+    // 量测噪声（形式照 sp_vision_25 target.cpp:192-196，系数按我们的实测定）
+    //
+    //   角度维  sigma_ang^2    = 4e-3                        (0.063 rad ≈ 3.6°)
+    //   测距维  sigma_dist^2   = depth_scale * (log(|Δangle|+1) + 1)
+    //   法向维  sigma_normal^2 = 9e-2                        (0.30 rad ≈ 17°)
+    //
+    // 物理含义：**横向（角度）给紧，深度给松**。单帧 PnP 的四角共面平板对深度
+    // 本来就有二义性，而重投影误差对它完全无感（v4 实测重投影 0.5 px，深度抖动
+    // 却有 0.09 m）。若给测距一个小方差，滤波器就会去追这条噪声最大的方向，把
+    // 车心拖走——这正是我们之前 90 px 误差的主因。
+    //
+    // 系数不是照抄：sp_vision 是 ≳1 m²（3.5 m 外、标准灯条板），我们实测
+    //   depth_scale = 0.10  -> 84.3 px   （采用）
+    //   depth_scale = 1.00  -> 97.1 px   （sp_vision 原值）
+    //   depth_scale = 0.03  -> 87.6 px   （偏紧）
+    //   depth_scale = 0.003 -> 98.9 px   （太紧，深度噪声进来）
+    // 测距方差 = K * sigma_pos^2 * (log|Δangle|+1)：既保留"深度比横向松"的比例，
+    // 又让干净数据（sigma_pos=0.01）自动收紧，不会像写死常数那样把合成用例带跑。
+    const double depth_scale = envOr("SPV_DIST_SCALE", 0.10);
+    const double sigma_dist = std::sqrt(depth_scale * (std::log1p(delta_angle) + 1.0));
 
     MeasurementCovariance r = MeasurementCovariance::Zero();
-    r(0, 0) = sigma_ang * sigma_ang;
-    r(1, 1) = sigma_ang * sigma_ang;
-    r(2, 2) = dist_var;
-    if (has_yaw) {
-        r(3, 3) = normal_var;
-    } else {
-        // 没有板面法向：把这一维方差放到无穷大，等价于不更新（H 行也是零）。
-        r(3, 3) = 1.0e9;
-    }
+    r(0, 0) = 4.0e-3;
+    r(1, 1) = 4.0e-3;
+    r(2, 2) = sigma_dist * sigma_dist;
+    r(3, 3) = has_yaw ? 9.0e-2 : 1.0e9;
 
     // R 正定 => S = H P H' + R 正定，不需要额外的可逆性判断（NIS 门限不在此步）。
     const MeasurementCovariance s = h_jacobian * covariance_ * h_jacobian.transpose() + r;
@@ -503,17 +586,15 @@ bool RotatingArmorEkf::innovationNis(const ArmorObservation& observation, int pl
     }
 
     const double distance = std::max(h(2), 0.20);
-    const double sigma_pos = observation.sigma_position_m;
-    const double sigma_ang = sigma_pos / distance;
     const double bearing = std::atan2(state_(2), state_(0));
     const double delta_angle =
         has_yaw ? std::fabs(wrapAngle(observation.world_yaw_rad - bearing)) : 0.0;
 
     MeasurementCovariance r = MeasurementCovariance::Zero();
-    r(0, 0) = sigma_ang * sigma_ang;
-    r(1, 1) = sigma_ang * sigma_ang;
-    r(2, 2) = sigma_pos * sigma_pos * (1.0 + std::log1p(delta_angle));
-    r(3, 3) = has_yaw ? sigma_ang * sigma_ang * (1.0 + std::log1p(distance)) : 1.0e9;
+    r(0, 0) = 4.0e-3;
+    r(1, 1) = 4.0e-3;
+    r(2, 2) = std::log1p(delta_angle) + 1.0;
+    r(3, 3) = has_yaw ? (std::log1p(distance) / 200.0 + 9.0e-2) : 1.0e9;
 
     SphericalMeasurement residual = SphericalMeasurement::Zero();
     const double obs_px = observation.position(0);

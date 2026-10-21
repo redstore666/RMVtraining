@@ -29,6 +29,10 @@ struct ArmorObservation {
     double sigma_position_m{0.01};
     bool has_world_yaw{false};
     double world_yaw_rad{0.0};
+    // 本帧同一目标一共看到几块板。只看到一块时 radius_diff(l) / height_diff(h)
+    // 完全不可观测（只能观测到 r+l 或 r），此时必须把这两维冻住，否则它们会
+    // 随机游走并把半径误差吸收进去（实测静止真值上 R 漂 3 cm）。
+    int plates_visible{1};
 };
 
 // 角速度先验的声明方式。
@@ -100,6 +104,12 @@ struct EkfConfig {
     // 默认值即 RotatingArmorModel.hpp 里那组经过收敛测试的量级。
     ProcessNoiseConfig process{};
     int plate_count{4};
+    // 是否允许 radius_diff / height_diff 参与更新（消融开关）。
+    bool pair_offset_enabled{true};
+    // 球坐标量测（借鉴 sp_vision_25 target.cpp:187-222）。默认关：见 docs/借鉴sp_vision25.md
+    // 的回归表——打开后 v4 从 90.0 降到 86.1 px，但合成 F/G 与首帧契约的
+    // 静态半径会退化（瞄准点在高速自转下落到相邻板）。
+    bool spherical_measurement_enabled{false};
 };
 
 class RotatingArmorEkf {
@@ -139,6 +149,8 @@ public:
     // 输入非法、未初始化、或内部出现非有限值时返回 false；后者会同时 reset()，
     // 让调用方重新锁定，而不是继续把 NaN 传播出去。
     bool update(const ArmorObservation& observation, int plate_slot);
+    // 旧的笛卡尔 3 维量测（球坐标版本的对照实现）。
+    bool updateCartesian(const ArmorObservation& observation, int plate_slot);
 
     // 用"板面法向的世界朝角"直接观测车体 yaw 的一步更新。
     //

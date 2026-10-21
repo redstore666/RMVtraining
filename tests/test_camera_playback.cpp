@@ -178,6 +178,11 @@ namespace
         double continuity_gate{-1.0};
         int pair_static{-1};
         int body_circle{-1};
+        int pair_lh{-1};
+        int assoc_angle{-1};
+        int normal_meas{-1};
+        double normal_sign{1.0};
+        int spherical{-1};
         double body_circle_window{-1.0};
         double batch_window{0.0};
         int batch_every{0};
@@ -320,6 +325,26 @@ namespace
             else if (arg == "--body-circle")
             {
                 args.body_circle = std::atoi(next("--body-circle").c_str());
+            }
+            else if (arg == "--pair-lh")
+            {
+                args.pair_lh = std::atoi(next("--pair-lh").c_str());
+            }
+            else if (arg == "--spherical")
+            {
+                args.spherical = std::atoi(next("--spherical").c_str());
+            }
+            else if (arg == "--normal-meas")
+            {
+                args.normal_meas = std::atoi(next("--normal-meas").c_str());
+            }
+            else if (arg == "--normal-sign")
+            {
+                args.normal_sign = std::atof(next("--normal-sign").c_str());
+            }
+            else if (arg == "--assoc-angle")
+            {
+                args.assoc_angle = std::atoi(next("--assoc-angle").c_str());
             }
             else if (arg == "--circle-window")
             {
@@ -709,6 +734,23 @@ int main(int argc, char **argv)
     if (args.body_circle >= 0)
     {
         tracker_config.body_circle_enabled = args.body_circle != 0;
+    }
+    if (args.pair_lh >= 0)
+    {
+        tracker_config.ekf.pair_offset_enabled = args.pair_lh != 0;
+    }
+    if (args.spherical >= 0)
+    {
+        tracker_config.ekf.spherical_measurement_enabled = args.spherical != 0;
+    }
+    if (args.normal_meas >= 0)
+    {
+        tracker_config.plate_normal_measurement_enabled = args.normal_meas != 0;
+        tracker_config.plate_normal_sign = args.normal_sign;
+    }
+    if (args.assoc_angle >= 0)
+    {
+        tracker_config.association_by_angle_enabled = args.assoc_angle != 0;
     }
     if (args.body_circle_window > 0.0)
     {
@@ -1715,7 +1757,7 @@ int main(int argc, char **argv)
                             std::fprintf(stderr,
                                          "[pix] f=%d id=%d dx=%+.1f dy=%+.1f d=%.1f slot=%d "
                                          "bx=%.0f by=%.0f u=%d rj=%d nis=%.1f gd=%.3f "
-                                         "c=(%.2f,%.2f,%.2f) R=%.3f yaw=%+.2f om=%+.2f cn=(%.2f,%.2f) p=(%.2f,%.2f)\n",
+                                         "c=(%.2f,%.2f,%.2f) R=%.3f yaw=%+.2f om=%+.2f lh=(%+.3f,%+.3f) cn=(%.2f,%.2f) p=(%.2f,%.2f)\n",
                                          frame_index, pose_x.detection.target_id,
                                          px[0].x - box.x, px[0].y - box.y,
                                          cv::norm(cv::Point2f(px[0]) - box), slot_best, box.x, box.y,
@@ -1725,6 +1767,7 @@ int main(int argc, char **argv)
                                          diagnostics.best_gate_distance_m,
                                          ekf_state(0), ekf_state(2), ekf_state(4), ekf_state(8),
                                          ekf_state(6), ekf_state(7),
+                                         ekf_state(9), ekf_state(10),
                                          cn_x, cn_y,
                                          pose_x.position_gimbal_m[0], pose_x.position_gimbal_m[1]);
                         }

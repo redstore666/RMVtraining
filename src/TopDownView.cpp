@@ -348,6 +348,65 @@ void drawModel(const Scene &scene, const TopDownFrame &frame, const TopDownOptio
     }
 }
 
+// 检测反推的整车（绿）：只用本帧实测到的 1~2 块板 + 当前半径，按"板位角只定义到
+// 2π/N"的折叠平均算出整车相位，再把四块板画出来。和蓝色（EKF 预测）并排看，
+// 一眼就能判断"滤波器的相位/圆心偏了多少"——这正是肉眼调参最缺的那张图。
+void drawDetectedBody(const Scene &scene, const TopDownFrame &frame, const TopDownOptions &options,
+                      double radius)
+{
+    if (!frame.has_state || !frame.state.allFinite() || !(radius > 0.02))
+        return;
+    cv::Mat &canvas = *scene.canvas;
+    const double cx = frame.state(0);
+    const double cy = frame.state(2);
+    const int plate_count = 4;
+    const double period = 2.0 * kPi / static_cast<double>(plate_count);
+    const int target_id = frame.diagnostics.target_id;
+
+    std::vector<double> phases;
+    for (const TopDownObservation &observation : frame.observations)
+    {
+        if (!observation.position.allFinite())
+            continue;
+        if (target_id != 0 && observation.target_id != target_id)
+            continue;
+        // 板心 = 中心 - R*u(phase) => phase = atan2(cy-py, cx-px)。
+        phases.push_back(std::atan2(cy - observation.position.y(), cx - observation.position.x()));
+    }
+    if (phases.empty())
+        return;
+
+    // 折叠平均：相位只定义到 period，先把角度乘 N 再平均，否则四块板互相抵消。
+    double sin_sum = 0.0;
+    double cos_sum = 0.0;
+    for (double phase : phases)
+    {
+        sin_sum += std::sin(static_cast<double>(plate_count) * phase);
+        cos_sum += std::cos(static_cast<double>(plate_count) * phase);
+    }
+    const double folded = std::atan2(sin_sum, cos_sum) / static_cast<double>(plate_count);
+
+    const int thickness = std::clamp(static_cast<int>(std::lround(0.010 * scene.ppm)), 2, 10);
+    const double half_width = 0.5 * options.plate_width_m;
+    cv::circle(canvas, ip(scene.toPx(cx, cy)), static_cast<int>(std::lround(radius * scene.ppm)),
+               mix(scene.bg, kObsColor, 0.45), 1, cv::LINE_AA);
+    for (int slot = 0; slot < plate_count; ++slot)
+    {
+        const double phase = folded + period * slot;
+        const double cos_phase = std::cos(phase);
+        const double sin_phase = std::sin(phase);
+        const Eigen::Vector2d plate(cx - radius * cos_phase, cy - radius * sin_phase);
+        const Eigen::Vector2d tangent(-sin_phase, cos_phase);
+        const cv::Point2d p0 =
+            scene.toPx(plate.x() - half_width * tangent.x(), plate.y() - half_width * tangent.y());
+        const cv::Point2d p1 =
+            scene.toPx(plate.x() + half_width * tangent.x(), plate.y() + half_width * tangent.y());
+        cv::line(canvas, ip(p0), ip(p1), kObsColor, thickness, cv::LINE_AA);
+        cv::circle(canvas, ip(p0), thickness / 2, kObsColor, -1, cv::LINE_AA);
+        cv::circle(canvas, ip(p1), thickness / 2, kObsColor, -1, cv::LINE_AA);
+    }
+}
+
 void drawObservations(const Scene &scene, const TopDownFrame &frame, const TopDownOptions &options)
 {
     cv::Mat &canvas = *scene.canvas;
@@ -610,6 +669,10 @@ const cv::Mat &TopDownView::render(const TopDownFrame &frame,
         frame.state.allFinite())
         drawModel(scene, frame, options_, radius, kPrimaryPalette);
 
+    // ---- 3.5 由实测板反推的整车（绿）：和蓝色模型并排，便于肉眼判断相位偏差 ----
+    if (frame.has_state && frame.state.allFinite())
+        drawDetectedBody(scene, frame, options_, radius);
+
     // ---- 4. 实测板（绿）与云台原点 ----
     drawObservations(scene, frame, options_);
     drawOrigin(scene, origin_px);
@@ -632,9 +695,9 @@ const cv::Mat &TopDownView::render(const TopDownFrame &frame,
                             state(2), state(1), state(3)));
         // 运动类型是 EKF 自己从状态量判的（Spinning/Translating/Static），
         // 放在这一行是为了回答"它现在认为车在干什么"，而不是只报数字。
-        lines.push_back(fmt("spin   omega %+7.3f rad/s   R %.3f m   |v| %.2f m/s   %s", state(7),
-                            state(8), std::hypot(state(1), state(3)),
-                            motionModeName(diagnostics.motion)));
+        lines.push_back(fmt("spin   omega %+7.3f rad/s   R %.3f m   l %+.3f  h %+.3f   |v| %.2f m/s   %s",
+                            state(7), state(8), state(9), state(10),
+                            std::hypot(state(1), state(3)), motionModeName(diagnostics.motion)));
         if (result.state != TrackingState::NoTarget)
         {
             lines.push_back(fmt("aim    slot %d  yaw %+7.1f  pitch %+6.1f  d %.2f m   fire %s "

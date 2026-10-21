@@ -2253,7 +2253,10 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                              std::fabs(wrapToPi(face_yaw - world[i].yaw));
                 }
                 // 角度项：法向差 + 方位差（见 TrackerConfig::association_by_angle_enabled）
-                if (config_.association_by_angle_enabled && world[i].has_yaw &&
+                static const bool angle_assoc_disabled_by_env =
+                    std::getenv("NO_ASSOC_ANGLE") != nullptr;
+                if (config_.association_by_angle_enabled && !angle_assoc_disabled_by_env &&
+                    world[i].has_yaw &&
                     std::isfinite(world[i].yaw))
                 {
                     const double angle_period = 2.0 * kPi / static_cast<double>(plate_count);
@@ -2318,10 +2321,32 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
             }
         }
         ArmorObservation observation;
+        // 本帧同编号板数：只有 >=2 块时 l/h 才可观测（两只都看到才能比较半径差）。
+        {
+            int same_id_visible = 0;
+            for (const WorldObservation &candidate_obs : world)
+            {
+                if (candidate_obs.target_id == chosen.target_id)
+                    ++same_id_visible;
+            }
+            observation.plates_visible = same_id_visible;
+        }
         if (!smoothObservation(chosen, best_slot, timestamp_s, observation))
         {
             observation.position = chosen.position;
             observation.sigma_position_m = observationSigma(chosen.sigma_position_m);
+        }
+        // 板面法向进量测（借鉴 sp_vision_25 target.cpp:187-222 的第 4 维）：
+        // 这一维直接把"这块板朝哪儿"喂给滤波器，是打破四块板 90° 对称的信息来源。
+        // 约定沿用 initialize()：world_yaw_rad = 板面外法向（由车心指向板）。
+        // PnP 法向朝里朝外取决于解算，故用 NORMAL_SIGN 环境变量做正反两个方向的
+        // 一次性标定（见 docs/借鉴sp_vision25.md）。
+        if (config_.plate_normal_measurement_enabled && chosen.has_yaw &&
+            std::isfinite(chosen.yaw))
+        {
+            observation.has_world_yaw = true;
+            observation.world_yaw_rad =
+                wrapToPi(chosen.yaw + (config_.plate_normal_sign < 0.0 ? kPi : 0.0));
         }
         // 单板重锚：状态和这块板差得太多时，用观测把相位与中心直接对齐。
         // 单板 + 钉死半径时 (中心, 相位) 只有一个自由度被位置观测约束，滤波器
