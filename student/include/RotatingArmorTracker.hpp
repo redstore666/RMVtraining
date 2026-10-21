@@ -252,6 +252,13 @@ struct TrackerConfig
     // 同板轨迹段联合解 (c, ω)：相邻帧位移小于阈值的连续片段必属同一块板，
     // 给定 R 后只剩 3 个未知数，且角度沿片段连续、可无歧义展开 —— ω 因此可观测。
     // 这是 v4 上唯一有望修掉"每帧相位落后 0.16 rad"的结构性手段。
+    // 观测连续性门（数据关联）：v4 里除机器人上的板之外还有一两块独立摆放的
+    // "3"号板道具，位置只差 0.4-0.7 m，位置门（0.6 m）放不住它们，检测器会在
+    // 它们之间来回跳（实测 61% 的相邻帧框中心跳 >25 px）。30 fps 下同一块板
+    // 一秒内不可能跳 0.15 m，所以用"与上一次被接受的观测的距离"做硬门，
+    // 把另一块道具永久排除，而不是靠预测门（预测本身就偏，收紧预测门反而更差）。
+    bool obs_continuity_gate_enabled{false};
+    double obs_continuity_gate_m{0.15};
     bool tracklet_rate_enabled{false};
     double tracklet_max_step_m{0.15};
     int tracklet_min_samples{12};
@@ -425,7 +432,8 @@ struct TrackerDiagnostics
 {
     LockPhase phase{LockPhase::Idle};
     std::uint64_t batch_fits{0};
-    std::uint64_t tracklet_rates{0};   // 多秒窗口联合批处理应用次数
+    std::uint64_t tracklet_rates{0};
+    std::uint64_t continuity_rejects{0}; // 观测连续性门拒掉的候选数
     MotionMode motion{MotionMode::Unknown};
     double speed_m_s{0.0};
     int lock_samples{0};
@@ -722,6 +730,8 @@ private:
     // 上一次被接受更新的槽位：用来判断"同一块板连续可见"（换板时不能用板面法向
     // 约束车体 yaw）。
     int last_updated_slot_{-1};
+    Eigen::Vector3d last_accepted_position_{0.0, 0.0, 0.0};
+    bool has_last_accepted_position_{false};
     // 相邻两帧观测的位移 → 切向速度 → ω（不依赖相位/槽位，见 docs）
     Eigen::Vector2d tangent_last_position_{0.0, 0.0};
     double tangent_last_time_s_{-1.0};

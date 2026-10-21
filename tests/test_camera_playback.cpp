@@ -175,6 +175,7 @@ namespace
         int circle_phase{-1};
         int batch_fit{-1};
         int tracklet{-1};
+        double continuity_gate{-1.0};
         double batch_window{0.0};
         int batch_every{0};
         int normal_phase{-1};  // 1 开 0 关 -1 用默认：用板法向直接量测相位
@@ -312,6 +313,10 @@ namespace
             else if (arg == "--gate")
             {
                 args.gate_m = std::atof(next("--gate").c_str());
+            }
+            else if (arg == "--continuity-gate")
+            {
+                args.continuity_gate = std::atof(next("--continuity-gate").c_str());
             }
             else if (arg == "--tracklet")
             {
@@ -685,6 +690,11 @@ int main(int argc, char **argv)
     if (args.slot_phase >= 0)
     {
         tracker_config.slot_phase_update_enabled = args.slot_phase != 0;
+    }
+    if (args.continuity_gate > 0.0)
+    {
+        tracker_config.obs_continuity_gate_enabled = true;
+        tracker_config.obs_continuity_gate_m = args.continuity_gate;
     }
     if (args.tracklet >= 0)
     {

@@ -2184,6 +2184,12 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                 {
                     continue;
                 }
+                if (config_.obs_continuity_gate_enabled && has_last_accepted_position_ &&
+                    (world[i].position - last_accepted_position_).norm() > config_.obs_continuity_gate_m)
+                {
+                    ++diagnostics_.continuity_rejects;
+                    continue;
+                }
                 const Eigen::Vector3d predicted = platePosition(ekf_.state(), slot, plate_count);
                 const double distance = (world[i].position - predicted).norm();
                 // 换板（更新的不是当前瞄准槽位）时观测更不可信：板编号只到
@@ -2454,6 +2460,11 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
         used[static_cast<std::size_t>(best_observation)] = true;
         slot_of_observation[static_cast<std::size_t>(best_observation)] = best_slot;
         last_updated_slot_ = best_slot;
+        if (config_.obs_continuity_gate_enabled)
+        {
+            last_accepted_position_ = chosen.position;
+            has_last_accepted_position_ = true;
+        }
         if (config_.tangent_rate_enabled && ekf_.initialized())
         {
             const Eigen::Vector2d p_now(chosen.position.x(), chosen.position.y());
