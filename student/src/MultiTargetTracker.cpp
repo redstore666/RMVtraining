@@ -1,3 +1,5 @@
+#include <cstdio>
+#include <cstdlib>
 #include "MultiTargetTracker.hpp"
 
 #include "AimGeometry.hpp"
@@ -107,6 +109,14 @@ std::vector<MultiTargetTrack>& MultiTargetTracker::step(
         return track.target_id == 0 || obs.target_id == 0 || track.target_id == obs.target_id;
     };
 
+    // 关联门随时间放宽：相机一晃目标会短暂出画，回来时预测点可能已经偏了 0.5 m 以上。
+    // 门固定为 0.45 m 的话，这辆车会被判成"新车"再建一个 EKF（v1 里同一辆车被重建 5 次）。
+    // 板号仍然必须相容，所以放宽门不会把两辆车混起来。
+    const auto gate_for = [&](const MultiTargetTrack &track) {
+        const double missed = std::max(0.0, timestamp_seconds - track.last_seen_s);
+        return std::min(config_.association_gate_m + 0.60 * missed, 1.60);
+    };
+
     // 1) 全局贪心分配：把所有 (观测, 车, 距离) 按距离升序排，先来先占。
     //    一台车一帧最多认领 3 块板（四块板在侧面最多同时看到 2-3 块）。
     struct Candidate
@@ -124,7 +134,7 @@ std::vector<MultiTargetTrack>& MultiTargetTracker::step(
             if (!id_compatible(tracks_[t], world[o]))
                 continue;
             const double distance = associationCost(tracks_[t], world[o].position);
-            if (distance < config_.association_gate_m)
+            if (distance < gate_for(tracks_[t]))
             {
                 candidates.push_back({distance, static_cast<int>(o), static_cast<int>(t)});
             }
@@ -162,6 +172,8 @@ std::vector<MultiTargetTrack>& MultiTargetTracker::step(
         double best_distance = config_.spawn_gate_m;
         for (std::size_t t = 0; t < tracks_.size(); ++t)
         {
+            if (!id_compatible(tracks_[t], world[o]))
+                continue;
             const double distance = associationCost(tracks_[t], world[o].position);
             if (distance < best_distance)
             {
@@ -205,11 +217,28 @@ std::vector<MultiTargetTrack>& MultiTargetTracker::step(
         {
             continue;
         }
+        if (std::getenv("MT_DEBUG") != nullptr)
+        {
+            int nearest = -1;
+            double nearest_d = 1e9;
+            for (std::size_t t = 0; t < tracks_.size(); ++t)
+            {
+                const double d = associationCost(tracks_[t], world[o].position);
+                if (d < nearest_d) { nearest_d = d; nearest = static_cast<int>(t); }
+            }
+            std::fprintf(stderr, "[spawn] t=%.2f id=%d pos=(%.2f,%.2f) nearest=%d d=%.2f id_n=%d\n",
+                         timestamp_seconds, world[o].target_id, world[o].position.x(),
+                         world[o].position.y(), nearest, nearest_d,
+                         nearest >= 0 ? tracks_[static_cast<std::size_t>(nearest)].target_id : -1);
+        }
         MultiTargetTrack track;
         track.track_id = next_track_id_++;
         ++created_tracks_;
         track.created_s = timestamp_seconds;
-        track.tracker = std::make_unique<RotatingArmorTracker>(tracker_config_);
+        // 每辆车的 EKF 锁死自己的板号：换车由"新建一辆车"完成，不是老车改嫁。
+        TrackerConfig per_track = tracker_config_;
+        per_track.target_switch_enabled = false;
+        track.tracker = std::make_unique<RotatingArmorTracker>(per_track);
         track.last_position = world[o].position;
         track.target_id = world[o].target_id;
         track.last_seen_s = timestamp_seconds;
@@ -255,7 +284,10 @@ std::vector<MultiTargetTrack>& MultiTargetTracker::step(
             {
                 subset.push_back(observations[static_cast<std::size_t>(world[o].source_index)]);
                 track.last_position = world[o].position;
-                track.target_id = world[o].target_id;
+                // 板号一旦建立就不再改写：以前这里无条件覆盖，一辆车可以
+                // 悄悄从"左车的 3 号板"变成"右车的 1 号板"，正是用户看到的串车。
+                if (track.target_id == 0)
+                    track.target_id = world[o].target_id;
                 track.last_seen_s = timestamp_seconds;
                 ++track.observations;
             }
@@ -263,6 +295,17 @@ std::vector<MultiTargetTrack>& MultiTargetTracker::step(
         track.result = track.tracker->step(subset, gimbal, timestamp_seconds, measured_latency_s);
         track.diagnostics = track.tracker->diagnostics();
     }
+
+    // 3.5) 内部 tracker 换了板号：说明它已经跟到另一辆车身上了。
+    //      多目标这一层必须把这种车注销，否则"左车的 EKF"会一直挂着并吃掉右车的板。
+    tracks_.erase(std::remove_if(tracks_.begin(), tracks_.end(),
+                                 [](const MultiTargetTrack& track) {
+                                     if (track.target_id == 0)
+                                         return false;
+                                     const int inner = track.diagnostics.target_id;
+                                     return inner != 0 && inner != track.target_id;
+                                 }),
+                  tracks_.end());
 
     // 4) 注销：太久没观测的车直接删掉（把槽位留给新车）。
     tracks_.erase(std::remove_if(tracks_.begin(), tracks_.end(),
@@ -295,6 +338,15 @@ std::vector<MultiTargetTrack>& MultiTargetTracker::step(
                     continue;
                 }
                 if (!tracks_[i].tracker->initialized() || !tracks_[j].tracker->initialized())
+                {
+                    continue;
+                }
+                // 只有"同一个板号"的两条轨迹才可能是同一辆车被分成了两簇。
+                // 以前这里不看板号，v1 里两台车在世界系只差 0.3-0.6 m，
+                // 于是 id=1 的车被合并进 id=3 的车：这就是"两车 EKF 错乱"的入口。
+                const int id_i = tracks_[i].target_id;
+                const int id_j = tracks_[j].target_id;
+                if (id_i != 0 && id_j != 0 && id_i != id_j)
                 {
                     continue;
                 }

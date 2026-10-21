@@ -354,6 +354,9 @@ struct TrackerConfig
     // 槽位分配在两块同号板之间跳时偏移量跟着跳，画出来就是"转一半又卡回"。
     // 关掉后四块板严格共享 (cx, cy, R, phase)，同速度同方向同圆心。
     bool slot_offsets_enabled{false};
+    // 允许"锁定号消失、画面里出现别的号"时换目标（单目标模式用）。
+    // 多目标模式必须关：一辆车的 EKF 不许自己改板号。
+    bool target_switch_enabled{true};
 
     // === 状态机 ===
     int stable_updates{12};          // 连续接受多少帧才允许报 Stable

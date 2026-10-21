@@ -3291,7 +3291,14 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
     diagnostics_.phase = LockPhase::Tracking;
 
     // 目标切换：锁定编号连续两帧消失、且画面里有别的编号，才换目标。
-    if (locked_id_present)
+    // 多目标模式下这一条必须关掉：一辆车的 EKF 只认自己的板号，
+    // "这块板不见了"就换到另一辆车上去，正是用户看到的串车。换车由
+    // MultiTargetTracker 新建一辆车来处理，旧车按 prune 超时注销。
+    if (!config_.target_switch_enabled)
+    {
+        other_id_streak_ = 0;
+    }
+    else if (locked_id_present)
     {
         other_id_streak_ = 0;
     }

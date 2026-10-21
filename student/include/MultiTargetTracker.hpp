@@ -37,7 +37,9 @@ struct MultiTargetConfig
     // 那辆车（预测暂时不准时不要重复开一辆新车）。
     double spawn_gate_m{0.60};
     // 多久没有观测就注销这辆车。
-    double prune_after_s{0.80};
+    // 相机晃动时目标会短暂出画又回来；小于 1 秒就注销会让同一辆车
+    // 反复重建 EKF（v1 里那台 id=1 的车被重建了 5 次）。
+    double prune_after_s{2.00};
     // 两个跟踪中心的距离小于它就合并（保留更新次数多的那个）。
     double merge_gate_m{0.60};
     // 合并/注销只在两车都进入 Tracking 之后做，避免 Collecting 期间中心

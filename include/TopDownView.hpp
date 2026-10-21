@@ -59,7 +59,7 @@ struct TopDownOptions
     // true：画布中心跟车体中心，缩放按半径自适应；false：中心固定为世界原点。
     bool follow_target{true};
     double pixels_per_meter{200.0};
-    double follow_half_extent_m{0.55}; // follow 模式下画布半宽对应的米数
+    double follow_half_extent_m{1.80}; // follow 模式下画布半宽对应的米数（固定比例尺，不再自动缩放）
     double fallback_radius_m{0.25};    // 状态未初始化/半径非法时画板用的半径
 
     int trail_length{50};         // 轨迹保留帧数（0 = 不画也不存）

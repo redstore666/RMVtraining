@@ -717,20 +717,9 @@ const cv::Mat &TopDownView::render(const TopDownFrame &frame,
                 center_y_m_ = sum.y() / count;
             }
         }
+        // 比例尺固定：只跟中心，不随"有几辆车/车多远"自动放大缩小。
+        // 以前会按最远的车放大视野，于是同一段视频里网格一会儿 0.2 m 一会儿 0.5 m。
         double extent = std::max(options_.follow_half_extent_m, 2.2 * radius);
-        // 多目标：把视野放大到"所有车都放得下"，否则第二辆车会跑到画布外。
-        for (const TopDownFrame &other : others)
-        {
-            if (!other.has_state || !other.state.allFinite())
-                continue;
-            const double other_radius =
-                (std::isfinite(other.state(8)) && other.state(8) > 0.02)
-                    ? other.state(8)
-                    : options_.fallback_radius_m;
-            extent = std::max(extent, std::hypot(other.state(0) - center_x_m_,
-                                                 other.state(2) - center_y_m_) +
-                                          other_radius + 0.10);
-        }
         pixels_per_meter_ = 0.5 * std::min(width, height) * 0.88 / extent;
     }
     else
