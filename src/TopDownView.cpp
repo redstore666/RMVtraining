@@ -510,10 +510,46 @@ void drawDetectedBody(const Scene &scene, const TopDownFrame &frame, const TopDo
                      cv::LINE_AA);
         }
 
+        // 显示层去抖：单帧解的中心抖动 ~8 cm，5 帧中位把 PnP 白噪声压掉，
+        // 但原始解（细圆）仍然画出来，两者之差就是观测噪声的量级。
+        // 注：static 只因为 drawDetectedBody 是自由函数；这是显示层去抖，
+        // 单实例使用即可（回放/单窗口）。
+        static std::deque<Eigen::Vector2d> detected_centre_history;
+        static int detected_centre_slot = -1;
+        if (k != detected_centre_slot)
+        {
+            detected_centre_history.clear();
+            detected_centre_slot = k;
+        }
+        detected_centre_history.push_back(centre);
+        while (detected_centre_history.size() > 5)
+            detected_centre_history.pop_front();
+        Eigen::Vector2d centre_smooth = centre;
+        {
+            std::vector<double> xs;
+            std::vector<double> ys;
+            for (const Eigen::Vector2d &c : detected_centre_history)
+            {
+                xs.push_back(c.x());
+                ys.push_back(c.y());
+            }
+            std::sort(xs.begin(), xs.end());
+            std::sort(ys.begin(), ys.end());
+            const std::size_t mid = xs.size() / 2;
+            centre_smooth = Eigen::Vector2d(xs[mid], ys[mid]);
+        }
+        const double jitter_mm =
+            1000.0 * (centre - centre_smooth).norm();
+
         const cv::Point2d centre_px = scene.toPx(centre.x(), centre.y());
         cv::drawMarker(canvas, ip(centre_px), color, cv::MARKER_TILTED_CROSS,
                        static_cast<int>(std::lround(0.030 * scene.ppm)), primary ? 2 : 1);
-        textAt(canvas, fmt("det %zu R %.3f", cluster_points.size(), measured_radius),
+        // 去抖后的中心：实心点 + 抖动数字（mm）。数字比图更能说明"到底有多抖"。
+        const cv::Point2d smooth_px = scene.toPx(centre_smooth.x(), centre_smooth.y());
+        cv::circle(canvas, ip(smooth_px), std::max(2, static_cast<int>(std::lround(0.012 * scene.ppm))),
+                   color, cv::FILLED, cv::LINE_AA);
+        textAt(canvas, fmt("det %zu R %.3f  jit %.0fmm", cluster_points.size(), measured_radius,
+                           jitter_mm),
                ip(centre_px) + cv::Point(10, 16), (primary ? 0.42 : 0.36) * scene.scale, color,
                primary ? 1.4 : 1.0);
     }

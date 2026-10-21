@@ -389,13 +389,18 @@ struct TrackerConfig
     // 直接写 omega 会让合成 F/G/H 回归（预测延迟、高速自转、转速自判）失准：
     // 噪声量测把角速度的协方差信息绕过去了。默认关，用 --rate-tracklet 1 打开。
     // 实测打开后 v4 id3 PIX 91.5 -> 83.0（转速确实跟得更紧）。
-    bool rate_from_tracklet_enabled{false};
+    bool rate_from_tracklet_enabled{true};
     double rate_tracklet_max_step_m{0.08};
     double rate_tracklet_alpha{0.35};
     // 车本来不转时不要往 omega 里灌噪声：量到的转角和当前估计都接近 0 就不修正。
     double rate_tracklet_min_rate_rad_s{3.0};
     // 先攒够更新再动 omega；每次最多改这么多，避免一两帧噪声把转速带飞。
     int rate_tracklet_min_updates{12};
+    // 角速度量测的噪声：板心角度差的 1-sigma，以及下限（rad/s）。
+    double rate_tracklet_sigma_theta_rad{0.06};
+    double rate_tracklet_sigma_floor_rad_s{0.35};
+    // 用量测而不是硬写之后，这个开关可以默认打开（合成 F/G/H 仍然要绿）。
+    bool rate_measurement_enabled{true};
     // 只放大"角加速度"这一项过程噪声：让 omega 跟得上观测，又不让位置跳变。
     double process_spin_scale{1.0};
     double rate_tracklet_max_step_rad_s{0.4};
@@ -538,6 +543,7 @@ struct TrackerDiagnostics
     // 状态瞬间跳到观测上，观感就是"转一部分又卡回去"；这个计数用来区分
     // "滤波器在跟踪"和"滤波器被硬覆盖"。
     std::uint64_t single_plate_realigns{0};
+    std::uint64_t rate_measurements{0};
     std::uint64_t normal_anchors{0};
     std::uint64_t pair_phase_updates{0};
     std::uint64_t center_from_normal_updates{0};

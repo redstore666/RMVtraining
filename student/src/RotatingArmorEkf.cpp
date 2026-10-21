@@ -468,6 +468,40 @@ bool RotatingArmorEkf::updatePhase(double measured_world_yaw, double sigma_rad) 
     return true;
 }
 
+bool RotatingArmorEkf::updateRate(double measured_rad_s, double sigma_rad_s) {
+    if (!initialized_ || !std::isfinite(measured_rad_s) || !std::isfinite(sigma_rad_s) ||
+        !(sigma_rad_s > 0.0)) {
+        return false;
+    }
+    // Static 先验是硬约束（spin_pinned_）：那条路径上角速度就该是 0，
+    // 任何"转速量测"都只可能是板切换造成的假信号。
+    if (spin_pinned_) {
+        return false;
+    }
+
+    const double residual = measured_rad_s - state_(7);
+    const double s = covariance_(7, 7) + sigma_rad_s * sigma_rad_s;
+    if (!(s > 0.0)) {
+        return false;
+    }
+    const Eigen::Matrix<double, kStateDim, 1> k = covariance_.col(7) / s;
+
+    state_ = state_ + k * residual;
+
+    // Joseph 形式（标量观测）：P = (I - k e7') P (I - k e7')' + k sigma^2 k'
+    Eigen::Matrix<double, kStateDim, kStateDim> i_kh =
+        Eigen::Matrix<double, kStateDim, kStateDim>::Identity();
+    i_kh.row(7) -= k.transpose();
+    covariance_ = i_kh * covariance_ * i_kh.transpose() +
+                  sigma_rad_s * sigma_rad_s * (k * k.transpose());
+
+    if (!state_.allFinite() || !covariance_.allFinite()) {
+        reset();
+        return false;
+    }
+    return true;
+}
+
 bool RotatingArmorEkf::updatePhaseForSlot(double measured_world_yaw, double sigma_rad,
                                          int plate_slot) {
     if (!initialized_ || !std::isfinite(measured_world_yaw) || !std::isfinite(sigma_rad) ||

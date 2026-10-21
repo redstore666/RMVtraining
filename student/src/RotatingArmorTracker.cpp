@@ -2602,10 +2602,28 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                     if (warmed_up && on_circle && spinning && std::isfinite(omega_meas) &&
                         std::fabs(omega_meas) < 12.0)
                     {
-                        double delta = tracklet_alpha * (omega_meas - ekf_.state()(7));
-                        delta = std::clamp(delta, -config_.rate_tracklet_max_step_rad_s,
-                                           config_.rate_tracklet_max_step_rad_s);
-                        ekf_.setRate(std::clamp(ekf_.state()(7) + delta, -12.0, 12.0));
+                        // 作为 EKF 的第 5 维量测（带方差）灌进去，而不是 setRate 硬写：
+                        // 硬写会把 omega 的不确定度信息抹掉，合成 F/G/H 就是这么失准的。
+                        // 角度差噪声约 sigma_theta，除以 dt 得到角速度标准差；
+                        // 下限 0.35 rad/s，免得 dt 很小的时候量测被当成绝对真值。
+                        static const double sig_theta_env = [] {
+                            const char *v = std::getenv("RATE_SIGMA");
+                            return v ? std::atof(v) : -1.0;
+                        }();
+                        static const double sig_floor_env = [] {
+                            const char *v = std::getenv("RATE_FLOOR");
+                            return v ? std::atof(v) : -1.0;
+                        }();
+                        const double sig_theta = sig_theta_env > 0.0
+                                                    ? sig_theta_env
+                                                    : config_.rate_tracklet_sigma_theta_rad;
+                        const double sig_floor = sig_floor_env > 0.0
+                                                    ? sig_floor_env
+                                                    : config_.rate_tracklet_sigma_floor_rad_s;
+                        const double sigma_omega = std::max(0.35, sig_theta / dt);
+                        const double sigma_used = std::max(sigma_omega, sig_floor);
+                        ekf_.updateRate(omega_meas, sigma_used);
+                        diagnostics_.rate_measurements += 1;
                     }
                 }
             }

@@ -236,6 +236,12 @@ public:
     void rotatePhase(double delta) { state_(6) = wrapAngle(state_(6) + delta); }
     // 由多秒窗口批处理直接给定转速：窗口拟合的 ω 比逐帧差分稳得多。
     void setRate(double omega) { state_(7) = omega; }
+
+    // 角速度量测（EKF 的第 5 维量测）：只有 yaw_rate 这一维参与，H = e7。
+    // 与 updatePhase 同样用 Joseph 形式，保证协方差仍然半正定。
+    // 用它而不是 setRate()：setRate 是硬写，会把 omega 的不确定度信息丢掉，
+    // 合成 F/G/H 就是这么失准的。
+    bool updateRate(double measured_rad_s, double sigma_rad_s);
     const Covariance& covariance() const { return covariance_; }
     const EkfConfig& config() const { return config_; }
 

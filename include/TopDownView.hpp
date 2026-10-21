@@ -126,6 +126,7 @@ private:
     double pixels_per_meter_{200.0};
     double center_x_m_{0.0};
     double center_y_m_{0.0};
+
 };
 
 } // namespace rotating_armor
