@@ -2106,6 +2106,14 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
             continue;
         }
         noteObservationForNoise(chosen.position, timestamp_s);
+        // 整车重拟合用的滑窗样本（板心轨迹 = 一个圆）
+        body_samples_.push_back(
+            LockSample{timestamp_s, chosen.position, chosen.yaw, chosen.target_id, chosen.size, false});
+        while (!body_samples_.empty() &&
+               timestamp_s - body_samples_.front().timestamp_s > config_.body_refit_window_s)
+        {
+            body_samples_.pop_front();
+        }
         // 装甲板法向直接给出"从板心指向转轴"的方向：车心 = 板心 − R·n。
         // 这条式子不用槽位、不用相位，等于给车心一个只由板朝向量出来的独立量测。
         // 之前所有位置更新都是拿"滤波自己的相位"去算预测板位，法向只用于相位更新；
@@ -2913,6 +2921,30 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
     updateBodyFromPair(world);
     updateRadiusFromPairs(world);
     const int updates = associateAndUpdate(world, timestamp_seconds);
+    // 整车重拟合：小陀螺车原地自转，板心轨迹就是一个圆。用最近一段（滑窗）
+    // 的板心做圆拟合，把车心与半径整体校一次 —— 逐帧位置更新只能修相位，
+    // 修不了"圆心整体偏了 0.2 m"这种系统误差；长窗口拟合能。
+    if (config_.body_refit_enabled && ekf_.initialized() &&
+        diagnostics_.phase == LockPhase::Tracking)
+    {
+        ++body_refit_countdown_;
+        if (body_refit_countdown_ >= config_.body_refit_every)
+        {
+            body_refit_countdown_ = 0;
+            const CircleFit fit = fitArmorCircle(body_samples_);
+            const int count_now = std::max(config_.ekf.plate_count, 1);
+            if (fit.ok && static_cast<int>(body_samples_.size()) >= config_.body_refit_min_samples &&
+                fit.residual <= config_.body_refit_max_residual &&
+                fit.radius >= config_.radius_min_m && fit.radius <= config_.radius_max_m)
+            {
+                const Eigen::Vector3d fitted_center(fit.cx, fit.cy, ekf_.state()(4));
+                ekf_.shiftCenter(fitted_center - ekf_.state().head<3>().eval());
+                ekf_.setRadius(fit.radius);
+                ++diagnostics_.body_refits;
+                (void)count_now;
+            }
+        }
+    }
     diagnostics_.updates_this_frame = updates;
     last_updates_ = updates;
     if (updates > 0)

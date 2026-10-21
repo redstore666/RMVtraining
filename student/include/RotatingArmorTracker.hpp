@@ -224,6 +224,13 @@ struct TrackerConfig
         bool slot_from_normal_enabled{false};
     // 由板法向反推车心：c = p − R·n（true = 用，默认开）。
     bool center_from_normal_enabled{false};
+    // 整车"原地自转"假设：车心当准静态量，更新后低通拉回去（默认开）。
+    // 整车重拟合：用滑动窗口里的板心圆拟合，定期校准车心与半径。
+    bool body_refit_enabled{false};
+    int body_refit_every{25};
+    int body_refit_min_samples{60};
+    double body_refit_max_residual{0.05};
+    double body_refit_window_s{2.0};
     double center_from_normal_sigma_m{0.05};
     double center_from_normal_gate_m{0.15};
     double center_from_normal_max_rate_rad_s{2.5};
@@ -399,6 +406,7 @@ struct TrackerDiagnostics
     // "滤波器在跟踪"和"滤波器被硬覆盖"。
     std::uint64_t single_plate_realigns{0};
     std::uint64_t center_from_normal_updates{0};
+    std::uint64_t body_refits{0};
     int consecutive_updates{0};
     int missed_frames{0};
     double observation_noise_m{0.0}; // 本帧使用的观测噪声 sigma（m）
@@ -663,6 +671,8 @@ private:
     // 最近一次成功锁定用到的量（诊断/测试用）
     double locked_radius_m_{0.0};
     double locked_spin_rad_s_{0.0};
+    int body_refit_countdown_{0};
+    std::deque<LockSample> body_samples_;
     bool has_pair_relock_{false};
     double last_pair_relock_s_{0.0};
     double timestamp_s_{0.0};

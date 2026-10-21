@@ -172,6 +172,7 @@ namespace
         int antianchor{-1};
         double normal_tiebreak{-1.0};
         int joint_pair{-1};
+        int body_fit{-1};  // 1 开 0 关 -1 用默认：滑窗整车重拟合（校准车心+半径）
         int pair_body{-1};  // 1 开 0 关 -1 用默认，控制双板整车求解  // 1 开 0 关 -1 用默认，控制按槽位一致的相位更新
         bool pair_radius{false};
         bool phase_anchor{true};
@@ -305,6 +306,10 @@ namespace
             else if (arg == "--gate")
             {
                 args.gate_m = std::atof(next("--gate").c_str());
+            }
+            else if (arg == "--body-fit")
+            {
+                args.body_fit = std::atoi(next("--body-fit").c_str());
             }
             else if (arg == "--pair-body")
             {
@@ -643,6 +648,10 @@ int main(int argc, char **argv)
     if (args.slot_phase >= 0)
     {
         tracker_config.slot_phase_update_enabled = args.slot_phase != 0;
+    }
+    if (args.body_fit >= 0)
+    {
+        tracker_config.body_refit_enabled = args.body_fit != 0;
     }
     if (args.pair_body >= 0)
     {
@@ -1572,16 +1581,39 @@ int main(int argc, char **argv)
                                              frame_index, pose_x.detection.target_id, d_best);
                                 continue;
                             }
+                            // 法向反推车心：c = p - R*n（n = 板外法向，云台 yaw=0 时与
+                            // position_gimbal_m 同系，world 与之只差一个绕 z 的旋转）。
+                            double cn_x = 0.0;
+                            double cn_y = 0.0;
+                            {
+                                const Eigen::Vector3d p_g(pose_x.position_gimbal_m[0],
+                                                          pose_x.position_gimbal_m[1],
+                                                          pose_x.position_gimbal_m[2]);
+                                const Eigen::Vector3d n_g(pose_x.normal_gimbal[0],
+                                                          pose_x.normal_gimbal[1],
+                                                          pose_x.normal_gimbal[2]);
+                                const double nn = std::hypot(n_g.x(), n_g.y());
+                                if (nn > 1.0e-6)
+                                {
+                                    const double r_now = ekf_state(8);
+                                    cn_x = p_g.x() - r_now * n_g.x() / nn;
+                                    cn_y = p_g.y() - r_now * n_g.y() / nn;
+                                }
+                            }
                             std::fprintf(stderr,
                                          "[pix] f=%d id=%d dx=%+.1f dy=%+.1f d=%.1f slot=%d "
-                                         "bx=%.0f by=%.0f u=%d rj=%d nis=%.1f gd=%.3f\n",
+                                         "bx=%.0f by=%.0f u=%d rj=%d nis=%.1f gd=%.3f "
+                                         "c=(%.2f,%.2f,%.2f) R=%.3f yaw=%+.2f om=%+.2f cn=(%.2f,%.2f)\n",
                                          frame_index, pose_x.detection.target_id,
                                          px[0].x - box.x, px[0].y - box.y,
                                          cv::norm(cv::Point2f(px[0]) - box), slot_best, box.x, box.y,
                                          diagnostics.updates_this_frame,
                                          diagnostics.rejected_this_frame,
                                          diagnostics.last_nis,
-                                         diagnostics.best_gate_distance_m);
+                                         diagnostics.best_gate_distance_m,
+                                         ekf_state(0), ekf_state(2), ekf_state(4), ekf_state(8),
+                                         ekf_state(6), ekf_state(7),
+                                         cn_x, cn_y);
                         }
                     }
                     draw_body(ekf_state, diagnostics.aim_slot, cv::Scalar(235, 120, 60),
