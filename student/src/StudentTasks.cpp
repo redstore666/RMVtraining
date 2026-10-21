@@ -663,6 +663,11 @@ namespace
         bool has_center{false};
         std::chrono::steady_clock::time_point last_seen{};
         bool has_last_seen{false};
+        // 图像域时间平均：连续帧的角点做 EMA，再解一次 PnP。
+        // 166 fps 下每帧只转 ~1.4°，相邻帧几乎是同一个姿态；逐帧解算的
+        // 2~3 cm 抖动主要来自 4 点共面相位的病态，而不是物体真的动了。
+        std::array<cv::Point2f, 4> smoothed_corners{};
+        bool has_smoothed{false};
     };
 
     bool solvePoseForTrack(const std::vector<cv::Point3f> &object_points,
@@ -670,7 +675,8 @@ namespace
                            const cv::Mat &camera_matrix,
                            const cv::Mat &distortion_coefficients,
                            int target_id, ArmorSize size,
-                           cv::Mat &rvec, cv::Mat &tvec)
+                           cv::Mat &rvec, cv::Mat &tvec,
+                           double depth_prior = 0.0)
     {
         using TrackKey = std::pair<int, int>;
         static std::map<TrackKey, TrackedPoseHistory> history_by_track;
@@ -722,7 +728,32 @@ namespace
             return false;
 
         int pick = best_error_index;
-        if (count >= 2 && std::isfinite(errors[0]) && std::isfinite(errors[1]) &&
+        // 深度先验：用板的竖直边（灯条端点）长度给出的深度。俯仰不变，
+        // 所以它不受绕竖轴旋转的 cos(yaw) 衰减影响，比横向宽度可靠。
+        if (depth_prior > 0.0 && count >= 1)
+        {
+            int best_depth_index = -1;
+            double best_dz = 0.0;
+            for (int i = 0; i < count; ++i)
+            {
+                if (!std::isfinite(errors[static_cast<std::size_t>(i)]))
+                    continue;
+                const double dz = std::fabs(tvecs[static_cast<std::size_t>(i)].at<double>(2) -
+                                            depth_prior);
+                if (best_depth_index < 0 || dz < best_dz)
+                {
+                    best_depth_index = i;
+                    best_dz = dz;
+                }
+            }
+            if (best_depth_index >= 0)
+                pick = best_depth_index;
+            if (std::getenv("DEPTH_DEBUG") != nullptr)
+                std::fprintf(stderr, "[depth] id=%d prior=%.3f pick=%.3f dz=%.3f\n", target_id,
+                             depth_prior, tvecs[static_cast<std::size_t>(pick)].at<double>(2),
+                             best_dz);
+        }
+        else if (count >= 2 && std::isfinite(errors[0]) && std::isfinite(errors[1]) &&
             std::fabs(errors[0] - errors[1]) <= 3.0)
         {
             const char *mode = std::getenv("IPPE_PICK");
@@ -897,8 +928,60 @@ std::vector<ArmorPose> armor_solve(const std::vector<ArmorDetection> &detections
         }
 
         // 图像点：corners 本身就是 TL,TR,BR,BL 顺序，直接搬进 vector
-        const std::vector<cv::Point2f> image_points(det.corners.begin(),
-                                                    det.corners.end());
+        std::vector<cv::Point2f> image_points(det.corners.begin(),
+                                              det.corners.end());
+
+        // ---- 图像域时间平均（CORNER_SMOOTH_ALPHA，0/未设 = 关闭）----
+        // 在角点上平均而不是在三维位姿上平均：噪声本来就是角点层面的，
+        // 先解 PnP 再平滑会把病态的深度歧义一起平均进来（试过，无效）。
+        static const char *corner_smooth_env = std::getenv("CORNER_SMOOTH_ALPHA");
+        static const double corner_smooth_alpha =
+            corner_smooth_env != nullptr ? std::atof(corner_smooth_env) : 0.0;
+        if (corner_smooth_alpha > 0.0 && corner_smooth_alpha <= 1.0)
+        {
+            // 与 solvePoseForTrack 共用同一份历史（同 id/尺寸），避免多目标互相污染。
+            static std::map<std::pair<int, int>, std::array<cv::Point2f, 4>> smooth_history;
+            auto &history = smooth_history[{det.target_id, static_cast<int>(det.size)}];
+            static std::map<std::pair<int, int>, std::chrono::steady_clock::time_point>
+                smooth_time;
+            auto &last_time = smooth_time[{det.target_id, static_cast<int>(det.size)}];
+            const auto now = std::chrono::steady_clock::now();
+            bool reset = true;
+            if (history[0].x != 0.0F || history[0].y != 0.0F)
+            {
+                double max_shift = 0.0;
+                for (std::size_t k = 0; k < 4; ++k)
+                    max_shift = std::max(max_shift,
+                                         cv::norm(det.corners[k] - history[k]));
+                const bool stale = last_time.time_since_epoch().count() != 0 &&
+                                   now - last_time > std::chrono::milliseconds(120);
+                reset = stale || max_shift > 28.0; // 换板/跳变则不跨帧平均
+            }
+            for (std::size_t k = 0; k < 4; ++k)
+            {
+                if (reset)
+                    history[k] = det.corners[k];
+                else
+                    history[k] = history[k] * static_cast<float>(1.0 - corner_smooth_alpha) +
+                                 det.corners[k] * static_cast<float>(corner_smooth_alpha);
+                image_points[k] = history[k];
+            }
+            last_time = now;
+        }
+
+        // ---- 深度先验：用竖直边（灯条端点）长度反推深度（DEPTH_FROM_EDGES=1）----
+        static const bool depth_from_edges = std::getenv("DEPTH_FROM_EDGES") != nullptr;
+        double depth_prior = 0.0;
+        if (depth_from_edges)
+        {
+            const double plate_h = 0.057;
+            const double top_h = cv::norm(image_points[0] - image_points[3]);
+            const double bottom_h = cv::norm(image_points[1] - image_points[2]);
+            const double h_px = 0.5 * (top_h + bottom_h);
+            const double fy = camera.camera_matrix.at<double>(1, 1);
+            if (h_px > 4.0 && fy > 1.0)
+                depth_prior = fy * plate_h / h_px;
+        }
 
         // PnP：4 个共面点。IPPE 可能返回两个相近重投影误差的姿态解；
         // 按目标编号/尺寸维护历史法向，避免逐帧在两个解之间跳变。
@@ -906,7 +989,8 @@ std::vector<ArmorPose> armor_solve(const std::vector<ArmorDetection> &detections
         const bool ok = solvePoseForTrack(object_points, image_points,
                                           camera.camera_matrix,
                                           camera.distortion_coefficients,
-                                          det.target_id, det.size, rvec, tvec);
+                                          det.target_id, det.size, rvec, tvec,
+                                          depth_prior);
         if (!ok)
         {
             ++g_pnp_fail; // test
