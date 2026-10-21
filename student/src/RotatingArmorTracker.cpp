@@ -2109,6 +2109,30 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
         // 外法向方向 = phase + pi；因为 updatePhase 的残差按 2pi/N 折叠，
         // pi = 2*(2pi/N)（N=4）恰好是整数个周期，所以直接用观测法向当相位量测。
         // 逐帧位置更新推相位会被"圆心偏 0.2 m"带歪，法向不受深度误差影响。
+        // 相位用"板心在拟合圆上的角度"量测：phase = atan2(p−c) − pi。
+        // 这个量测只用位置、不吃噪声很大的法向；而且它只动相位(第 6 行)，
+        // 不会像逐帧位置更新那样把车心一起拖走（实测全片段漂 0.4 m）。
+        if (config_.circle_phase_enabled && ekf_.initialized())
+        {
+            const double dx = chosen.position.x() - ekf_.state()(0);
+            const double dy = chosen.position.y() - ekf_.state()(2);
+            if (std::hypot(dx, dy) > 0.05)
+            {
+                const double phase_meas = std::atan2(dy, dx) - kPi;
+                const Eigen::Vector2d now_c(ekf_.state()(0), ekf_.state()(2));
+                const Eigen::Vector3d plate_before =
+                    platePosition(ekf_.state(), best_slot, std::max(config_.ekf.plate_count, 1));
+                if (ekf_.updatePhase(phase_meas, config_.circle_phase_sigma_rad) &&
+                    config_.phase_anti_anchor)
+                {
+                    const Eigen::Vector3d plate_after =
+                        platePosition(ekf_.state(), best_slot, std::max(config_.ekf.plate_count, 1));
+                    ekf_.shiftCenter(Eigen::Vector3d(
+                        (plate_before.x() - plate_after.x()) + (now_c.x() - ekf_.state()(0)),
+                        (plate_before.y() - plate_after.y()) + (now_c.y() - ekf_.state()(2)), 0.0));
+                }
+            }
+        }
         if (config_.normal_phase_enabled && chosen.has_yaw && std::isfinite(chosen.yaw))
         {
             bool facing = true;

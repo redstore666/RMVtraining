@@ -225,6 +225,8 @@ struct TrackerConfig
     // 由板法向反推车心：c = p − R·n（true = 用，默认开）。
     bool center_from_normal_enabled{false};
     // 相位用板法向直接量测（default 关，--normal-phase 1 打开）
+    bool circle_phase_enabled{false};
+    double circle_phase_sigma_rad{0.12};
     bool normal_phase_enabled{false};
     double normal_phase_sigma_rad{0.35};
     double normal_phase_min_facing{0.30};

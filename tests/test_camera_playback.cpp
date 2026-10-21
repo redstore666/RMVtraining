@@ -172,6 +172,7 @@ namespace
         int antianchor{-1};
         double normal_tiebreak{-1.0};
         int joint_pair{-1};
+        int circle_phase{-1};
         int normal_phase{-1};  // 1 开 0 关 -1 用默认：用板法向直接量测相位
         int body_fit{-1};  // 1 开 0 关 -1 用默认：滑窗整车重拟合（校准车心+半径）
         int pair_body{-1};  // 1 开 0 关 -1 用默认，控制双板整车求解  // 1 开 0 关 -1 用默认，控制按槽位一致的相位更新
@@ -307,6 +308,10 @@ namespace
             else if (arg == "--gate")
             {
                 args.gate_m = std::atof(next("--gate").c_str());
+            }
+            else if (arg == "--circle-phase")
+            {
+                args.circle_phase = std::atoi(next("--circle-phase").c_str());
             }
             else if (arg == "--normal-phase")
             {
@@ -660,6 +665,10 @@ int main(int argc, char **argv)
     if (args.slot_phase >= 0)
     {
         tracker_config.slot_phase_update_enabled = args.slot_phase != 0;
+    }
+    if (args.circle_phase >= 0)
+    {
+        tracker_config.circle_phase_enabled = args.circle_phase != 0;
     }
     if (args.normal_phase >= 0)
     {
