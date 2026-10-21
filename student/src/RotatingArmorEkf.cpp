@@ -196,6 +196,20 @@ bool RotatingArmorEkf::predict(double dt) {
     const StateJacobian f = transitionJacobian(dt);
     state_ = transition(state_, dt);
     Covariance q = processNoise(dt, config_.process);
+    if (config_.adaptive_process_noise)
+    {
+        // 平稳时缓慢回落；机动时由 update() 把它顶上去。
+        maneuver_scale_ = 1.0 + config_.adaptive_decay * (maneuver_scale_ - 1.0);
+        const double s = std::clamp(maneuver_scale_, 1.0, config_.adaptive_scale_max);
+        if (s > 1.0)
+        {
+            // 只放大"速度/角速度"：位置行不动。位置行跟着放大等于允许状态瞬间
+            // 跳变，静止目标会因此漂移（合成 ekf_init_contract 的 Static 收敛断言）。
+            q(1, 1) *= s;
+            q(3, 3) *= s;
+            q(7, 7) *= s;
+        }
+    }
     if (spin_pinned_) {
         // Static 是硬约束：把角速度的整个噪声块一起清零。否则随机游走会在几十帧内
         // 把"声明不转"磨掉——合成真值测试里 300 帧可漂到 omega=0.10 rad/s、yaw 偏
@@ -211,6 +225,19 @@ bool RotatingArmorEkf::predict(double dt) {
     }
     covariance_ = f * covariance_ * f.transpose() + q;
     return true;
+}
+
+void RotatingArmorEkf::noteInnovation(double nis) {
+    if (!config_.adaptive_process_noise || !std::isfinite(nis) || nis < 0.0) {
+        return;
+    }
+    // NIS / floor > 1 说明"当前过程噪声解释不了这次观测" —— 车在机动。
+    // 用 EMA 把它变成过程噪声的放大倍数：机动时立刻放大（跟得上瞬时变化），
+    // 平稳时 predict() 里缓慢回落（半径/静态中心仍靠平均，不抖）。
+    const double ratio = std::clamp(nis / std::max(1.0e-6, config_.adaptive_nis_floor),
+                                    1.0, config_.adaptive_scale_max);
+    maneuver_scale_ += config_.adaptive_alpha * (ratio - maneuver_scale_);
+    maneuver_scale_ = std::clamp(maneuver_scale_, 1.0, config_.adaptive_scale_max);
 }
 
 bool RotatingArmorEkf::updateCartesian(const ArmorObservation& observation, int plate_slot) {
@@ -235,6 +262,8 @@ bool RotatingArmorEkf::updateCartesian(const ArmorObservation& observation, int 
     const CartesianCovariance r = observation.sigma_position_m * observation.sigma_position_m *
                                   CartesianCovariance::Identity();
     const CartesianCovariance s = h_jacobian * covariance_ * h_jacobian.transpose() + r;
+    const Measurement residual_cart = observation.position - h;
+    noteInnovation(residual_cart.dot(s.ldlt().solve(residual_cart)));
     const CartesianGain k = covariance_ * h_jacobian.transpose() * s.inverse();
     State candidate = state_ + k * (observation.position - h);
     candidate(6) = wrapAngle(candidate(6));

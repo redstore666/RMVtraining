@@ -1216,6 +1216,24 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
             radius = config_.radius_prior_small_m;
         }
     }
+    // 半径用"慢"估计：单次锁定解出的半径可能差 0.1 m（v4 实测在 0.309/0.287/0.200
+    // 之间整段跳），直接拿来用会让蓝圈半径每隔几秒变一次。这里用一个很慢的
+    // 一阶滤波把每次锁定的候选半径平均进去，锁定/重锁都不清掉，
+    // 半径就只在长时间一致时才改变。
+    if (config_.radius_track_smooth_alpha > 0.0)
+    {
+        if (!(radius_track_m_ > 0.0) ||
+            radius < config_.radius_min_m || radius > config_.radius_max_m)
+        {
+            radius_track_m_ = radius;
+        }
+        else
+        {
+            radius_track_m_ +=
+                config_.radius_track_smooth_alpha * (radius - radius_track_m_);
+        }
+        radius = radius_track_m_;
+    }
     prior.radius_m = radius;
     prior.plate_slot = 0; // 槽位基准任意：相对相位才是物理量
     if (std::isfinite(config_.forced_omega_rad_s))
@@ -1248,6 +1266,15 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
         // 双板解出的几何直接覆盖：半径来自两块板的弦长，中心来自射线交点。
         prior.radius_m = pair_radius;
         prior.radius_sigma_m = std::min(config_.radius_sigma_m, 0.05);
+        if (config_.radius_track_smooth_alpha > 0.0)
+        {
+            if (!(radius_track_m_ > 0.0))
+                radius_track_m_ = pair_radius;
+            else
+                radius_track_m_ +=
+                    config_.radius_track_smooth_alpha * (pair_radius - radius_track_m_);
+            prior.radius_m = radius_track_m_;
+        }
         prior.radius_fixed = config_.freeze_radius;
         observation.position = pair_position;
     }
@@ -1869,7 +1896,7 @@ bool RotatingArmorTracker::updateBodyFromPair(const std::vector<WorldObservation
         const double radius_next = std::clamp(
             ekf_.state()(8) + config_.pair_body_radius_gain * (radius_meas - ekf_.state()(8)),
             config_.radius_min_m, config_.radius_max_m);
-        ekf_.setRadius(radius_next);
+        applySlowRadius(radius_next);
     }
     ++diagnostics_.pair_body_solves;
     return true;
@@ -1946,7 +1973,7 @@ void RotatingArmorTracker::updateRadiusFromPairs(const std::vector<WorldObservat
                     radius_updates_ == 0 ? 1.0 : config_.radius_update_alpha;
                 const double current = ekf_.state()(8);
                 target_radius = current + alpha * (radius - current);
-                ekf_.setRadius(target_radius);
+                applySlowRadius(target_radius);
                 ++radius_updates_;
             }
             else
@@ -1954,11 +1981,96 @@ void RotatingArmorTracker::updateRadiusFromPairs(const std::vector<WorldObservat
                 // 不走 updateRadius 的协方差更新：每次改半径都会重写整块协方差，
                 // 高速自转场景里会连累 yaw 的估计（合成 G 组 2 rad/s 射击点偏 30 cm）。
                 // 弦长本身已经是几何量，低通后直接写状态就够。
-                ekf_.setRadius(target_radius);
+                applySlowRadius(target_radius);
             }
             return;
         }
     }
+}
+
+void RotatingArmorTracker::noteChordRadius(const std::vector<WorldObservation>& world,
+                                           double timestamp_s)
+{
+    if (config_.radius_track_smooth_alpha <= 0.0)
+    {
+        return;
+    }
+    for (std::size_t i = 0; i < world.size(); ++i)
+    {
+        if (world[i].target_id == 0 || !world[i].has_yaw)
+            continue;
+        for (std::size_t j = i + 1; j < world.size(); ++j)
+        {
+            if (world[j].target_id != world[i].target_id || !world[j].has_yaw)
+                continue;
+            const double dpsi = std::fabs(foldPeriod(world[j].yaw - world[i].yaw, 2.0 * kPi));
+            const bool adjacent =
+                dpsi > 0.5 * kPi - 0.45 && dpsi < 0.5 * kPi + 0.45;
+            const bool opposite =
+                dpsi > kPi - 0.45;
+            if (!adjacent && !opposite)
+                continue;
+            const Eigen::Vector3d d = world[j].position - world[i].position;
+            const double chord = std::hypot(d.x(), d.y());
+            const double half = adjacent ? 0.25 * kPi : 0.5 * kPi;
+            const double radius = chord / (2.0 * std::sin(half));
+            if (!(radius > config_.radius_min_m && radius < config_.radius_max_m))
+                continue;
+            LockSample sample{};
+            sample.timestamp_s = timestamp_s;
+            sample.position = Eigen::Vector3d(radius, 0.0, 0.0);
+            sample.target_id = world[i].target_id;
+            chord_radius_samples_.push_back(sample);
+        }
+    }
+    while (!chord_radius_samples_.empty() &&
+           timestamp_s - chord_radius_samples_.front().timestamp_s > config_.radius_chord_window_s)
+    {
+        chord_radius_samples_.pop_front();
+    }
+}
+
+void RotatingArmorTracker::applySlowRadius(double candidate_radius)
+{
+    if (!std::isfinite(candidate_radius) || candidate_radius <= 0.0)
+    {
+        return;
+    }
+    if (!ekf_.initialized())
+    {
+        return;
+    }
+    const double alpha = config_.radius_track_smooth_alpha;
+    if (alpha <= 0.0)
+    {
+        ekf_.setRadius(candidate_radius);
+        return;
+    }
+    if (!(radius_track_m_ > 0.0))
+    {
+        radius_track_m_ = ekf_.state()(8);
+    }
+    double target = candidate_radius;
+    if (chord_radius_samples_.size() >= 10)
+    {
+        // 有弦长证据时以它为准：它对法向噪声不敏感，是几何真值。
+        std::vector<double> chords;
+        chords.reserve(chord_radius_samples_.size());
+        for (const LockSample& s : chord_radius_samples_)
+            chords.push_back(s.position.x());
+        const std::size_t mid = chords.size() / 2;
+        std::nth_element(chords.begin(), chords.begin() + static_cast<std::ptrdiff_t>(mid),
+                         chords.end());
+        target = chords[mid];
+        // 弦长本身很准，收敛可以稍快一点。
+        radius_track_m_ += std::min(1.0, 2.0 * alpha) * (target - radius_track_m_);
+    }
+    else
+    {
+        radius_track_m_ += alpha * (target - radius_track_m_);
+    }
+    radius_track_m_ = std::max(config_.radius_min_m, std::min(config_.radius_max_m, radius_track_m_));
+    ekf_.setRadius(radius_track_m_);
 }
 
 // 掉线快照续接：注销后不久、同一编号又出现时，直接恢复掉线前的状态，
@@ -3345,6 +3457,7 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
     }
     updateBodyFromPair(world);
     updateRadiusFromPairs(world);
+    noteChordRadius(world, timestamp_seconds);
     const int updates = associateAndUpdate(world, timestamp_seconds);
     // 整车重拟合：小陀螺车原地自转，板心轨迹就是一个圆。用最近一段（滑窗）
     // 的板心做圆拟合，把车心与半径整体校一次 —— 逐帧位置更新只能修相位，
@@ -3376,7 +3489,7 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
             {
                 const Eigen::Vector3d fitted_center(fit.cx, fit.cy, ekf_.state()(4));
                 ekf_.shiftCenter(fitted_center - ekf_.state().head<3>().eval());
-                ekf_.setRadius(fit.radius);
+                applySlowRadius(fit.radius);
                 refit_center_ = Eigen::Vector2d(fit.cx, fit.cy);
                 refit_center_valid_ = true;
                 ++diagnostics_.body_refits;
@@ -3414,7 +3527,7 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
                 }
                 ekf_.shiftCenter(Eigen::Vector3d(fit.cx - ekf_.state()(0),
                                                  fit.cy - ekf_.state()(2), 0.0));
-                ekf_.setRadius(fit.radius);
+                applySlowRadius(fit.radius);
                 ++diagnostics_.body_circles;
             }
         }
@@ -3492,7 +3605,7 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
                 {
                     ekf_.shiftCenter(Eigen::Vector3d(fit.center.x() - ekf_.state()(0),
                                                      fit.center.y() - ekf_.state()(2), 0.0));
-                    ekf_.setRadius(fit.radius);
+                    applySlowRadius(fit.radius);
                     if (std::getenv("BATCH_NO_RATE") == nullptr)
                     {
                         ekf_.setRate(fit.rate_rad_s);

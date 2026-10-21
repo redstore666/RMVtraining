@@ -357,6 +357,11 @@ struct TrackerConfig
     // 允许"锁定号消失、画面里出现别的号"时换目标（单目标模式用）。
     // 多目标模式必须关：一辆车的 EKF 不许自己改板号。
     bool target_switch_enabled{true};
+    // 半径的"慢"估计：>0 时用一阶滤波把每次锁定解出的半径平均进去（每次锁定的
+    // alpha），重锁不清零。半径要稳定（偏平均），速度要跟手（偏瞬时）。
+    double radius_track_smooth_alpha{0.06};
+    // 弦长证据的滑动窗口（秒）。窗口越长半径越稳，但适应真实尺寸变化越慢。
+    double radius_chord_window_s{8.0};
 
     // === 状态机 ===
     int stable_updates{12};          // 连续接受多少帧才允许报 Stable
@@ -650,6 +655,14 @@ private:
     static BodyBatchFit fitBodyBatch(const std::deque<LockSample>& samples, int plate_count,
                                     double omega_hint, double config_coverage_min,
                                     bool fold_phase, bool alias_gate);
+    // 半径的"慢"通道：所有想改半径的地方都走这里，先过一阶滤波再写进 EKF。
+    // 直接 setRadius(fit.radius) 会让半径在重拟合时整段跳变（v4 实测 0.28->0.15）。
+    void applySlowRadius(double candidate_radius);
+    // 同帧两块相邻板（法向差 ~90°）的弦长直接给出半径：R = 弦/(2 sin(45°))。
+    // 这是最稳的一路半径证据——只依赖两个板心位置，不依赖板法向精度。
+    void noteChordRadius(const std::vector<WorldObservation>& world, double timestamp_s);
+    std::deque<LockSample> chord_radius_samples_; // 只要 timestamp_s / position(0) 用作 R 缓存
+
     static CircleFit fitCenterFixedRadius(const std::deque<LockSample>& samples, double radius,
                                           const CircleFit& initial);
 
@@ -772,6 +785,8 @@ private:
     // 上一次被接受更新的槽位：用来判断"同一块板连续可见"（换板时不能用板面法向
     // 约束车体 yaw）。
     int last_updated_slot_{-1};
+    // 半径的慢估计（见 radius_track_smooth_alpha）。跨锁定保留，故意不在 reset() 里清。
+    double radius_track_m_{-1.0};
     Eigen::Vector3d last_accepted_position_{0.0, 0.0, 0.0};
     bool has_last_accepted_position_{false};
     // 相邻两帧观测的位移 → 切向速度 → ω（不依赖相位/槽位，见 docs）

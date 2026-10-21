@@ -110,6 +110,14 @@ struct EkfConfig {
     // 的回归表——打开后 v4 从 90.0 降到 86.1 px，但合成 F/G 与首帧契约的
     // 静态半径会退化（瞄准点在高速自转下落到相邻板）。
     bool spherical_measurement_enabled{false};
+    // 机动自适应过程噪声：用新息(NIS)当"机动探测器"。快速平移/自转时 NIS 抬高，
+    // 就把速度/角速度的过程噪声放大（跟得上瞬时变化）；平稳时收回 1.0
+    // （半径和静态中心靠量测平均，不抖）。这是"平均性 vs 瞬时性"的折中。
+    bool adaptive_process_noise{true};
+    double adaptive_nis_floor{9.0}; // 3 维量测时 NIS 的期望值就是 3；取 3 倍才不会被正常噪声trigger   // NIS 到这个量级算"模型跟得上"
+    double adaptive_scale_max{80.0};
+    double adaptive_alpha{0.35};      // 每次更新的 EMA 系数
+    double adaptive_decay{0.990};     // 每帧预测的缓慢回落
 };
 
 class RotatingArmorEkf {
@@ -145,12 +153,17 @@ public:
     // 合法的空推进（同一时间戳的重复帧），返回 true。
     bool predict(double dt);
 
+    // 当前机动放大倍数（1.0 = 不放大），只用于诊断。
+    double maneuverScale() const { return maneuver_scale_; }
+
     // 用一帧观测做校正。slot 由调用方给出（本步不做关联）。
     // 输入非法、未初始化、或内部出现非有限值时返回 false；后者会同时 reset()，
     // 让调用方重新锁定，而不是继续把 NaN 传播出去。
     bool update(const ArmorObservation& observation, int plate_slot);
     // 旧的笛卡尔 3 维量测（球坐标版本的对照实现）。
     bool updateCartesian(const ArmorObservation& observation, int plate_slot);
+    // 用新息驱动机动自适应过程噪声（见 EkfConfig::adaptive_process_noise）。
+    void noteInnovation(double nis);
 
     // 用"板面法向的世界朝角"直接观测车体 yaw 的一步更新。
     //
@@ -233,6 +246,8 @@ private:
     bool initialized_{false};
     // 半径钉死：位置更新不动 R（见 EkfInitPrior::radius_fixed 的说明）。
     bool radius_fixed_{true};
+    // 机动放大倍数（adaptive_process_noise 用），跨帧保持。
+    double maneuver_scale_{1.0};
     double radius_prior_m_{0.0};
     bool phase_resolved_{false};
     // spin == Static 时置位：角速度的初始方差与过程噪声都被钉成 0，使它成为硬约束。
