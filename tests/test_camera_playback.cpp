@@ -1795,12 +1795,32 @@ int main(int argc, char **argv)
                                 ekf_state(6) + aim_period_dbg * std::max(aim_slot_dbg, 0);
                             const double aim_px_dbg = ekf_state(0) - ekf_state(8) * std::cos(aim_phase_dbg);
                             const double aim_py_dbg = ekf_state(2) - ekf_state(8) * std::sin(aim_phase_dbg);
+                            // 相位残差：观测板相对车心的角度 vs 最近那块模型板的角度。
+                            // 只差 ±90° 折叠以内的部分——折到 ±45°。用来区分
+                            // "槽位选错（跳一格，约 ±90°）" 和 "omega 有偏（缓慢漂移）"。
+                            double aerr_dbg = 0.0;
+                            {
+                                const double period = 2.0 * 3.141592653589793 / 4.0;
+                                const double a_obs = std::atan2(
+                                    pose_x.position_gimbal_m[1] - ekf_state(2),
+                                    pose_x.position_gimbal_m[0] - ekf_state(0));
+                                const double phase_obs = a_obs - 3.141592653589793;
+                                const double phase_model =
+                                    ekf_state(6) + period * std::max(slot_best, 0);
+                                double diff = phase_obs - phase_model;
+                                while (diff > 3.141592653589793) diff -= 2.0 * 3.141592653589793;
+                                while (diff < -3.141592653589793) diff += 2.0 * 3.141592653589793;
+                                // 折到 ±period/2，剩下的才是真正的相位误差
+                                while (diff > period * 0.5) diff -= period;
+                                while (diff < -period * 0.5) diff += period;
+                                aerr_dbg = diff * 180.0 / 3.141592653589793;
+                            }
                             const double aim_dc_dbg = std::hypot(ekf_state(0), ekf_state(2));
                             const double aim_dp_dbg = std::hypot(aim_px_dbg, aim_py_dbg);
                             std::fprintf(stderr,
                                          "[pix] f=%d id=%d dx=%+.1f dy=%+.1f d=%.1f slot=%d "
                                          "bx=%.0f by=%.0f u=%d rj=%d nis=%.1f gd=%.3f "
-                                         "c=(%.2f,%.2f,%.2f) R=%.3f yaw=%+.2f om=%+.2f lh=(%+.3f,%+.3f) cn=(%.2f,%.2f) p=(%.2f,%.2f) as=%d dc=%.3f dp=%.3f nd=%+.3f\n",
+                                         "c=(%.2f,%.2f,%.2f) R=%.3f yaw=%+.2f om=%+.2f lh=(%+.3f,%+.3f) cn=(%.2f,%.2f) p=(%.2f,%.2f) as=%d dc=%.3f dp=%.3f nd=%+.3f ae=%+.1f\n",
                                          frame_index, pose_x.detection.target_id,
                                          px[0].x - box.x, px[0].y - box.y,
                                          cv::norm(cv::Point2f(px[0]) - box), slot_best, box.x, box.y,
@@ -1813,7 +1833,8 @@ int main(int argc, char **argv)
                                          ekf_state(9), ekf_state(10),
                                          cn_x, cn_y,
                                          pose_x.position_gimbal_m[0], pose_x.position_gimbal_m[1],
-                                         aim_slot_dbg, aim_dc_dbg, aim_dp_dbg, nd_dbg);
+                                         aim_slot_dbg, aim_dc_dbg, aim_dp_dbg, nd_dbg,
+                                         aerr_dbg);
                         }
                     }
                     if (!args.detected_body)
