@@ -3339,6 +3339,38 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
     // 多秒窗口联合批处理：把窗口内的板心一次性解成 (圆心, R, ω, φ)，
     // 直接把状态钉到这条轨迹上。逐帧位置更新做不到这一点：单板单帧欠定，
     // 会让相位和车心互相顶，整段下来车心漂 0.4 m。
+    // 每帧用窗口板心圆覆盖 (c, R)：不碰相位与 ω
+    if (config_.body_circle_enabled && ekf_.initialized() &&
+        diagnostics_.phase == LockPhase::Tracking)
+    {
+        std::deque<LockSample> window;
+        for (auto it = body_samples_.rbegin(); it != body_samples_.rend(); ++it)
+        {
+            if (timestamp_seconds - it->timestamp_s > config_.body_circle_window_s)
+            {
+                break;
+            }
+            window.push_front(*it);
+        }
+        if (static_cast<int>(window.size()) >= config_.body_circle_min_samples)
+        {
+            const CircleFit fit = fitArmorCircle(window);
+            if (fit.ok && fit.residual <= config_.body_circle_max_residual_m &&
+                fit.radius > config_.radius_min_m && fit.radius < config_.radius_max_m)
+            {
+                if (std::getenv("CIRCLE_DEBUG"))
+                {
+                    std::fprintf(stderr, "[circ] f=%.2f n=%d c=(%.3f,%.3f) R=%.3f res=%.4f\n",
+                                 timestamp_seconds, static_cast<int>(window.size()), fit.cx, fit.cy,
+                                 fit.radius, fit.residual);
+                }
+                ekf_.shiftCenter(Eigen::Vector3d(fit.cx - ekf_.state()(0),
+                                                 fit.cy - ekf_.state()(2), 0.0));
+                ekf_.setRadius(fit.radius);
+                ++diagnostics_.body_circles;
+            }
+        }
+    }
     // 同板轨迹段联合解 (c, ω)，见 TrackerConfig::tracklet_rate_enabled
     if (config_.tracklet_rate_enabled && ekf_.initialized() &&
         diagnostics_.phase == LockPhase::Tracking &&

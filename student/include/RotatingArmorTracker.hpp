@@ -257,6 +257,13 @@ struct TrackerConfig
     // 它们之间来回跳（实测 61% 的相邻帧框中心跳 >25 px）。30 fps 下同一块板
     // 一秒内不可能跳 0.15 m，所以用"与上一次被接受的观测的距离"做硬门，
     // 把另一块道具永久排除，而不是靠预测门（预测本身就偏，收紧预测门反而更差）。
+    // 每帧用最近窗口的板心圆 (c, R) 直接覆盖状态，相位/ω 不动。
+    // 依据：v4 上把模型整体转任意 δ 都救不回来（残差恒 9cm），说明错的是圆不是相位；
+    // 而同一段数据的窗口圆拟合残差只有 0.011-0.014 m。
+    bool body_circle_enabled{false};
+    double body_circle_window_s{1.2};
+    int body_circle_min_samples{24};
+    double body_circle_max_residual_m{0.05};
     bool obs_continuity_gate_enabled{false};
     double obs_continuity_gate_m{0.15};
     bool tracklet_rate_enabled{false};
@@ -434,6 +441,7 @@ struct TrackerDiagnostics
     std::uint64_t batch_fits{0};
     std::uint64_t tracklet_rates{0};
     std::uint64_t continuity_rejects{0}; // 观测连续性门拒掉的候选数
+    std::uint64_t body_circles{0};       // 每帧板心圆覆盖次数
     MotionMode motion{MotionMode::Unknown};
     double speed_m_s{0.0};
     int lock_samples{0};

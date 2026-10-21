@@ -177,6 +177,8 @@ namespace
         int tracklet{-1};
         double continuity_gate{-1.0};
         int pair_static{-1};
+        int body_circle{-1};
+        double body_circle_window{-1.0};
         double batch_window{0.0};
         int batch_every{0};
         int normal_phase{-1};  // 1 开 0 关 -1 用默认：用板法向直接量测相位
@@ -314,6 +316,14 @@ namespace
             else if (arg == "--gate")
             {
                 args.gate_m = std::atof(next("--gate").c_str());
+            }
+            else if (arg == "--body-circle")
+            {
+                args.body_circle = std::atoi(next("--body-circle").c_str());
+            }
+            else if (arg == "--circle-window")
+            {
+                args.body_circle_window = std::atof(next("--circle-window").c_str());
             }
             else if (arg == "--pair-static")
             {
@@ -695,6 +705,14 @@ int main(int argc, char **argv)
     if (args.slot_phase >= 0)
     {
         tracker_config.slot_phase_update_enabled = args.slot_phase != 0;
+    }
+    if (args.body_circle >= 0)
+    {
+        tracker_config.body_circle_enabled = args.body_circle != 0;
+    }
+    if (args.body_circle_window > 0.0)
+    {
+        tracker_config.body_circle_window_s = args.body_circle_window;
     }
     if (args.pair_static >= 0)
     {
