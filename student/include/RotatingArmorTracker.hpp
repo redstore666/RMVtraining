@@ -229,8 +229,8 @@ struct TrackerConfig
     double circle_phase_sigma_rad{0.12};
     // 多秒窗口联合批处理（default 关，--batch-fit 1 打开）
     bool batch_fit_enabled{false};
-    double batch_fit_window_s{1.2};
-    int batch_fit_every{10};
+    double batch_fit_window_s{1.5};
+    int batch_fit_every{2};
     int batch_fit_min_samples{12};
     double batch_fit_max_circle_residual_m{0.05};
     double batch_fit_max_phase_residual_rad{0.50};

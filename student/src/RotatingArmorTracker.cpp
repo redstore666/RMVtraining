@@ -3137,10 +3137,16 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
                     ekf_.shiftCenter(Eigen::Vector3d(fit.center.x() - ekf_.state()(0),
                                                      fit.center.y() - ekf_.state()(2), 0.0));
                     ekf_.setRadius(fit.radius);
-                    ekf_.setRate(fit.rate_rad_s);
-                    const double dt = timestamp_seconds - window.front().timestamp_s;
-                    const double phase_now = fit.phase_rad + fit.rate_rad_s * dt;
-                    ekf_.rotatePhase(wrapAngle(phase_now - ekf_.state()(6)));
+                    if (std::getenv("BATCH_NO_RATE") == nullptr)
+                    {
+                        ekf_.setRate(fit.rate_rad_s);
+                    }
+                    if (std::getenv("BATCH_NO_PHASE") == nullptr)
+                    {
+                        const double dt = timestamp_seconds - window.front().timestamp_s;
+                        const double phase_now = fit.phase_rad + fit.rate_rad_s * dt;
+                        ekf_.rotatePhase(wrapAngle(phase_now - ekf_.state()(6)));
+                    }
                     ++diagnostics_.batch_fits;
                 }
             }
