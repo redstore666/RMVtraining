@@ -899,6 +899,11 @@ int main(int argc, char **argv)
                        "second_dist,cx,cy,cz,cyaw,R,oyaw,aimx,aimy,aimz,u,v,stab,upd,missed\n";
     }
 
+    // --only-id N 是"只研究一个板号"的单目标模式，跟多目标是互斥的：
+    // 多目标会按几何把两台车分开，各喂各的板号。
+    if (args.only_id != 0)
+        args.multi = false;
+
     const bool show = !args.headless;
     const std::string window = "camera playback";
     if (show)

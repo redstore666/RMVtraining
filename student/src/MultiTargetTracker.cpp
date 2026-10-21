@@ -34,6 +34,8 @@ double associationCost(const MultiTargetTrack& track, const Eigen::Vector3d& pos
 
 } // namespace
 
+
+
 MultiTargetTracker::MultiTargetTracker(MultiTargetConfig config, TrackerConfig tracker_config)
     : config_(config), tracker_config_(tracker_config)
 {
@@ -97,6 +99,14 @@ std::vector<MultiTargetTrack>& MultiTargetTracker::step(
         world.push_back(item);
     }
 
+    // 每辆车的 EKF 只认自己那个板号的观测。以前这里只按距离分配，
+    // 于是"左边那台车的轨迹"会去认右边那台车的板：track.last_seen_s 被刷新、
+    // 车不会被注销，但内部 tracker 因为板号不符把观测全丢了，状态停在原地——
+    // 画面上就是"蓝圈留在原处，右边车的板被硬配上去"。
+    const auto id_compatible = [](const MultiTargetTrack &track, const WorldObs &obs) {
+        return track.target_id == 0 || obs.target_id == 0 || track.target_id == obs.target_id;
+    };
+
     // 1) 全局贪心分配：把所有 (观测, 车, 距离) 按距离升序排，先来先占。
     //    一台车一帧最多认领 3 块板（四块板在侧面最多同时看到 2-3 块）。
     struct Candidate
@@ -111,6 +121,8 @@ std::vector<MultiTargetTrack>& MultiTargetTracker::step(
     {
         for (std::size_t t = 0; t < tracks_.size(); ++t)
         {
+            if (!id_compatible(tracks_[t], world[o]))
+                continue;
             const double distance = associationCost(tracks_[t], world[o].position);
             if (distance < config_.association_gate_m)
             {
