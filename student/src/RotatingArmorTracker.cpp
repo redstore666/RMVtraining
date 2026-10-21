@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numeric>
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
@@ -209,8 +210,16 @@ void RotatingArmorTracker::applyProcessNoise()
         const char *v = std::getenv("SPIN_Q");
         return v ? std::atof(v) : -1.0;
     }();
-    const double spin_scale =
+    double spin_scale =
         spin_env > 0.0 ? spin_env : std::max(1e-6, config_.process_spin_scale);
+    if (spin_env < 0.0 && config_.adaptive_spin_q_enabled)
+    {
+        // |ω| 越大，需要的角加速度噪声越大（Q ∝ |ω|²）。
+        const double ratio = std::fabs(measured_rate_ema_) /
+                             std::max(1e-3, config_.adaptive_spin_rate_ref_rad_s);
+        const double adaptive = std::clamp(ratio * ratio, 1.0, config_.adaptive_spin_q_max);
+        spin_scale = std::max(spin_scale, adaptive);
+    }
     config.process.angular_accel = 0.01 * scale * spin_scale;
     ekf_.setConfig(config);
 }
@@ -2590,6 +2599,12 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                                                      rate_last_position_.x() - c_now.x());
                     const double dtheta = wrapToPi(a_now - a_prev);
                     const double omega_meas = dtheta / dt;
+                    if (std::isfinite(omega_meas) && std::fabs(omega_meas) < 12.0)
+                    {
+                        measured_rate_ema_ += config_.adaptive_spin_alpha *
+                                              (std::fabs(omega_meas) - measured_rate_ema_);
+                        applyProcessNoise();
+                    }
                     const bool spinning = std::fabs(omega_meas) >= config_.rate_tracklet_min_rate_rad_s ||
                                           std::fabs(ekf_.state()(7)) >= config_.rate_tracklet_min_rate_rad_s;
                     const bool warmed_up = diagnostics_.accepted_updates >=
@@ -2624,6 +2639,20 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                         const double sigma_used = std::max(sigma_omega, sig_floor);
                         ekf_.updateRate(omega_meas, sigma_used);
                         diagnostics_.rate_measurements += 1;
+                    }
+                    static const bool rate_dbg = std::getenv("RATE_DEBUG") != nullptr;
+                    if (rate_dbg)
+                    {
+                        std::fprintf(stderr,
+                                     "[rate] t=%.3f meas=%+.2f ekf=%+.2f step=%.3f on_circle=%d "
+                                     "warm=%d spin=%d used=%d sigma=%.2f\n",
+                                     timestamp_s, omega_meas, ekf_.state()(7), step,
+                                     on_circle ? 1 : 0, warmed_up ? 1 : 0, spinning ? 1 : 0,
+                                     (warmed_up && on_circle && spinning &&
+                                      std::isfinite(omega_meas) && std::fabs(omega_meas) < 12.0)
+                                         ? 1
+                                         : 0,
+                                     std::max(0.35, config_.rate_tracklet_sigma_theta_rad / dt));
                     }
                 }
             }
@@ -3213,7 +3242,6 @@ PredictionResult RotatingArmorTracker::buildResult(const GimbalState &gimbal,
             const double error =
                 std::max(std::fabs(wrapToPi(vectorYaw(candidate) - gimbal.yaw)),
                          std::fabs(vectorPitch(candidate) - gimbal.pitch));
-            if (error < best_error)
             {
                 best_error = error;
                 best_slot = slot;
@@ -3640,6 +3668,126 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
     // 多秒窗口联合批处理：把窗口内的板心一次性解成 (圆心, R, ω, φ)，
     // 直接把状态钉到这条轨迹上。逐帧位置更新做不到这一点：单板单帧欠定，
     // 会让相位和车心互相顶，整段下来车心漂 0.4 m。
+    // 窗口转速：把最近一段时间里"同一颗板"的板心角度随时间做最小二乘。
+    // 逐帧单步的 omega 量测在换板时是垃圾（实测 |ω| 中位 19 rad/s，p90 49），
+    // 只保留了 22% 的量测；窗口内按位置连续性切段后，剩余段的角度是单调的。
+    if (config_.rate_window_enabled && config_.rate_from_tracklet_enabled && ekf_.initialized() &&
+        diagnostics_.phase == LockPhase::Tracking &&
+        diagnostics_.detected_circle_samples >= 8)
+    {
+        const Eigen::Vector2d c(diagnostics_.detected_circle_center.x(),
+                                diagnostics_.detected_circle_center.y());
+        // 收集窗口内样本（按时间正序），按位置连续性切段。
+        std::vector<const LockSample *> window;
+        for (auto it = body_samples_.rbegin(); it != body_samples_.rend(); ++it)
+        {
+            if (timestamp_seconds - it->timestamp_s > config_.rate_window_s)
+                continue;
+            window.push_back(&(*it));
+        }
+        std::reverse(window.begin(), window.end());
+
+        std::size_t best_begin = 0;
+        std::size_t best_len = 0;
+        std::size_t run_begin = 0;
+        for (std::size_t i = 0; i < window.size(); ++i)
+        {
+            if (i > 0)
+            {
+                const Eigen::Vector2d a(window[i - 1]->position.x(), window[i - 1]->position.y());
+                const Eigen::Vector2d b(window[i]->position.x(), window[i]->position.y());
+                if ((b - a).norm() > config_.rate_segment_jump_m)
+                {
+                    if (i - run_begin > best_len)
+                    {
+                        best_len = i - run_begin;
+                        best_begin = run_begin;
+                    }
+                    run_begin = i;
+                }
+            }
+        }
+        if (window.size() - run_begin > best_len)
+        {
+            best_len = window.size() - run_begin;
+            best_begin = run_begin;
+        }
+
+        if (best_len >= 5)
+        {
+            // 角度关于窗口圆心；用增量展开，避免 4 板歧义。
+            double theta = 0.0;
+            double prev_angle = 0.0;
+            std::vector<double> ts;
+            std::vector<double> thetas;
+            for (std::size_t k = best_begin; k < best_begin + best_len; ++k)
+            {
+                const Eigen::Vector2d p(window[k]->position.x(), window[k]->position.y());
+                const double angle = std::atan2(p.y() - c.y(), p.x() - c.x());
+                if (k == best_begin)
+                {
+                    theta = angle;
+                }
+                else
+                {
+                    theta += wrapToPi(angle - prev_angle);
+                }
+                prev_angle = angle;
+                ts.push_back(window[k]->timestamp_s);
+                thetas.push_back(theta);
+            }
+            const double t0 = ts.front();
+            double stt = 0.0;
+            double st = 0.0;
+            double sth = 0.0;
+            for (std::size_t k = 0; k < ts.size(); ++k)
+            {
+                const double t = ts[k] - t0;
+                stt += t * t;
+                st += t;
+                sth += t * thetas[k];
+            }
+            const double n = static_cast<double>(ts.size());
+            const double denom = n * stt - st * st;
+            if (denom > 1e-9)
+            {
+                const double slope = (n * sth - st * std::accumulate(thetas.begin(), thetas.end(), 0.0)) /
+                                     denom;
+                double ss = 0.0;
+                const double intercept =
+                    (std::accumulate(thetas.begin(), thetas.end(), 0.0) - slope * st) / n;
+                for (std::size_t k = 0; k < ts.size(); ++k)
+                {
+                    const double r = thetas[k] - (intercept + slope * (ts[k] - t0));
+                    ss += r * r;
+                }
+                const double sigma_fit = std::sqrt(ss / n);
+                const double span = ts.back() - ts.front();
+                if (std::isfinite(slope) && std::fabs(slope) < 12.0 && span >= 0.12)
+                {
+                    // 拟合残差折成角速度不确定度；跨度越大越可信。
+                    const double sigma_rate =
+                        std::max(config_.rate_window_sigma_floor_rad_s, sigma_fit / std::max(span, 1e-3));
+                    if (std::fabs(slope) >= config_.rate_window_min_rate_rad_s ||
+                        std::fabs(ekf_.state()(7)) >= config_.rate_window_min_rate_rad_s)
+                    {
+                        ekf_.updateRate(slope, sigma_rate);
+                        diagnostics_.rate_measurements += 1;
+                        static const bool win_dbg = std::getenv("RATE_DEBUG") != nullptr;
+                        if (win_dbg)
+                        {
+                            std::fprintf(stderr,
+                                         "[wrate] t=%.3f slope=%+.2f ekf=%+.2f n=%zu span=%.3f "
+                                         "sigma=%.2f fit=%.3f\n",
+                                         timestamp_seconds, slope, ekf_.state()(7), ts.size(), span,
+                                         sigma_rate, sigma_fit);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // 绿色（实测反推车体）的窗口圆：只写诊断，给俯视图用。
     // 单帧两块板的解会被 PnP 噪声带得抖 2-6 cm；同一窗口的板心其实落在一条
     // 半径稳定的圆上（残差 ~1 cm），所以显示层用窗口圆，单帧解只当参考。

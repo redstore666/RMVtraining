@@ -397,6 +397,14 @@ struct TrackerConfig
     // 先攒够更新再动 omega；每次最多改这么多，避免一两帧噪声把转速带飞。
     int rate_tracklet_min_updates{12};
     // 绿色窗口圆（仅显示）：窗口长度与最小样本数。
+    // 窗口转速估计：切段跳变阈值、最小转速、拟合不确定度下限。
+    // （窗口长度复用上面的 rate_window_s，拟合器用同一个窗口。）
+    // 窗口转速量测：实测能给出 |ω|≈3.9 但拟合残差 0.19 rad/0.22 s（σ≈0.85），
+    // 滤波器正确地不太相信它；默认关，留作诊断。
+    bool rate_window_enabled{false};
+    double rate_segment_jump_m{0.12};
+    double rate_window_min_rate_rad_s{0.5};
+    double rate_window_sigma_floor_rad_s{0.25};
     double detected_circle_window_s{1.0};
     int detected_circle_min_samples{8};
     // 角速度量测的噪声：板心角度差的 1-sigma，以及下限（rad/s）。
@@ -406,6 +414,13 @@ struct TrackerConfig
     bool rate_measurement_enabled{true};
     // 只放大"角加速度"这一项过程噪声：让 omega 跟得上观测，又不让位置跳变。
     double process_spin_scale{1.0};
+    // 自适应：按"实测 |ω| 的滑动统计"放大角加速度噪声。
+    // 依据：v4 上固定 SPIN_Q 从 1 加到 100，EKF ω 从 1.18 涨到 3.64、PIX 91.5→84.5；
+    // 而 v1 目标几乎不转，固定大 Q 反而变差，所以只能按实测转速自适应。
+    bool adaptive_spin_q_enabled{false};
+    double adaptive_spin_rate_ref_rad_s{1.0}; // 参考转速：|ω| 每高这么多，Q 乘 4
+    double adaptive_spin_q_max{16.0};
+    double adaptive_spin_alpha{0.25};
     double rate_tracklet_max_step_rad_s{0.4};
 
     // === 状态机 ===
@@ -843,6 +858,7 @@ private:
     std::deque<RateResidual> rate_residual_samples_;
     Eigen::Vector2d rate_last_position_{0.0, 0.0};
     double rate_last_time_s_{-1.0};
+    double measured_rate_ema_{0.0};
     bool rate_has_last_{false};
     int other_id_streak_{0};
     int centered_streak_{0};
