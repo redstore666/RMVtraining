@@ -234,6 +234,7 @@ struct TrackerConfig
     int batch_fit_min_samples{12};
     double batch_fit_max_circle_residual_m{0.05};
     double batch_fit_max_phase_residual_rad{0.50};
+    double batch_fit_min_phase_residual_rad{0.15};
     double batch_fit_min_coverage_rad{1.20};
     // 下面两个开关在理论上更正确，但在 v4 上实测更差（见 docs/任务进度备份.md）：
     // 打开后合成 A/G/H 的 ω 才能估准，所以保留给合成调试用。

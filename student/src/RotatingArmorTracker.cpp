@@ -3197,6 +3197,10 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
                 }
                 if (fit.ok && fit.circle_residual_m <= config_.batch_fit_max_circle_residual_m &&
                     fit.phase_residual_rad <= config_.batch_fit_max_phase_residual_rad &&
+                    // 自适应：合成数据（静止或干净自转）的相位残差很小，
+                    // EKF 自己就够用，批处理反而会把 3cm 的射击精度拉到 4cm；
+                    // 只有观测真的不干净（v4 这种手写板的抖动）才接管。
+                    fit.phase_residual_rad >= config_.batch_fit_min_phase_residual_rad &&
                     fit.radius > config_.radius_min_m && fit.radius < config_.radius_max_m &&
                     std::fabs(fit.rate_rad_s) < 12.0 &&
                     std::fabs(fit.radius - radius_now) < 0.20 &&
