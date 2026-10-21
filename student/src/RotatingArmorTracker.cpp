@@ -2105,6 +2105,26 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
             used[static_cast<std::size_t>(best_observation)] = true;
             continue;
         }
+        // 相位由板法向直接钉住：模型里 plate = centre − R·[cos,sin](phase)，
+        // 外法向方向 = phase + pi；因为 updatePhase 的残差按 2pi/N 折叠，
+        // pi = 2*(2pi/N)（N=4）恰好是整数个周期，所以直接用观测法向当相位量测。
+        // 逐帧位置更新推相位会被"圆心偏 0.2 m"带歪，法向不受深度误差影响。
+        if (config_.normal_phase_enabled && chosen.has_yaw && std::isfinite(chosen.yaw))
+        {
+            bool facing = true;
+            const Eigen::Vector3d n_w(std::cos(chosen.yaw), std::sin(chosen.yaw), 0.0);
+            const Eigen::Vector3d to_cam = -chosen.position;
+            const double norm_tc = std::hypot(to_cam.x(), to_cam.y());
+            if (norm_tc > 1.0e-6)
+            {
+                const double c = std::fabs(n_w.x() * to_cam.x() + n_w.y() * to_cam.y()) / norm_tc;
+                facing = c >= config_.normal_phase_min_facing;
+            }
+            if (facing)
+            {
+                ekf_.updatePhase(chosen.yaw, config_.normal_phase_sigma_rad);
+            }
+        }
         noteObservationForNoise(chosen.position, timestamp_s);
         // 整车重拟合用的滑窗样本（板心轨迹 = 一个圆）
         body_samples_.push_back(
@@ -2925,6 +2945,18 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
     // 的板心做圆拟合，把车心与半径整体校一次 —— 逐帧位置更新只能修相位，
     // 修不了"圆心整体偏了 0.2 m"这种系统误差；长窗口拟合能。
     if (config_.body_refit_enabled && ekf_.initialized() &&
+        diagnostics_.phase == LockPhase::Tracking && refit_center_valid_)
+    {
+        // 车心钉回最近一次圆拟合的结果：逐帧位置更新只会把它拽来拽去
+        // （实测整个片段漂 0.4 m），而圆拟合在 2 s 窗口上的残差只有 1.1 cm。
+        const Eigen::Vector2d now_c(ekf_.state()(0), ekf_.state()(2));
+        const Eigen::Vector2d d = refit_center_ - now_c;
+        if (d.norm() > 1.0e-9)
+        {
+            ekf_.shiftCenter(Eigen::Vector3d(d.x(), d.y(), 0.0));
+        }
+    }
+    if (config_.body_refit_enabled && ekf_.initialized() &&
         diagnostics_.phase == LockPhase::Tracking)
     {
         ++body_refit_countdown_;
@@ -2940,6 +2972,8 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
                 const Eigen::Vector3d fitted_center(fit.cx, fit.cy, ekf_.state()(4));
                 ekf_.shiftCenter(fitted_center - ekf_.state().head<3>().eval());
                 ekf_.setRadius(fit.radius);
+                refit_center_ = Eigen::Vector2d(fit.cx, fit.cy);
+                refit_center_valid_ = true;
                 ++diagnostics_.body_refits;
                 (void)count_now;
             }

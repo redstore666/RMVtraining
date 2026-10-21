@@ -172,6 +172,7 @@ namespace
         int antianchor{-1};
         double normal_tiebreak{-1.0};
         int joint_pair{-1};
+        int normal_phase{-1};  // 1 开 0 关 -1 用默认：用板法向直接量测相位
         int body_fit{-1};  // 1 开 0 关 -1 用默认：滑窗整车重拟合（校准车心+半径）
         int pair_body{-1};  // 1 开 0 关 -1 用默认，控制双板整车求解  // 1 开 0 关 -1 用默认，控制按槽位一致的相位更新
         bool pair_radius{false};
@@ -306,6 +307,10 @@ namespace
             else if (arg == "--gate")
             {
                 args.gate_m = std::atof(next("--gate").c_str());
+            }
+            else if (arg == "--normal-phase")
+            {
+                args.normal_phase = std::atoi(next("--normal-phase").c_str());
             }
             else if (arg == "--body-fit")
             {
@@ -483,6 +488,9 @@ namespace
 
 } // namespace
 
+// 诊断用：整车模型整体相位偏置（--模型四块板可能装在与半径成 45° 的菱形位置上）
+double g_model_phase_off{0.0};
+
 int main(int argc, char **argv)
 {
     Args args;
@@ -490,6 +498,10 @@ int main(int argc, char **argv)
     {
         printUsage(argv[0]);
         return 2;
+    }
+    if (const char *env_off = std::getenv("MODEL_PHASE_DEG"))
+    {
+        g_model_phase_off = std::atof(env_off) * 3.141592653589793 / 180.0;
     }
 
     // 1. 相机参数：内参来自标定文件；外参换成"光学系 -> 水平系"的固定旋转，
@@ -649,6 +661,10 @@ int main(int argc, char **argv)
     {
         tracker_config.slot_phase_update_enabled = args.slot_phase != 0;
     }
+    if (args.normal_phase >= 0)
+    {
+        tracker_config.normal_phase_enabled = args.normal_phase != 0;
+    }
     if (args.body_fit >= 0)
     {
         tracker_config.body_refit_enabled = args.body_fit != 0;
@@ -687,6 +703,7 @@ int main(int argc, char **argv)
     int ekf_relock_count{0};
     int ekf_realigns{0};
     int last_realigns{0};
+
     int ekf_target_switches{0};
     int last_ekf_id{0};
     std::string last_phase{"idle"};
@@ -1413,12 +1430,14 @@ int main(int argc, char **argv)
                                            cv::Scalar plate_color, cv::Scalar aim_color,
                                            int thickness, cv::Scalar center_color,
                                            const rotating_armor::RotatingArmorTracker *owner) {
+                    Eigen::Matrix<double, 9, 1> st_off = st;
+                    st_off(6) = st(6) + g_model_phase_off;
                     for (int slot = 0; slot < 4; ++slot)
                     {
-                        const double phase = st(6) + 2.0 * 3.141592653589793 * slot / 4.0;
+                        const double phase = st_off(6) + 2.0 * 3.141592653589793 * slot / 4.0;
                         const Eigen::Vector3d tangent(-std::sin(phase), std::cos(phase), 0.0);
                         Eigen::Vector3d center_world =
-                            rotating_armor::platePosition(st, slot, 4);
+                            rotating_armor::platePosition(st_off, slot, 4);
                         // 实拍里四块板不在同一高度：补上每个槽位学到的 z 偏移，
                         // 模型板才会压在真实板上（这只影响显示）。
                         if (owner != nullptr)
@@ -1539,14 +1558,16 @@ int main(int argc, char **argv)
                             int slot_best = -1;
                             double d_best = 1.0e9;
                             Eigen::Vector3d best_p = Eigen::Vector3d::Zero();
+                            Eigen::Matrix<double, 9, 1> ekf_off = ekf_state;
+                            ekf_off(6) = ekf_state(6) + g_model_phase_off;
                             for (int slot = 0; slot < 4; ++slot)
                             {
-                                Eigen::Vector3d p = rotating_armor::platePosition(ekf_state, slot, 4);
+                                Eigen::Vector3d p = rotating_armor::platePosition(ekf_off, slot, 4);
                                 p.z() += active_tracker->slotZOffset(slot);
                                 {
                                     const double dr = active_tracker->slotRadiusOffset(slot);
                                     const double dph = active_tracker->slotAngleOffset(slot);
-                                    const double ph = ekf_state(6) + 2.0 * 3.141592653589793 * slot / 4.0 + dph;
+                                    const double ph = ekf_off(6) + 2.0 * 3.141592653589793 * slot / 4.0 + dph;
                                     p.head<2>() -= dr * Eigen::Vector2d(std::cos(ph), std::sin(ph));
                                 }
                                 const double d = (p - obs_world).norm();
@@ -1603,7 +1624,7 @@ int main(int argc, char **argv)
                             std::fprintf(stderr,
                                          "[pix] f=%d id=%d dx=%+.1f dy=%+.1f d=%.1f slot=%d "
                                          "bx=%.0f by=%.0f u=%d rj=%d nis=%.1f gd=%.3f "
-                                         "c=(%.2f,%.2f,%.2f) R=%.3f yaw=%+.2f om=%+.2f cn=(%.2f,%.2f)\n",
+                                         "c=(%.2f,%.2f,%.2f) R=%.3f yaw=%+.2f om=%+.2f cn=(%.2f,%.2f) p=(%.2f,%.2f)\n",
                                          frame_index, pose_x.detection.target_id,
                                          px[0].x - box.x, px[0].y - box.y,
                                          cv::norm(cv::Point2f(px[0]) - box), slot_best, box.x, box.y,
@@ -1613,7 +1634,8 @@ int main(int argc, char **argv)
                                          diagnostics.best_gate_distance_m,
                                          ekf_state(0), ekf_state(2), ekf_state(4), ekf_state(8),
                                          ekf_state(6), ekf_state(7),
-                                         cn_x, cn_y);
+                                         cn_x, cn_y,
+                                         pose_x.position_gimbal_m[0], pose_x.position_gimbal_m[1]);
                         }
                     }
                     draw_body(ekf_state, diagnostics.aim_slot, cv::Scalar(235, 120, 60),

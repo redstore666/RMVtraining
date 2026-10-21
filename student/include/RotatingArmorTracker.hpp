@@ -224,6 +224,10 @@ struct TrackerConfig
         bool slot_from_normal_enabled{false};
     // 由板法向反推车心：c = p − R·n（true = 用，默认开）。
     bool center_from_normal_enabled{false};
+    // 相位用板法向直接量测（default 关，--normal-phase 1 打开）
+    bool normal_phase_enabled{false};
+    double normal_phase_sigma_rad{0.35};
+    double normal_phase_min_facing{0.30};
     // 整车"原地自转"假设：车心当准静态量，更新后低通拉回去（默认开）。
     // 整车重拟合：用滑动窗口里的板心圆拟合，定期校准车心与半径。
     bool body_refit_enabled{false};
@@ -672,6 +676,8 @@ private:
     double locked_radius_m_{0.0};
     double locked_spin_rad_s_{0.0};
     int body_refit_countdown_{0};
+    Eigen::Vector2d refit_center_{Eigen::Vector2d::Zero()};
+    bool refit_center_valid_{false};
     std::deque<LockSample> body_samples_;
     bool has_pair_relock_{false};
     double last_pair_relock_s_{0.0};
