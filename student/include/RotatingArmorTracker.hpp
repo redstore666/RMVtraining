@@ -249,7 +249,7 @@ struct TrackerConfig
     // ω = (Δp · v̂)/R，v̂ 只依赖当前观测相对车心的角度，不依赖槽位。
     // EKF 自己的 ω 在单板自转时会衰减到 ~0（位置更新不断把相位拉回），
     // 导致模型落后真实旋转，这是 v4 相位残差的主要来源。
-    bool tangent_rate_enabled{true};
+    bool tangent_rate_enabled{false};
     double tangent_rate_alpha{0.25};
     double tangent_rate_max_step_m{0.15};
     bool normal_phase_enabled{false};
