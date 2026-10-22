@@ -806,7 +806,12 @@ namespace
                                        -1.0, 0.0, 0.0,
                                        0.0, -1.0, 0.0);
 
-    bool extrinsicIsPlaceholder(const CameraParameters &camera)
+    // 旋转与平移必须分开判断。旧判据是「R≈I 且 |t|≈0 才算占位」，而实车
+    // config/camera.yaml 里 t 是真实值（[6.711e-02, 0, 5.150e-02]）、R 还是单位阵
+    // 占位 —— 于是占位 R 借真 t 蒙混过关，90° 轴重排被跳过，实跑把相机的“前”
+    // 当成了云台的“上”（2026-10-17 CSV 里 target_pitch≈1.15 rad 的根因）。
+    // 正确语义：R 是否为占位只由 R 自己决定；t 是否为真只由 t 自己决定。
+    bool rotationIsPlaceholder(const CameraParameters &camera)
     {
         if (camera.rotation_camera_to_gimbal.empty() ||
             camera.rotation_camera_to_gimbal.size() != cv::Size(3, 3))
@@ -815,25 +820,31 @@ namespace
         }
         const double rotation_deviation = cv::norm(
             camera.rotation_camera_to_gimbal - cv::Mat::eye(3, 3, CV_64F), cv::NORM_INF);
-        double translation_norm = 0.0;
-        if (!camera.translation_camera_to_gimbal.empty())
-            translation_norm = cv::norm(camera.translation_camera_to_gimbal, cv::NORM_INF);
-        return rotation_deviation < 1e-6 && translation_norm < 1e-9;
+        return rotation_deviation < 1e-6;
+    }
+
+    bool hasTranslation(const CameraParameters &camera)
+    {
+        return !camera.translation_camera_to_gimbal.empty() &&
+               camera.translation_camera_to_gimbal.total() == 3 &&
+               cv::norm(camera.translation_camera_to_gimbal, cv::NORM_INF) > 1e-9;
     }
 
     // 相机系 → 云台系的旋转（占位外参时补上光学系→云台系的固定旋转）
     cv::Mat rotationCameraToGimbal(const CameraParameters &camera)
     {
-        if (extrinsicIsPlaceholder(camera))
+        if (rotationIsPlaceholder(camera))
         {
             static bool s_warned = false;
             if (!s_warned)
             {
                 s_warned = true;
                 std::fprintf(stderr,
-                             "[warn] 云台外参仍是占位单位阵：已按"
-                             "相机光学系(右/下/前)->云台系(前/左/上)的固定旋转处理。"
-                             "完成手眼标定后请用真实 R/t 替换 config/camera.yaml。\n");
+                             "[warn] 云台旋转外参仍是占位单位阵：已按"
+                             "相机光学系(右/下/前)->云台系(前/左/上)的固定旋转处理；"
+                             "平移 t %s照常使用。完成手眼标定后请用真实 R 替换 "
+                             "config/camera.yaml。\n",
+                             hasTranslation(camera) ? "" : "为 0，");
             }
             return cv::Mat(kOpticalToGimbal);
         }
@@ -844,7 +855,7 @@ namespace
     {
         const cv::Mat p_gimbal = rotationCameraToGimbal(camera) * cv::Mat(cv::Vec3d(p_camera));
         cv::Vec3d result(p_gimbal.at<double>(0), p_gimbal.at<double>(1), p_gimbal.at<double>(2));
-        if (!extrinsicIsPlaceholder(camera) && !camera.translation_camera_to_gimbal.empty())
+        if (hasTranslation(camera))
         {
             result[0] += camera.translation_camera_to_gimbal.at<double>(0);
             result[1] += camera.translation_camera_to_gimbal.at<double>(1);
@@ -859,7 +870,7 @@ cv::Vec3d gimbalToCameraPoint(const CameraParameters &camera, const cv::Vec3d &p
 {
     // 与 cameraToGimbalPoint 严格互逆：R_c2g 的转置，再减掉平移。
     cv::Vec3d p = cv::Vec3d(p_gimbal);
-    if (!extrinsicIsPlaceholder(camera) && !camera.translation_camera_to_gimbal.empty())
+    if (hasTranslation(camera))
     {
         for (int i = 0; i < 3; ++i)
         {

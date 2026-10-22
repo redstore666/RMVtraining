@@ -457,6 +457,11 @@ struct TrackerConfig
     double max_bias_s{0.80};
     // 本帧视觉侧处理延迟（取到帧 -> 算出结果）的允许上限。
     double max_latency_s{0.30};        // prediction_bias_s 的限幅
+    // 弹道补偿：预测时刻再往后推"子弹飞行时间 = 距离 / v0"。
+    // 不补这一项时，转得快的板在飞行时间里就移出板宽了（见 docs/实验报告.md 命中率基线）。
+    bool flight_compensation_enabled{true};
+    double bullet_speed_m_s{30.0}; // 弹速 m/s（与 armor/include/BulletModel.hpp 的 v0 一致）
+    double max_flight_s{0.50};     // 飞行时间限幅
     double fire_angle_error_rad{0.05}; // 云台已对准的阈值（Planner 的 fire_thresh）
     double fire_max_age_s{0.20};    // 最近一次有效观测距今多久内允许开火
     double min_distance_m{0.40};

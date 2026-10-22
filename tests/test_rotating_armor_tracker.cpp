@@ -444,7 +444,13 @@ void scenarioFastSpin(double omega)
         const Eigen::Vector3d aim = sim::polarPoint(static_cast<double>(result.target_yaw),
                                                     static_cast<double>(result.target_pitch),
                                                     static_cast<double>(result.distance_m));
-        const State strike_state = rotating_armor::transition(rig.truth, rig.latency_s);
+        // 弹丸到达时刻 = 现在 + 处理/传输延迟 + 弹丸飞行时间（30 m/s，见
+        // armor/include/BulletModel.hpp 的 v0）。飞行时间必须算进来：3.9 m 就是
+        // 0.13 s，8 rad/s 的板在这段时间里转了一整个板宽的相位，只按 latency 比
+        // 会把"正确的提前量"判成脱靶。
+        const double flight_s = static_cast<double>(result.distance_m) / 30.0;
+        const State strike_state =
+            rotating_armor::transition(rig.truth, rig.latency_s + flight_s);
         const Eigen::Vector3d strike_plate =
             rotating_armor::measurement(strike_state, diagnostics.aim_slot, rig.plate_count);
         const Eigen::Vector3d now_plate =
@@ -526,7 +532,7 @@ void scenarioFastSpin(double omega)
         front_total == 0 ? 0.0 : static_cast<double>(front_hit) / static_cast<double>(front_total);
     const auto &estimate = rig.tracker.ekf().state();
     std::printf("  omega=%4.1f rad/s: 稳定帧=%d/%d 角速度估计=%.2f 射击点误差 中位=%.3f p90=%.3f "
-                "| 最近真板 中位=%.3f | 朝面板占比=%.0f%% | 3cm 命中率=%.0f%%\n",
+                "| 最近真板 中位=%.3f | 朝面板占比=%.0f%% | 3cm 命中率=%.0f%%（含飞行时间）\n",
                 omega, stable_frames, 420, estimate(7), strike_median, p90(strike_errors),
                 min4_median, front_rate * 100.0, hit_rate * 100.0);
     if (omega >= 0.0)

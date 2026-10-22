@@ -3219,8 +3219,29 @@ PredictionResult RotatingArmorTracker::buildResult(const GimbalState &gimbal,
     const double latency = std::isfinite(measured_latency_s_)
                                ? clampd(measured_latency_s_, 0.0, config_.max_latency_s)
                                : 0.0;
+
+    // 弹道飞行时间：云台要指向"子弹到靶那一刻板的位置"，只补视觉延迟不够。
+    // 30 m/s、2 m 距离就是 67 ms，板以 3 rad/s 转着，这 67 ms 里已经跑了 5 cm ——
+    // 超过小板半宽（6.75 cm）的一半。距离用预测后的车心估计，迭代两次收敛
+    // （飞行时间对距离的依赖很弱，两次足够）。
+    double flight_s = 0.0;
+    if (config_.flight_compensation_enabled && config_.bullet_speed_m_s > 1.0)
+    {
+        for (int iteration = 0; iteration < 2; ++iteration)
+        {
+            RotatingArmorEkf stage = ekf_;
+            if (!stage.predict(bias + latency + flight_s))
+                break;
+            const State &s = stage.state();
+            const double range = std::hypot(s(0), s(2));
+            if (!(range > 1.0e-3) || !std::isfinite(range))
+                break;
+            flight_s = clampd(range / config_.bullet_speed_m_s, 0.0, config_.max_flight_s);
+        }
+    }
+
     RotatingArmorEkf probe = ekf_;
-    if (!probe.predict(bias + latency))
+    if (!probe.predict(bias + latency + flight_s))
     {
         return PredictionResult{};
     }
@@ -3256,7 +3277,19 @@ PredictionResult RotatingArmorTracker::buildResult(const GimbalState &gimbal,
         const double seen = last_seen_s_[static_cast<std::size_t>(aim_slot_)];
         if (seen >= 0.0 && timestamp_s - seen <= config_.aim_visible_hold_s)
         {
-            best_slot = aim_slot_;
+            // 保持上次瞄准的槽位（不按角度重挑，避免四块板差几度时来回跳），但
+            // 必须确认它在"开火时刻"仍然朝向相机：提前量里有处理延迟 + 弹丸飞行
+            // 时间（3.9 m / 30 m/s = 0.13 s），8 rad/s 的板在这段时间里转 82°，
+            // 刚看见的那块到子弹到达时可能已经转到背面（合成场景 G 实测 76%）。
+            const Eigen::Vector3d held = platePosition(probe.state(), aim_slot_, plate_count);
+            const Eigen::Vector3d held_outward = held - body_center;
+            const double held_norm = held_outward.norm();
+            const double held_facing =
+                held_norm > 1.0e-6 ? held_outward.dot(-held.normalized()) / held_norm : 0.0;
+            if (held_facing > 0.0)
+            {
+                best_slot = aim_slot_;
+            }
         }
     }
     for (int pass = 0; pass < 2 && best_slot < 0; ++pass)
@@ -3335,19 +3368,33 @@ PredictionResult RotatingArmorTracker::buildResult(const GimbalState &gimbal,
             plate = last_seen_position_[slot_index];
             // 观测是在 seen 时刻量的，而结果要送到 bias+latency 之后的"开火时刻"，
             // 两段都要按 omega 补：只补 lag 会在有处理延迟时系统性落后半个身位。
-            const double horizon = bias + latency + (timestamp_s - seen);
-            const Eigen::Vector3d center(probe.state()(0), probe.state()(2), probe.state()(4));
-            const double omega = probe.state()(7);
+            // 弹道飞行时间同样要补：子弹到靶时板已经又转了一段。
+            const double horizon = bias + latency + flight_s + (timestamp_s - seen);
+            // 刚体推进（常速度 + 常角速度）：
+            //   p(seen+Δ) = (c(t) − v·(t−seen)) + v·Δ + Rz(ω·Δ)·(p_obs − c(seen)),  Δ = horizon
+            // 旋转基点必须是"观测时刻的中心"。用已经推到未来的 probe.state() 当基点，
+            // 会把观测这一段的相位又转回去（实测使瞄准点系统性落后飞行时间 40 ms，
+            // 见 docs/实验报告.md 的时间偏移扫描）。
+            const Eigen::Vector3d center(ekf_.state()(0), ekf_.state()(2), ekf_.state()(4));
+            const Eigen::Vector3d velocity(ekf_.state()(1), ekf_.state()(3), 0.0);
+            const double omega = ekf_.state()(7);
             if (config_.aim_observation_extrapolate && horizon > 0.0 && std::isfinite(omega) &&
                 std::fabs(omega) > 1.0e-3)
             {
-                const Eigen::Vector3d relative = plate - center;
+                const Eigen::Vector3d base = center - velocity * (timestamp_s - seen);
+                const Eigen::Vector3d relative = plate - base;
                 const double angle = omega * horizon;
                 const double c = std::cos(angle);
                 const double s_ = std::sin(angle);
-                plate = center + Eigen::Vector3d(c * relative.x() - s_ * relative.y(),
-                                                 s_ * relative.x() + c * relative.y(),
-                                                 relative.z());
+                plate = base + velocity * horizon +
+                        Eigen::Vector3d(c * relative.x() - s_ * relative.y(),
+                                        s_ * relative.x() + c * relative.y(),
+                                        relative.z());
+            }
+            else if (config_.aim_observation_extrapolate && horizon > 0.0)
+            {
+                // 不转也要补平移：车沿视线方向动 1 m/s，67 ms 就是 6.7 cm。
+                plate += velocity * horizon;
             }
             // 运动补偿后的一阶平滑：先把上一次的平滑结果按同样规则推进到现在，
             // 再和新观测混合。旋转是刚体运动，推进是精确的，所以 α 只牺牲噪声、
@@ -3474,8 +3521,26 @@ PredictionResult RotatingArmorTracker::buildResult(const GimbalState &gimbal,
 
     const double yaw_error = std::fabs(wrapToPi(yaw - gimbal.yaw));
     const double pitch_error = std::fabs(pitch - gimbal.pitch);
-    const bool aligned = yaw_error <= config_.fire_angle_error_rad &&
-                         pitch_error <= config_.fire_angle_error_rad;
+
+    // 开火判据：把"角度对准"换算成"板面内的线性脱靶量"。
+    // 旧判据 fire_angle_error_rad=0.05 在 1.5 m 就是 7.5 cm，比小板半宽
+    // 6.75 cm 还大，竖直方向更是 2.85 cm 的两倍半 —— 角度"对上了"照样打飞。
+    // 现在要求预测命中点落在板矩形内并留 40% 余量；竖直方向最紧，正好对应
+    // 题目要求的"实际打中装甲板"，而不是"云台角误差小于某个弧度"。
+    const ArmorSize plate_size =
+        lock_samples_.empty() ? ArmorSize::Small : lock_samples_.back().size;
+    const double half_width_m = (plate_size == ArmorSize::Large) ? 0.115 : 0.0675;
+    const double half_height_m = 0.0285;
+    constexpr double kFireMargin = 0.6;
+    const double miss_h_m = distance * std::tan(std::min(yaw_error, 1.5));
+    const double miss_v_m = distance * std::tan(std::min(pitch_error, 1.5));
+    const bool aligned = miss_h_m <= kFireMargin * half_width_m &&
+                         miss_v_m <= kFireMargin * half_height_m;
+    result.fire_miss_m = static_cast<float>(std::max(miss_h_m, miss_v_m));
+    result.fire_budget_rad = static_cast<float>(
+        std::min(config_.fire_angle_error_rad,
+                 (kFireMargin * std::min(half_width_m, half_height_m)) /
+                     std::max(distance, 1.0e-3)));
     const bool fresh = has_accept_ && missed_frames_ == 0 &&
                        (timestamp_s - last_accept_s_ <= config_.fire_max_age_s);
     result.fire_allowed = stable && aligned && fresh &&

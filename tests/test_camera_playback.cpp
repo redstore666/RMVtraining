@@ -71,16 +71,6 @@
 namespace
 {
 
-    // 光学系 -> 水平系（前 x、左 y、上 z）的固定旋转：
-    //   x_w =  z_c , y_w = -x_c , z_w = -y_c
-    cv::Mat opticalToWorldRotation()
-    {
-        cv::Mat rotation = (cv::Mat_<double>(3, 3) << 0.0, 0.0, 1.0,
-                            -1.0, 0.0, 0.0,
-                            0.0, -1.0, 0.0);
-        return rotation;
-    }
-
     // 视频分辨率与标定分辨率不一致时按比例缩放内参（假设画面未被裁剪）。
     void scaleIntrinsics(CameraParameters &camera, double sx, double sy)
     {
@@ -578,6 +568,273 @@ namespace
         return "?";
     }
 
+    // ---- 命中度量（三轴分解） ----
+    // 一次"到期对准"记录：云台在 t_cmd_s 时刻应该指向哪里。
+    struct AimTrace
+    {
+        double t_cmd_s{0.0};
+        Eigen::Vector3d aim_world{0.0, 0.0, 0.0};
+        int target_id{0};
+        double omega_rad_s{0.0}; // 下指令时的车体角速度（命中率分档用）
+        // 弹丸飞行时间（秒）：命中评估的参照时刻 = 开火时刻 + 飞行时间。
+        double flight_s{0.0};
+    };
+
+    // 一条实拍观测（世界系）。命中判定只用这些观测量，不碰任何模型状态，
+    // 所以"打没打中"和"滤波器算得对不对"是两个独立的口径。
+    struct HitObservation
+    {
+        double t_s{0.0};
+        int target_id{0};
+        Eigen::Vector3d position{0.0, 0.0, 0.0};
+        Eigen::Vector3d normal{0.0, 0.0, 0.0};
+        ArmorSize size{ArmorSize::Small};
+    };
+
+    // 到期对账：把 aim 与"同一个 target_id、t_cmd 前后 ±tolerance"的观测取均值比较。
+    // 单帧观测本身有 3~9 cm 噪声（v4 静止 1.3 cm / 自转 8.7 cm），拿单帧当参照等于
+    // 把观测噪声记成了预测误差；这里用 ±50 ms 的非因果平滑观测当参照（离线评估允许）。
+    void reportHitMetrics(const std::vector<AimTrace> &aims,
+                          const std::vector<HitObservation> &observations, double tolerance_s)
+    {
+        if (aims.empty())
+            return;
+        std::vector<double> abs_tangential, abs_vertical, abs_normal;
+        std::vector<double> signed_tangential, signed_vertical, signed_normal;
+        int evaluated = 0;
+        int uncovered = 0;
+        int hits = 0;
+        int hits_mean = 0;
+        int multi_window = 0;
+        int not_facing = 0;
+        // 按角速度分档（0: <1 rad/s，1: 1-5，2: >5）看"转得快时是不是更容易丢"。
+        std::array<int, 3> hits_by_rate{0, 0, 0};
+        std::array<int, 3> count_by_rate{0, 0, 0};
+        // 分档再看一次三轴误差：命中率低到底是"没对准"还是"时序/相位"。
+        std::array<std::vector<double>, 3> tangential_by_rate;
+        std::array<std::vector<double>, 3> vertical_by_rate;
+
+        for (const AimTrace &aim : aims)
+        {
+            std::vector<const HitObservation *> near;
+            for (const HitObservation &observation : observations)
+            {
+                if (aim.target_id != 0 && observation.target_id != aim.target_id)
+                    continue;
+                // 参照时刻 = 开火时刻 + 弹丸飞行时间：子弹到靶时板应该在哪。
+                const double reference_s = aim.t_cmd_s + aim.flight_s;
+                if (std::fabs(observation.t_s - reference_s) > tolerance_s)
+                    continue;
+                near.push_back(&observation);
+            }
+            if (near.empty())
+            {
+                ++uncovered;
+                continue;
+            }
+            // 参照板：取窗口内离瞄准点最近的同 id 板。窗口里 99.5% 的帧两块板同时在，
+            // 取均值等于把参照点放到两块板中间，会把"打中其中一块"判成没中。
+            const HitObservation *nearest = near.front();
+            double nearest_distance = std::numeric_limits<double>::infinity();
+            for (const HitObservation *observation : near)
+            {
+                const double distance = (observation->position - aim.aim_world).norm();
+                if (distance < nearest_distance)
+                {
+                    nearest_distance = distance;
+                    nearest = observation;
+                }
+            }
+            if (near.size() > 1)
+                ++multi_window;
+
+            // 旧口径（两板均值）留着对照：它把双板窗口平均到两板中间。
+            bool hit_mean = false;
+            {
+                Eigen::Vector3d mean_position = Eigen::Vector3d::Zero();
+                Eigen::Vector3d mean_normal = Eigen::Vector3d::Zero();
+                for (const HitObservation *observation : near)
+                {
+                    mean_position += observation->position;
+                    mean_normal += observation->normal;
+                }
+                mean_position /= static_cast<double>(near.size());
+                if (mean_normal.norm() < 1.0e-6)
+                    mean_normal = Eigen::Vector3d(mean_position.x(), mean_position.y(), 0.0);
+                if (mean_normal.norm() > 1.0e-9)
+                {
+                    mean_normal.normalize();
+                    Eigen::Vector3d mean_tangential = Eigen::Vector3d::UnitZ().cross(mean_normal);
+                    if (mean_tangential.norm() > 1.0e-6)
+                    {
+                        mean_tangential.normalize();
+                        const Eigen::Vector3d mean_vertical =
+                            mean_normal.cross(mean_tangential).normalized();
+                        const Eigen::Vector3d mean_error = aim.aim_world - mean_position;
+                        const double mean_half_width =
+                            (near.front()->size == ArmorSize::Large) ? 0.115 : 0.0675;
+                        hit_mean = mean_normal.dot(mean_position) < 0.0 &&
+                                   std::fabs(mean_error.dot(mean_tangential)) <= mean_half_width &&
+                                   std::fabs(mean_error.dot(mean_vertical)) <= 0.0285;
+                    }
+                }
+            }
+            hits_mean += hit_mean ? 1 : 0;
+
+            Eigen::Vector3d position = nearest->position;
+            Eigen::Vector3d normal = nearest->normal;
+            if (normal.norm() < 1.0e-6)
+            {
+                // PnP 没给出法向时用径向方向；对朝向相机的板，两者只差几度。
+                normal = Eigen::Vector3d(position.x(), position.y(), 0.0);
+            }
+            if (normal.norm() < 1.0e-9)
+                continue;
+            normal.normalize();
+            Eigen::Vector3d tangential_axis = Eigen::Vector3d::UnitZ().cross(normal);
+            if (tangential_axis.norm() < 1.0e-6)
+                continue;
+            tangential_axis.normalize();
+            const Eigen::Vector3d vertical_axis = normal.cross(tangential_axis).normalized();
+
+            const Eigen::Vector3d error = aim.aim_world - position;
+            const double tangential = error.dot(tangential_axis);
+            const double vertical = error.dot(vertical_axis);
+            const double normal_offset = error.dot(normal);
+            abs_tangential.push_back(std::fabs(tangential));
+            abs_vertical.push_back(std::fabs(vertical));
+            abs_normal.push_back(std::fabs(normal_offset));
+            signed_tangential.push_back(tangential);
+            signed_vertical.push_back(vertical);
+            signed_normal.push_back(normal_offset);
+
+            // 板朝相机：法向从板心指向车外，相机在云台系原点（世界系原点同位置）。
+            const bool facing = normal.dot(position) < 0.0;
+            const double half_width = (nearest->size == ArmorSize::Large) ? 0.115 : 0.0675;
+            const bool hit = facing && std::fabs(tangential) <= half_width &&
+                             std::fabs(vertical) <= 0.0285;
+            ++evaluated;
+            hits += hit ? 1 : 0;
+            not_facing += facing ? 0 : 1;
+            const int bucket = std::fabs(aim.omega_rad_s) < 1.0
+                                   ? 0
+                                   : (std::fabs(aim.omega_rad_s) < 5.0 ? 1 : 2);
+            ++count_by_rate[static_cast<std::size_t>(bucket)];
+            hits_by_rate[static_cast<std::size_t>(bucket)] += hit ? 1 : 0;
+            tangential_by_rate[static_cast<std::size_t>(bucket)].push_back(std::fabs(tangential));
+            vertical_by_rate[static_cast<std::size_t>(bucket)].push_back(std::fabs(vertical));
+        }
+
+        if (evaluated == 0)
+            return;
+        auto sign_percent = [](std::vector<double> values, double ratio) {
+            if (values.empty())
+                return 0.0;
+            std::sort(values.begin(), values.end());
+            const auto index = static_cast<std::size_t>(
+                std::clamp(ratio, 0.0, 1.0) * static_cast<double>(values.size() - 1));
+            return values[index];
+        };
+        const int total = static_cast<int>(aims.size());
+        std::printf("\n-- 命中评估（三轴分解，±%.0f ms 平滑观测参照，取最近板） --\n",
+                    1000.0 * tolerance_s);
+        std::printf("  到期对准 %d 次：可评估 %d（%.1f%%），无同 id 观测 %d（%.1f%%）\n", total,
+                    evaluated, 100.0 * evaluated / total, uncovered,
+                    100.0 * uncovered / total);
+        std::printf("  切向 |e_t|: p50 %.2f cm，p90 %.2f cm（板半宽 6.75 / 11.5 cm）\n",
+                    100.0 * sign_percent(abs_tangential, 0.50),
+                    100.0 * sign_percent(abs_tangential, 0.90));
+        std::printf("  竖直 |e_z|: p50 %.2f cm，p90 %.2f cm（板半高 2.85 cm）\n",
+                    100.0 * sign_percent(abs_vertical, 0.50),
+                    100.0 * sign_percent(abs_vertical, 0.90));
+        std::printf("  法向 |e_n|: p50 %.2f cm，p90 %.2f cm（深度，不计命中，仅诊断）\n",
+                    100.0 * sign_percent(abs_normal, 0.50),
+                    100.0 * sign_percent(abs_normal, 0.90));
+        std::printf("  带符号中位: 切向 %+.2f，竖直 %+.2f，法向 %+.2f cm\n",
+                    100.0 * sign_percent(signed_tangential, 0.50),
+                    100.0 * sign_percent(signed_vertical, 0.50),
+                    100.0 * sign_percent(signed_normal, 0.50));
+        std::printf("  命中率（切向+竖直在板内且板朝相机）: %d/%d = %.1f%%"
+                    "（其中板背向相机 %d 次）\n",
+                    hits, evaluated, 100.0 * hits / evaluated, not_facing);
+        std::printf("  旧口径（两板均值参照）: %d/%d = %.1f%%；窗口内 >1 块板的帧 %d（%.1f%%）\n",
+                    hits_mean, evaluated, 100.0 * hits_mean / evaluated, multi_window,
+                    100.0 * multi_window / evaluated);
+        std::printf("  命中率按 |omega|: <1 %.1f%%（%d）  1-5 %.1f%%（%d）  >5 %.1f%%（%d）\n",
+                    100.0 * hits_by_rate[0] / std::max(1, count_by_rate[0]), count_by_rate[0],
+                    100.0 * hits_by_rate[1] / std::max(1, count_by_rate[1]), count_by_rate[1],
+                    100.0 * hits_by_rate[2] / std::max(1, count_by_rate[2]), count_by_rate[2]);
+        for (int bucket = 0; bucket < 3; ++bucket)
+        {
+            const std::size_t index = static_cast<std::size_t>(bucket);
+            std::printf("    档 %s: 切向 p50 %.2f / p90 %.2f cm，竖直 p50 %.2f / p90 %.2f cm\n",
+                        bucket == 0 ? "<1 " : (bucket == 1 ? "1-5" : ">5 "),
+                        sign_percent(tangential_by_rate[index], 0.5) * 100.0,
+                        sign_percent(tangential_by_rate[index], 0.9) * 100.0,
+                        sign_percent(vertical_by_rate[index], 0.5) * 100.0,
+                        sign_percent(vertical_by_rate[index], 0.9) * 100.0);
+        }
+        // ---- 时间偏移扫描：命中率对"参照时刻误差"有多敏感 ----
+        // 参照时刻 = 开火 + 飞行 + offset。offset 的最优值 = 整条链路（曝光/处理/下发/
+        // 弹道）实际总延迟与跟踪器内部补偿量之差，测出来是正数就说明补偿少了。
+        // 曲线在某个 offset 上明显抬起 → 是时序问题；怎么扫都不抬 → 是预测/选板问题。
+        for (int bin = 0; bin < 3; ++bin)
+        {
+        std::printf("  偏移扫描 |omega| %s: ", bin == 0 ? "<1" : (bin == 1 ? "1-5" : ">5"));
+        for (int offset_ms = -120; offset_ms <= 200; offset_ms += 20)
+        {
+            const double offset = 0.001 * static_cast<double>(offset_ms);
+            int sweep_hits = 0;
+            int sweep_count = 0;
+            for (const AimTrace &aim : aims)
+            {
+                const double omega_abs = std::fabs(aim.omega_rad_s);
+                const int aim_bin = omega_abs < 1.0 ? 0 : (omega_abs < 5.0 ? 1 : 2);
+                if (aim_bin != bin)
+                    continue;
+                const double reference_s = aim.t_cmd_s + aim.flight_s + offset;
+                const HitObservation *nearest = nullptr;
+                double best_dt = 1.0e9;
+                for (const HitObservation &observation : observations)
+                {
+                    if (aim.target_id != 0 && observation.target_id != aim.target_id)
+                        continue;
+                    const double dt = std::fabs(observation.t_s - reference_s);
+                    if (dt <= 0.008 && dt < best_dt)
+                    {
+                        best_dt = dt;
+                        nearest = &observation;
+                    }
+                }
+                if (nearest == nullptr)
+                    continue;
+                Eigen::Vector3d normal = nearest->normal;
+                if (normal.norm() < 1.0e-6)
+                    normal = Eigen::Vector3d(nearest->position.x(), nearest->position.y(), 0.0);
+                if (normal.norm() < 1.0e-9)
+                    continue;
+                normal.normalize();
+                Eigen::Vector3d tangential = Eigen::Vector3d::UnitZ().cross(normal);
+                if (tangential.norm() < 1.0e-6)
+                    continue;
+                tangential.normalize();
+                const Eigen::Vector3d vertical = normal.cross(tangential).normalized();
+                const Eigen::Vector3d error = aim.aim_world - nearest->position;
+                const double half_width =
+                    (nearest->size == ArmorSize::Large) ? 0.115 : 0.0675;
+                const bool hit = normal.dot(nearest->position) < 0.0 &&
+                                 std::fabs(error.dot(tangential)) <= half_width &&
+                                 std::fabs(error.dot(vertical)) <= 0.0285;
+                ++sweep_count;
+                sweep_hits += hit ? 1 : 0;
+            }
+            std::printf("%+d:%.0f%% ", offset_ms,
+                        sweep_count > 0 ? 100.0 * sweep_hits / sweep_count : 0.0);
+        }
+        std::printf("\n");
+        }
+    }
+
 } // namespace
 
 // 诊断用：整车模型整体相位偏置（--模型四块板可能装在与半径成 45° 的菱形位置上）
@@ -596,8 +853,10 @@ int main(int argc, char **argv)
         g_model_phase_off = std::atof(env_off) * 3.141592653589793 / 180.0;
     }
 
-    // 1. 相机参数：内参来自标定文件；外参换成"光学系 -> 水平系"的固定旋转，
-    //    平移置零（回放不关心装车位置，只关心相对运动）。
+    // 1. 相机参数：内参来自标定文件。外参不再在回放侧另写一份：
+    //    yaml 里 R 是单位阵占位时，armor_solve 会统一补上"光学系->云台系"
+    //    的固定旋转（与这里的 opticalToWorldRotation 同一个矩阵），标定后填真 R
+    //    也自动生效。平移置零，只因为回放不关心装车位置（t 是常数，不影响相对精度）。
     CameraParameters camera;
     {
         std::string config_path = args.config_path;
@@ -612,7 +871,6 @@ int main(int argc, char **argv)
             std::cerr << "加载相机参数失败: " << error << "\n";
             return 1;
         }
-        camera.rotation_camera_to_gimbal = opticalToWorldRotation();
         camera.translation_camera_to_gimbal = cv::Mat::zeros(3, 1, CV_64F);
     }
 
@@ -861,13 +1119,9 @@ int main(int argc, char **argv)
     // 预测精度评估：把"预测时刻 + 预测瞄准点（世界系）"存起来，等视频推进到
     // 那个时刻，再和该帧实测板心比距离。这是"预测准不准"的客观指标——
     // 比 Stable 帧数更接近验收口径（板真的在预测位置上吗）。
-    struct AimTrace
-    {
-        double t_cmd_s{0.0};
-        Eigen::Vector3d aim_world{0.0, 0.0, 0.0};
-        int target_id{0};
-    };
     std::vector<AimTrace> pending_aims;
+    std::vector<AimTrace> all_aims; // 供离线三轴命中评估
+    std::vector<HitObservation> hit_observations;
     std::vector<double> aim_errors_m;
     // 真正的"预测准不准"：aim 在 t_cmd_s 时刻打到哪，就和那一刻实测板心比。
     // （之前 aim_errors_m 装的是"模型解释度"，不是预测误差，两者被混在一起了。）
@@ -1081,12 +1335,35 @@ int main(int argc, char **argv)
                                        }),
                         poses.end());
         }
+        // 命中度量用的原始观测（世界系位置 + 法向 + 板型），不经过任何滤波器：
+        // "打没打中"只用观测当参照，和滤波器算得对不对是两个独立口径。
+        {
+            const Eigen::Matrix3d world_from_gimbal = rotating_armor::gimbalToWorld(gimbal);
+            for (const ArmorPose &pose : poses)
+            {
+                if (pose.detection.target_id == 0)
+                {
+                    continue;
+                }
+                HitObservation observation;
+                observation.t_s = time_s;
+                observation.target_id = pose.detection.target_id;
+                observation.position = world_from_gimbal *
+                                       Eigen::Vector3d(pose.position_gimbal_m[0],
+                                                       pose.position_gimbal_m[1],
+                                                       pose.position_gimbal_m[2]);
+                observation.normal = world_from_gimbal *
+                                     Eigen::Vector3d(pose.normal_gimbal[0], pose.normal_gimbal[1],
+                                                     pose.normal_gimbal[2]);
+                observation.size = pose.detection.size;
+                hit_observations.push_back(observation);
+            }
+        }
         const auto t2 = std::chrono::steady_clock::now();
         const double detect_ms =
             std::chrono::duration<double, std::milli>(t1 - t0).count();
         const double solve_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
-        detect_ms_sum += detect_ms;
-        solve_ms_sum += solve_ms;
+        detect_ms_sum += detect_ms;        solve_ms_sum += solve_ms;
 
         // ---- 帧级统计 ----
         ++frames_processed;
@@ -1220,6 +1497,7 @@ int main(int argc, char **argv)
                     if (&track == primary || !track.tracker || !track.tracker->initialized())
                         continue;
                     rotating_armor::TopDownFrame body;
+                    body.timestamp_s = time_s;
                     body.has_state = true;
                     // 没检测的旧轨迹不画模型：否则俯视图上会挂着"没有车却还有建模"。
                     body.fresh = track.diagnostics.missed_frames <= 0;
@@ -1443,6 +1721,13 @@ int main(int argc, char **argv)
             }
         }
 
+            if (std::getenv("DUMP_STATE") != nullptr && frame_index % 20 == 0)
+            {
+                const auto &ekf_state = active_tracker->ekf().state();
+                std::printf("[state] 帧 %d t=%.3f z=%.4f h=%.4f R=%.4f omega=%.3f cx=%.3f cy=%.3f\n",
+                            frame_index, time_s, ekf_state(4), ekf_state(10), ekf_state(8),
+                            ekf_state(7), ekf_state(0), ekf_state(2));
+            }
             final_prediction = prediction;
             // accepted_updates 会在 dropTarget()->reset() 里清零，直接取末值会
             // 只统计最后一段（v1 有 1 次重锁，曾把它显示成"接收 84"而实际每帧
@@ -1499,8 +1784,11 @@ int main(int argc, char **argv)
                 trace.aim_world = Eigen::Vector3d(range * std::cos(pitch) * std::cos(yaw),
                                                   range * std::cos(pitch) * std::sin(yaw),
                                                   range * std::sin(pitch));
+                trace.flight_s = static_cast<double>(range) / 30.0; // 弹速 30 m/s
                 trace.target_id = prediction.target_id;
+                trace.omega_rad_s = active_tracker->ekf().state()(7);
                 pending_aims.push_back(trace);
+                all_aims.push_back(trace);
             }
             const int ekf_id = prediction.target_id;
             if (last_ekf_id != 0 && ekf_id != 0 && ekf_id != last_ekf_id)
@@ -2033,6 +2321,7 @@ int main(int argc, char **argv)
         if (topdown_enabled)
         {
             rotating_armor::TopDownFrame topdown_frame;
+            topdown_frame.timestamp_s = time_s;
             topdown_frame.has_state = active_tracker->initialized();
             if (topdown_frame.has_state)
                 topdown_frame.state = active_tracker->ekf().state();
@@ -2326,6 +2615,10 @@ int main(int argc, char **argv)
                   << " cy=" << state(2) << " vy=" << state(3)
                   << " z=" << state(4) << " yaw=" << state(6)
                   << " omega=" << state(7) << " R=" << state(8) << "\n";
+
+        // 验收口径：三轴命中评估（±50 ms 平滑观测参照）。放在 EKF 汇总末尾，
+        // 与上面的"单帧对账"并列，方便看清两者差多少。
+        reportHitMetrics(all_aims, hit_observations, 0.010);
     }
     if (csv.is_open())
     {

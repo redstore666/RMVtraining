@@ -8,6 +8,8 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <deque>
+#include <map>
 #include <string>
 
 #include <opencv2/imgproc.hpp>
@@ -354,6 +356,202 @@ void drawModel(const Scene &scene, const TopDownFrame &frame, const TopDownOptio
 //   3) 半径取实测板心到圆心的中位距离，因此 R 也是测出来的，不是参数；
 //   4) 先按 3D 邻近做一次聚类，两块不相干的板（比如左右两台车）不会被强行配对。
 // 这里完全不读 EKF 状态，画出来就是"纯检测"的整车，专门用来和模型并排对照。
+// 观测车心的唯一估计量：固定半径 + 常速 Kalman。
+//
+// 输入只有「板心 p_i + 板法向 θ_i + 已知半径 R」，输出车心与置信度。
+// 硬约束 |c − p_i| = R 拆成两路正交标量观测：
+//   法向 (c−p_i)·n_i ≈ 0   σ ≈ PnP 板心噪声（v4 实测 1.3 cm）
+//   切向 (c−p_i)·t_i ≈ 0   σ ≈ sqrt(σ_p² + (R·δθ)²)，δθ ≈ 0.10 rad
+// 切向那一路误差大，但板一转起来观测方向就在换，时间平均之后仍然收敛；
+// 慢速/静止时它只能保证「不跑偏」，保证不了「偏多少」——所以额外报一个法向覆盖度，
+// 让画面自己承认这块圆可信/不可信，而不是假装很准。
+class ObservedBodyEstimator
+{
+public:
+    struct Result
+    {
+        bool valid{false};
+        Eigen::Vector2d centre{Eigen::Vector2d::Zero()};
+        double radius{0.0};
+        double coverage_deg{0.0};
+        double residual_m{0.0};
+        int samples{0};
+        double confidence{0.0}; // 0..1，只用来决定画多实/写不写"低信度"
+    };
+
+    void reset()
+    {
+        initialised_ = false;
+        history_.clear();
+    }
+
+    Result update(const std::vector<Eigen::Vector2d> &points,
+                  const std::vector<double> &normal_yaws, double radius, double timestamp_s)
+    {
+        Result result;
+        result.radius = radius;
+        result.samples = static_cast<int>(points.size());
+        if (points.empty() || points.size() != normal_yaws.size())
+            return result;
+
+        const bool has_time = std::isfinite(timestamp_s);
+        double dt = 1.0 / 166.0;
+        if (initialised_ && has_time && std::isfinite(last_timestamp_s_))
+        {
+            const double measured = timestamp_s - last_timestamp_s_;
+            if (measured > 1.0e-4 && measured < 0.5)
+                dt = measured;
+        }
+        if (has_time)
+            last_timestamp_s_ = timestamp_s;
+
+        // 半径平滑：跟踪器的 R 早期是 0.16 的先验，之后爬到 0.27。R 一变，
+        // "板心沿法向退 R"的约束就整体沿法向平移，车心会跟着跳 10 cm。
+        // 显示层不追这个阶跃，按时间常数 ~0.2 s 跟上去。
+        if (!std::isfinite(radius_))
+            radius_ = radius;
+        else if (radius > 0.02)
+            radius_ += 0.03 * (radius - radius_);
+        const double smoothing_radius = radius_;
+
+        if (!initialised_)
+        {
+            int reference = -1;
+            for (std::size_t i = 0; i < normal_yaws.size(); ++i)
+            {
+                if (std::isfinite(normal_yaws[i]))
+                {
+                    reference = static_cast<int>(i);
+                    break;
+                }
+            }
+            if (reference < 0)
+                return result;
+            const double yaw = normal_yaws[static_cast<std::size_t>(reference)];
+            const Eigen::Vector2d normal(std::cos(yaw), std::sin(yaw));
+            const Eigen::Vector2d centre =
+                points[static_cast<std::size_t>(reference)] - smoothing_radius * normal;
+            x_ << centre.x(), 0.0, centre.y(), 0.0;
+            P_.setZero();
+            P_(0, 0) = P_(2, 2) = 0.05 * 0.05; // 初值只信 ±5 cm（切向基本没信息）
+            P_(1, 1) = P_(3, 3) = 0.30 * 0.30;
+            initialised_ = true;
+        }
+        else
+        {
+            Eigen::Matrix4d f = Eigen::Matrix4d::Identity();
+            f(0, 1) = dt;
+            f(2, 3) = dt;
+            x_ = f * x_;
+            Eigen::Matrix4d q = Eigen::Matrix4d::Zero();
+            const double q_position = (2.0e-3) * (2.0e-3) * dt;
+            const double q_velocity = (0.12) * (0.12) * dt;
+            q(0, 0) = q(2, 2) = q_position;
+            q(1, 1) = q(3, 3) = q_velocity;
+            P_ = f * P_ * f.transpose() + q;
+        }
+
+        constexpr double kPositionSigma = 0.012; // PnP 板心噪声，v4 静止段实测 1.3 cm
+        constexpr double kNormalSigma = 0.10;    // 法向噪声 ~5.7°
+        const double tangential_sigma =
+            std::sqrt(kPositionSigma * kPositionSigma +
+                      smoothing_radius * smoothing_radius * kNormalSigma * kNormalSigma);
+
+        double residual_sq = 0.0;
+        int residual_n = 0;
+        for (std::size_t i = 0; i < points.size(); ++i)
+        {
+            if (!std::isfinite(normal_yaws[i]))
+                continue;
+            const double yaw = normal_yaws[i];
+            const Eigen::Vector2d normal(std::cos(yaw), std::sin(yaw));
+            const Eigen::Vector2d tangential(-normal.y(), normal.x());
+            const Eigen::Vector2d implied = points[i] - smoothing_radius * normal;
+            const Eigen::Vector2d residual = Eigen::Vector2d(x_(0), x_(2)) - implied;
+
+            scalarUpdate(residual.dot(normal), normal, kPositionSigma);
+            scalarUpdate(residual.dot(tangential), tangential, tangential_sigma);
+
+            const double distance = (Eigen::Vector2d(x_(0), x_(2)) - points[i]).norm();
+            residual_sq += (distance - smoothing_radius) * (distance - smoothing_radius);
+            ++residual_n;
+        }
+        result.residual_m =
+            residual_n > 0 ? std::sqrt(residual_sq / static_cast<double>(residual_n)) : 0.0;
+        result.radius = smoothing_radius;
+
+        // 速度限幅：实测车不会超过 3 m/s，超了说明被某帧带飞了。
+        const double speed = std::hypot(x_(1), x_(3));
+        if (speed > 3.0)
+        {
+            x_(1) *= 3.0 / speed;
+            x_(3) *= 3.0 / speed;
+        }
+        P_ = 0.5 * (P_ + P_.transpose());
+
+        // 覆盖度：最近 1 s 内出现过的板法向在圆周上覆盖了多大一段。
+        // 静止/缓慢时覆盖度≈0 —— 此时圆心只能保证"贴着观测"，不能保证"绝对准"。
+        history_.emplace_back(has_time ? timestamp_s : 0.0,
+                              std::isfinite(normal_yaws.front()) ? normal_yaws.front()
+                                                                 : 0.0);
+        while (history_.size() > 240)
+            history_.pop_front();
+        if (has_time)
+        {
+            while (!history_.empty() && timestamp_s - history_.front().first > 1.0)
+                history_.pop_front();
+        }
+        result.coverage_deg = coverageDegrees();
+
+        const double fit = std::clamp(1.0 - result.residual_m / 0.03, 0.0, 1.0);
+        const double coverage = std::clamp(result.coverage_deg / 120.0, 0.0, 1.0);
+        result.confidence = 0.5 * fit + 0.5 * coverage;
+        result.centre = Eigen::Vector2d(x_(0), x_(2));
+        result.valid = result.centre.allFinite();
+        return result;
+    }
+
+private:
+    void scalarUpdate(double residual, const Eigen::Vector2d &direction, double sigma)
+    {
+        Eigen::Vector4d h;
+        h << direction.x(), 0.0, direction.y(), 0.0;
+        const double base = h.dot(P_ * h);
+        // 稳健：残差超过 3σ 时按 Huber 放大量测方差（不直接丢，丢多了会跟丢）。
+        const double normalized = std::fabs(residual) / std::max(sigma, 1.0e-9);
+        const double robust = normalized > 3.0 ? normalized / 3.0 : 1.0;
+        const double s = base + sigma * sigma * robust * robust;
+        if (!(s > 1.0e-12))
+            return;
+        const Eigen::Vector4d gain = (P_ * h) / s;
+        x_ -= gain * residual;
+        const Eigen::Matrix4d identity = Eigen::Matrix4d::Identity();
+        P_ = (identity - gain * h.transpose()) * P_;
+    }
+
+    double coverageDegrees() const
+    {
+        std::vector<double> yaws;
+        yaws.reserve(history_.size());
+        for (const auto &sample : history_)
+            yaws.push_back(sample.second);
+        if (yaws.size() < 2)
+            return 0.0;
+        std::sort(yaws.begin(), yaws.end());
+        double largest_gap = yaws.front() + 2.0 * kPi - yaws.back();
+        for (std::size_t i = 1; i < yaws.size(); ++i)
+            largest_gap = std::max(largest_gap, yaws[i] - yaws[i - 1]);
+        return std::max(0.0, 360.0 * (1.0 - largest_gap / (2.0 * kPi)));
+    }
+
+    bool initialised_{false};
+    Eigen::Vector4d x_{Eigen::Vector4d::Zero()};
+    Eigen::Matrix4d P_{Eigen::Matrix4d::Identity()};
+    double last_timestamp_s_{std::numeric_limits<double>::quiet_NaN()};
+    double radius_{std::numeric_limits<double>::quiet_NaN()};
+    std::deque<std::pair<double, double>> history_;
+};
+
 void drawDetectedBody(const Scene &scene, const TopDownFrame &frame, const TopDownOptions &options,
                       double fallback_radius)
 {
@@ -365,6 +563,7 @@ void drawDetectedBody(const Scene &scene, const TopDownFrame &frame, const TopDo
     // ---- 1. 收集本帧同一 id 的实测板（世界系）----
     std::vector<Eigen::Vector2d> points;
     std::vector<double> normals;
+    std::vector<int> ids;
     for (const TopDownObservation &observation : frame.observations)
     {
         if (!observation.position.allFinite())
@@ -374,6 +573,7 @@ void drawDetectedBody(const Scene &scene, const TopDownFrame &frame, const TopDo
             continue;
         points.emplace_back(observation.position.x(), observation.position.y());
         normals.push_back(observation.normal_yaw);
+        ids.push_back(observation.target_id);
     }
     if (points.empty())
         return;
@@ -424,88 +624,54 @@ void drawDetectedBody(const Scene &scene, const TopDownFrame &frame, const TopDo
             cluster_normals.push_back(normals[i]);
         }
 
-        // ---- 3. 圆心：用"固定半径 R"的等距约束解，不用法向射线交点 ----
-        // 法向射线交点对法向误差极其敏感（法向偏 20° 就能把圆心推走半个半径），
-        // 而"板心到车心的距离 = R"是硬约束，且 R 已经由弦长证据定量给出。
-        // 单板：等距约束本身是一个圆（圆心不定），只能用 ±R 的两个候选标出来；
-        // 两块板：两圆的交点（唯一），再按"车心必然比朝相机的板更远"选边；
-        // 三块以上：两两求解取平均。
-        const double R = radius_prior;
-        Eigen::Vector2d centre = Eigen::Vector2d::Zero();
-        bool solved = false;
-        if (cluster_points.size() >= 2)
+        // ---- 3. 车心：固定半径约束 + 常速 Kalman ----
+        // 原来这里每帧解一次几何（≥2 板两圆交点 / 单板沿法向退 R / 没法向就用 EKF 方向），
+        // 外面再套一层"窗口圆"覆盖。四个估计量轮换，而切向本来就只有 R·δθ 量级的精度，
+        // 于是绿圈看起来"抖"，其实是每帧换了一个答案。现在只留一个估计量：
+        // 把 |c − p_i| = R 拆成正交两路观测喂给常速 Kalman，时间平均交给滤波器。
+        static std::map<int, ObservedBodyEstimator> estimators;
+        static double last_frame_time_s = -1.0;
+        if (std::isfinite(frame.timestamp_s))
         {
-            Eigen::Vector2d acc = Eigen::Vector2d::Zero();
-            int acc_n = 0;
-            for (std::size_t i = 0; i < cluster_points.size(); ++i)
+            // 回放倒带/换片段：时间戳倒退就清空，别把两段视频拼成一辆车。
+            if (last_frame_time_s >= 0.0 && frame.timestamp_s + 0.5 < last_frame_time_s)
+                estimators.clear();
+            last_frame_time_s = frame.timestamp_s;
+        }
+
+        int estimator_key = 0;
+        for (std::size_t i = 0; i < points.size(); ++i)
+        {
+            if (label[i] == k)
             {
-                for (std::size_t j = i + 1; j < cluster_points.size(); ++j)
-                {
-                    const Eigen::Vector2d d = cluster_points[j] - cluster_points[i];
-                    const double half = 0.5 * d.norm();
-                    if (half > R || half < 1e-6)
-                        continue; // 两板间距超过直径，半径/配对有问题，跳过这一对
-                    const Eigen::Vector2d mid = 0.5 * (cluster_points[i] + cluster_points[j]);
-                    const Eigen::Vector2d u(-d.y() / (2.0 * half), d.x() / (2.0 * half));
-                    const double h = std::sqrt(std::max(0.0, R * R - half * half));
-                    const Eigen::Vector2d c1 = mid + h * u;
-                    const Eigen::Vector2d c2 = mid - h * u;
-                    // 车心必须比"朝相机的那块板"更远离相机（相机在原点）。
-                    acc += (c1.norm() > c2.norm()) ? c1 : c2;
-                    ++acc_n;
-                }
-            }
-            if (acc_n > 0)
-            {
-                centre = acc / static_cast<double>(acc_n);
-                solved = true;
+                estimator_key = ids[i];
+                break;
             }
         }
-        if (!solved && std::isfinite(cluster_normals[0]))
-        {
-            // 单板退化：板心沿外法向后退一个半径就是车心。
-            const Eigen::Vector2d n(std::cos(cluster_normals[0]), std::sin(cluster_normals[0]));
-            centre = cluster_points[0] - R * n;
-            solved = true;
-        }
-        if (!solved && frame.has_state && frame.state.allFinite())
-        {
-            // 连法向都没有（PnP 没给出有效法向）时，用滤波器车心只作为"方向"：
-            // 车心仍然被约束在距板心 R 的圆上，不会飞走。
-            const Eigen::Vector2d guess(frame.state(0), frame.state(2));
-            Eigen::Vector2d dir = guess - cluster_points[0];
-            const double len = dir.norm();
-            if (len > 1e-6)
-            {
-                centre = cluster_points[0] + R * (dir / len);
-                solved = true;
-            }
-        }
-        if (!solved || !centre.allFinite())
+        ObservedBodyEstimator &estimator = estimators[estimator_key];
+        const ObservedBodyEstimator::Result estimate =
+            estimator.update(cluster_points, cluster_normals, radius_prior, frame.timestamp_s);
+        if (!estimate.valid)
             continue;
 
-        double measured_radius = R; // 圆和蓝圈共用同一个 R，两个圆必然同大小
-
-        if (std::getenv("DET_DEBUG") != nullptr)
-            std::fprintf(stderr, "[det] cluster=%d n=%zu c=(%.3f,%.3f) R=%.3f prior=%.3f\n",
-                         k, cluster_points.size(), centre.x(), centre.y(), measured_radius,
-                         radius_prior);
+        const Eigen::Vector2d centre = estimate.centre;
+        const double measured_radius = estimate.radius;
         const bool primary = centre.norm() <= radius_prior * 3.0 + 1.0;
         const cv::Scalar color = primary ? kObsColor : kOtherColor;
-        // 主目标优先用"窗口圆"：单帧两块板的解抖 2-6 cm，而同一窗口的板心
-        // 本来就在一条半径稳定的圆上（残差 ~1 cm）。窗口圆只用于显示。
-        const bool use_window_circle =
-            primary && frame.diagnostics.detected_circle_valid &&
-            frame.diagnostics.detected_circle_samples >= 8;
-        if (use_window_circle)
-        {
-            centre = frame.diagnostics.detected_circle_center;
-            measured_radius = frame.diagnostics.detected_circle_radius;
-        }
+        const bool confident = estimate.confidence >= 0.5;
 
+        if (std::getenv("DET_DEBUG") != nullptr)
+            std::fprintf(stderr,
+                         "[det] cluster=%d id=%d n=%zu c=(%.3f,%.3f) R=%.3f prior=%.3f "
+                         "cov=%.0f res=%.4f conf=%.2f\n",
+                         k, estimator_key, cluster_points.size(), centre.x(), centre.y(),
+                         measured_radius, radius_prior, estimate.coverage_deg, estimate.residual_m,
+                         estimate.confidence);
+
+        // 圆：低信度时细线浅色，但不消失——消失容易让人以为检测挂了。
         cv::circle(canvas, ip(scene.toPx(centre.x(), centre.y())),
                    static_cast<int>(std::lround(measured_radius * scene.ppm)),
-                   mix(scene.bg, color, primary ? 0.55 : 0.30), primary ? 2 : 1, cv::LINE_AA);
+                   mix(scene.bg, color, confident ? 0.55 : 0.30), confident ? 2 : 1, cv::LINE_AA);
 
         // 法向线：这条线必须过圆心，肉眼一眼能验证"空间关系对不对"。
         for (std::size_t i = 0; i < cluster_points.size(); ++i)
@@ -520,25 +686,31 @@ void drawDetectedBody(const Scene &scene, const TopDownFrame &frame, const TopDo
                      cv::LINE_AA);
         }
 
-        // 显示层去抖：单帧解的中心抖动 ~8 cm，5 帧中位把 PnP 白噪声压掉，
-        // 但原始解（细圆）仍然画出来，两者之差就是观测噪声的量级。
-        // 注：static 只因为 drawDetectedBody 是自由函数；这是显示层去抖，
-        // 单实例使用即可（回放/单窗口）。
-        static std::deque<Eigen::Vector2d> detected_centre_history;
-        static int detected_centre_slot = -1;
-        if (k != detected_centre_slot)
+        // 原始单帧解（只画十字、不画圆）：它和滤波结果之差 = 过去"每帧换答案"的量级。
+        Eigen::Vector2d raw_centre = centre;
+        if (std::isfinite(cluster_normals.front()))
         {
-            detected_centre_history.clear();
-            detected_centre_slot = k;
+            const Eigen::Vector2d n0(std::cos(cluster_normals.front()),
+                                     std::sin(cluster_normals.front()));
+            raw_centre = cluster_points.front() - radius_prior * n0;
         }
-        detected_centre_history.push_back(centre);
-        while (detected_centre_history.size() > 5)
-            detected_centre_history.pop_front();
-        Eigen::Vector2d centre_smooth = centre;
+        const double jitter_mm = 1000.0 * (raw_centre - centre).norm();
+
+        // 输出序列本身的抖动：帧间跳变 + 对最近 5 帧中位的偏离。
+        // 验收看这两个数（"圆心稳住"指的是滤波输出，不是单帧解和它差多少）。
+        static std::map<int, std::deque<Eigen::Vector2d>> recent_centres;
+        std::deque<Eigen::Vector2d> &recent = recent_centres[estimator_key];
+        recent.push_back(centre);
+        while (recent.size() > 5)
+            recent.pop_front();
+        double jump_mm = 0.0;
+        if (recent.size() >= 2)
+            jump_mm = 1000.0 * (recent.back() - recent[recent.size() - 2]).norm();
+        double stab_mm = 0.0;
         {
             std::vector<double> xs;
             std::vector<double> ys;
-            for (const Eigen::Vector2d &c : detected_centre_history)
+            for (const Eigen::Vector2d &c : recent)
             {
                 xs.push_back(c.x());
                 ys.push_back(c.y());
@@ -546,35 +718,31 @@ void drawDetectedBody(const Scene &scene, const TopDownFrame &frame, const TopDo
             std::sort(xs.begin(), xs.end());
             std::sort(ys.begin(), ys.end());
             const std::size_t mid = xs.size() / 2;
-            centre_smooth = Eigen::Vector2d(xs[mid], ys[mid]);
+            stab_mm = 1000.0 * (centre - Eigen::Vector2d(xs[mid], ys[mid])).norm();
         }
-        const double jitter_mm =
-            1000.0 * (centre - centre_smooth).norm();
 
-        // 数字交付：把每帧的抖动打到 stdout（DET_JITTER=1），便于统计分布，
-        // 不用靠看图猜"抖不抖"。
+        // 数字交付：每帧抖动打到 stderr（DET_JITTER=1），便于统计分布，不用靠看图猜。
         static const bool jitter_print = std::getenv("DET_JITTER") != nullptr;
         if (jitter_print && primary)
-        {
             std::fprintf(stderr,
-                         "[jit] n=%zu R=%.3f jit_mm=%.1f win=%d win_n=%d win_R=%.3f "
-                         "win_res=%.4f\n",
-                         cluster_points.size(), measured_radius, jitter_mm,
-                         use_window_circle ? 1 : 0,
-                         frame.diagnostics.detected_circle_samples,
-                         frame.diagnostics.detected_circle_radius,
-                         frame.diagnostics.detected_circle_residual);
-        }
+                         "[jit] t=%.4f n=%zu R=%.3f raw=%.1f jump=%.1f stab=%.1f cov=%.0f "
+                         "res=%.1fmm conf=%.2f cx=%.4f cy=%.4f om=%.2f\n",
+                         frame.timestamp_s, cluster_points.size(), measured_radius, jitter_mm,
+                         jump_mm, stab_mm, estimate.coverage_deg, 1000.0 * estimate.residual_m,
+                         estimate.confidence, centre.x(), centre.y(),
+                         frame.has_state ? frame.state(7) : 0.0);
 
         const cv::Point2d centre_px = scene.toPx(centre.x(), centre.y());
         cv::drawMarker(canvas, ip(centre_px), color, cv::MARKER_TILTED_CROSS,
-                       static_cast<int>(std::lround(0.030 * scene.ppm)), primary ? 2 : 1);
-        // 去抖后的中心：实心点 + 抖动数字（mm）。数字比图更能说明"到底有多抖"。
-        const cv::Point2d smooth_px = scene.toPx(centre_smooth.x(), centre_smooth.y());
-        cv::circle(canvas, ip(smooth_px), std::max(2, static_cast<int>(std::lround(0.012 * scene.ppm))),
-                   color, cv::FILLED, cv::LINE_AA);
-        textAt(canvas, fmt("det %zu R %.3f  jit %.0fmm", cluster_points.size(), measured_radius,
-                           jitter_mm),
+                       static_cast<int>(std::lround(0.030 * scene.ppm)), confident ? 2 : 1);
+        cv::drawMarker(canvas,
+                       ip(scene.toPx(raw_centre.x(), raw_centre.y())),
+                       mix(scene.bg, color, 0.45), cv::MARKER_CROSS,
+                       static_cast<int>(std::lround(0.020 * scene.ppm)), 1);
+        textAt(canvas,
+               fmt("det %zu R%.3f cov%.0f res%.0fmm jit%.0fmm%s", cluster_points.size(),
+                   measured_radius, estimate.coverage_deg, 1000.0 * estimate.residual_m,
+                   jitter_mm, confident ? "" : " LOW"),
                ip(centre_px) + cv::Point(10, 16), (primary ? 0.42 : 0.36) * scene.scale, color,
                primary ? 1.4 : 1.0);
     }

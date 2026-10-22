@@ -80,6 +80,8 @@ struct TopDownOptions
 struct TopDownFrame
 {
     bool has_state{false};
+    // 本帧时间戳（秒，视频/相机时钟）。只给观测估计器算 dt 用；0/NaN 表示未知。
+    double timestamp_s{0.0};
     // 本帧这一路是否真有检测。false 的"其它车"不再画模型——
     // 否则一台早就没有观测的旧轨迹会一直挂在俯视图上（用户反馈的"没有车却还有建模"）。
     bool fresh{true};
