@@ -1,22 +1,20 @@
 #pragma once
 
-// 系统总览图：把"信息面板 + 相机画面 + 俯视图"拼成一张画布。
+// 实验性视图绘制（只给调试工具用，主程序 rmv_training 不依赖本模块）。
 //
-// 背景：web_debug（web_debug/ 目录，WebLogger + 网页折线图）能看遥测，但它是
-// 另一个进程的浏览器页面，现场调参时"网页看曲线、窗口看画面"要来回切。这里把
-// 同一批键（WEB_LOG 的键名）画成迷你卡片，与相机画面、EKF 俯视图并排拼成一张
-// 图，一次 imshow 就能全看：左列 = 取图/检测耗时类，右列 = EKF/瞄准类，中间 =
-// 相机画面，右下 = 俯视图。
-//
-// 本模块只做"画"，不含任何跟踪/检测逻辑，也不改 web_debug 的任何行为：
-// 想同时看网页时仍然照常 START_WEB_SERVER（在 test_camera_live 里是另一个端口、
-// 另一个进程，与主程序 rmv_training 的 web_debug 互不影响）。
+// 两次迭代留下的两样东西：
+//  1) SystemView：imshow 版"卡片 + 相机画面 + 俯视图"拼图。现在两个工具都不再
+//     调用它（系统视图改成了网页，见 tests/web_system/），保留作为参考实现，
+//     由 test_system_view 的布局测试守着。
+//  2) renderMiniTopDown()：网页右下角那块黑底俯视图——只画 4 块板 / 车心 /
+//     相机 / 两个瞄准点，按内容自动缩放，不画相机画面，所以每帧很便宜。
 
 #include <deque>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include <Eigen/Core>
 #include <opencv2/core.hpp>
 
 namespace rotating_armor
@@ -105,5 +103,55 @@ class SystemView
     std::deque<TelemetryTrace> left_;
     std::deque<TelemetryTrace> right_;
 };
+
+// ===== 迷你俯视图（web 系统视图右下角那一块）=====
+//
+// 和上面的 compose() 是两回事：这里**不显示相机画面**，只有黑底 + 车体几何，
+// 所以每帧只花零点几毫秒。坐标都是世界系（前 x / 左 y），画布按内容的包围盒
+// 自动缩放（每帧重算），车走近走远都铺满画面。
+struct MiniTopDownOptions
+{
+    int width{480};
+    int height{360};
+    // 包围盒外扩（米）：太小的话贴边的板会被画到边框上。
+    double margin_m{0.35};
+    // 视野半径下限（米）：只有相机、没有目标时也要有合理比例。
+    double min_half_extent_m{0.75};
+    // false（默认）= 只用车体定尺度，相机落在画面外时贴边画箭头 + 距离；
+    // true = 相机与车一起装进画面（车会小很多，但距离关系是字面的）。
+    bool fit_camera{false};
+};
+
+struct MiniTopDownFrame
+{
+    // 车心（EKF 估计）。has_body=false 时只画相机与（可能存在的）瞄准点。
+    Eigen::Vector3d body_centre{Eigen::Vector3d::Zero()};
+    bool has_body{false};
+    // 相机在云台系里的平移（顶视只取 x/y）——图上用来区分"云台原点"和"相机"。
+    Eigen::Vector3d camera_position{Eigen::Vector3d::Zero()};
+
+    // 4 块板的板心与法向 yaw（世界系，弧度）。两个数组等长；
+    // 切线方向与 TopDownView 一致：tangent = (-sin(yaw), cos(yaw))。
+    std::vector<Eigen::Vector3d> plate_centres;
+    std::vector<double> plate_yaws;
+    // 每块板的半宽（米）：大板 0.115、小板 0.0675。缺省按大板画。
+    std::vector<double> plate_half_widths;
+    int aim_slot{-1};
+
+    // 有效瞄准 = 当前时刻那块板的位置（弹丸瞬间到达会打中的点）；
+    // 预测瞄准 = 含提前量/飞行时间的下发点。两者都画，颜色不同。
+    Eigen::Vector3d valid_aim{Eigen::Vector3d::Zero()};
+    bool has_valid_aim{false};
+    Eigen::Vector3d predicted_aim{Eigen::Vector3d::Zero()};
+    bool has_predicted_aim{false};
+    bool fire_allowed{false};
+
+    // 左下角小字（距离/半径/角速度）。空字符串就不画。
+    std::string caption;
+};
+
+// 返回 width×height 的 BGR 黑底画布。
+cv::Mat renderMiniTopDown(const MiniTopDownFrame &frame,
+                          const MiniTopDownOptions &options = MiniTopDownOptions{});
 
 } // namespace rotating_armor

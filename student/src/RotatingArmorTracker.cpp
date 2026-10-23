@@ -180,6 +180,18 @@ bool predictionFinite(const PredictionResult &prediction)
            prediction.radius_1_m > 0.0F && prediction.distance_m >= 0.0F;
 }
 
+// 跟踪器里的调试打印总开关（默认关）。
+//
+// 关掉的原因：这些行以前是无条件打到 stderr 的，实跑时控制台会被 [ev]/[drop]/
+// [cleargap] 刷满，反而把每 150 帧一行的耗时统计和拒绝原因挤没了。需要看细节时
+// 设 TRACK_DEBUG=1（其它专门的开关仍各自独立：RATE_DEBUG / CIRCLE_DEBUG /
+// TRACKLET_DEBUG / BATCH_DEBUG）。
+bool trackDebugEnabled()
+{
+    static const bool enabled = std::getenv("TRACK_DEBUG") != nullptr;
+    return enabled;
+}
+
 } // namespace
 
 Eigen::Vector3d platePosition(const State &state, int plate_slot, int plate_count)
@@ -288,7 +300,8 @@ void RotatingArmorTracker::reset()
 
 void RotatingArmorTracker::dropTarget(const char *reason)
 {
-    std::fprintf(stderr, "[drop] %s\n", reason);
+    if (trackDebugEnabled())
+        std::fprintf(stderr, "[drop] %s\n", reason);
     resetRateWindow();
     if (config_.relock_reuse_enabled && ekf_.initialized())
     {
@@ -1473,8 +1486,9 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
             // 间断太久由下面的 rate_max_gap_s 清空。
             if (timestamp_s - rate_samples_.back().timestamp_s > config_.rate_max_gap_s)
             {
-                std::fprintf(stderr, "[cleargap] ts=%.3f back=%.3f n=%zu\n", timestamp_s,
-                             rate_samples_.back().timestamp_s, rate_samples_.size());
+                if (trackDebugEnabled())
+                    std::fprintf(stderr, "[cleargap] ts=%.3f back=%.3f n=%zu\n", timestamp_s,
+                                 rate_samples_.back().timestamp_s, rate_samples_.size());
                 rate_samples_.clear();
                 last_rate_update_s_ = -1.0e9;
             }
@@ -1483,16 +1497,18 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
     }
     if (chosen == nullptr)
     {
-        std::fprintf(stderr, "[nopick] ts=%.3f n=%zu obs=%zu\n", timestamp_s,
-                     rate_samples_.size(), world.size());
+        if (trackDebugEnabled())
+            std::fprintf(stderr, "[nopick] ts=%.3f n=%zu obs=%zu\n", timestamp_s,
+                         rate_samples_.size(), world.size());
         diagnostics_.rate_window_samples = static_cast<int>(rate_samples_.size());
         return;
     }
     if (!rate_samples_.empty() &&
         timestamp_s - rate_samples_.back().timestamp_s > config_.rate_max_gap_s)
     {
-        std::fprintf(stderr, "[cleargap2] ts=%.3f back=%.3f n=%zu\n", timestamp_s,
-                     rate_samples_.back().timestamp_s, rate_samples_.size());
+        if (trackDebugEnabled())
+            std::fprintf(stderr, "[cleargap2] ts=%.3f back=%.3f n=%zu\n", timestamp_s,
+                         rate_samples_.back().timestamp_s, rate_samples_.size());
         rate_samples_.clear();
         last_rate_update_s_ = -1.0e9;
     }
@@ -1667,8 +1683,9 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
             used_sigma = std::sqrt(1.0 / (w_n + w_b));
         }
     }
-    std::fprintf(stderr, "[ev] n=%d yaw=%+.2f(%.2f) bear=%+.2f(%.2f) used=%+.2f\n", count,
-                 slope, mad, bearing_slope, bearing_mad, used_slope);
+    if (trackDebugEnabled())
+        std::fprintf(stderr, "[ev] n=%d yaw=%+.2f(%.2f) bear=%+.2f(%.2f) used=%+.2f\n", count,
+                     slope, mad, bearing_slope, bearing_mad, used_slope);
 
     if (!ekf_.updateYawRate(used_slope, used_sigma))
     {

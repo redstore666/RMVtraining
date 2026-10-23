@@ -1,6 +1,9 @@
-// SystemView 的布局/绘制冒烟测试：不需要相机、不开窗口。
+// SystemView / renderMiniTopDown 的绘制冒烟测试：不需要相机、不开窗口。
 //
-// 验证三件事：
+// 迷你俯视图部分验证：黑底、自动缩放（远近目标在画面里的占比接近）、
+// 两个瞄准点颜色不同（青 = 有效、黄/绿 = 预测）、空态不崩且写 no target。
+//
+// 布局部分验证三件事：
 //  1) 画布宽度 = pad + 左列 + pad + 相机 + pad + 右列 + pad，
 //     高度 = pad + max(相机高, 右列卡片 + 俯视图最小高度) + pad；
 //  2) 相机画面被原样搬到中间（不被卡片覆盖，列比画面高时垂直居中）；
@@ -31,6 +34,62 @@ void expect(bool condition, const char *what)
     {
         std::printf("[ ok ] %s\n", what);
     }
+}
+
+int nonBlackPixelCount(const cv::Mat &canvas)
+{
+    int count = 0;
+    for (int y = 0; y < canvas.rows; ++y)
+    {
+        const cv::Vec3b *row = canvas.ptr<cv::Vec3b>(y);
+        for (int x = 0; x < canvas.cols; ++x)
+        {
+            if (row[x][0] > 24 || row[x][1] > 24 || row[x][2] > 24)
+                ++count;
+        }
+    }
+    return count;
+}
+
+bool hasColour(const cv::Mat &canvas, const cv::Scalar &target, int tolerance = 40)
+{
+    for (int y = 0; y < canvas.rows; ++y)
+    {
+        const cv::Vec3b *row = canvas.ptr<cv::Vec3b>(y);
+        for (int x = 0; x < canvas.cols; ++x)
+        {
+            if (std::abs(row[x][0] - target[0]) <= tolerance &&
+                std::abs(row[x][1] - target[1]) <= tolerance &&
+                std::abs(row[x][2] - target[2]) <= tolerance)
+                return true;
+        }
+    }
+    return false;
+}
+
+// 造一台"车心在 (distance, 0)、半径 0.25、四块板"的标准车。
+rotating_armor::MiniTopDownFrame makeVehicle(double distance, bool fire_allowed)
+{
+    rotating_armor::MiniTopDownFrame frame;
+    frame.has_body = true;
+    frame.body_centre = Eigen::Vector3d(distance, 0.0, 0.0);
+    frame.camera_position = Eigen::Vector3d(0.0, 0.0, 0.0);
+    for (int slot = 0; slot < 4; ++slot)
+    {
+        const double phase = slot * M_PI * 0.5;
+        frame.plate_centres.emplace_back(distance - 0.25 * std::cos(phase),
+                                         -0.25 * std::sin(phase), 0.30);
+        frame.plate_yaws.push_back(phase);
+        frame.plate_half_widths.push_back(0.0675);
+    }
+    frame.aim_slot = 0;
+    frame.has_valid_aim = true;
+    frame.valid_aim = frame.plate_centres[0];
+    frame.has_predicted_aim = true;
+    frame.predicted_aim = frame.plate_centres[0] + Eigen::Vector3d(0.03, 0.02, 0.0);
+    frame.fire_allowed = fire_allowed;
+    frame.caption = "d=2.00m R=0.25 w=-3.0";
+    return frame;
 }
 
 int nonWhitePixelCount(const cv::Mat &patch)
@@ -163,6 +222,38 @@ int main()
 
     // 空相机应当返回空画布（调用方据此跳过 imshow）。
     expect(view.compose(cv::Mat{}, overview).empty(), "空相机返回空画布");
+
+    // ===== 迷你俯视图（网页右下角那一块）=====
+    {
+        const cv::Mat near = rotating_armor::renderMiniTopDown(makeVehicle(2.0, false));
+        const cv::Mat far = rotating_armor::renderMiniTopDown(makeVehicle(6.0, false));
+        expect(near.cols == 480 && near.rows == 360 && near.type() == CV_8UC3,
+               "迷你俯视图是 480x360 的 BGR 画布");
+        expect(near.at<cv::Vec3b>(2, 2) == cv::Vec3b(0, 0, 0), "迷你俯视图是黑底");
+        expect(nonBlackPixelCount(near) > 200, "迷你俯视图画了东西（不是全黑）");
+
+        // 自动缩放：目标从 2 m 挪到 6 m，画面里的占比应当接近（都铺满），
+        // 而不是"远处变成一个小点"。
+        const int near_px = nonBlackPixelCount(near);
+        const int far_px = nonBlackPixelCount(far);
+        expect(std::abs(near_px - far_px) < 0.35 * std::max(near_px, far_px),
+               "迷你俯视图按内容自动缩放（2 m 与 6 m 的占比接近）");
+
+        // 两个瞄准点颜色不同：有效 = 青（BGR 255,255,0），预测 = 黄（0,200,255）。
+        expect(hasColour(near, cv::Scalar(255, 255, 0), 10), "有效瞄准点是青色");
+        expect(hasColour(near, cv::Scalar(0, 200, 255), 10), "预测瞄准点是黄色");
+        // 允许开火时预测点变绿（0,255,0）。
+        const cv::Mat hot = rotating_armor::renderMiniTopDown(makeVehicle(2.0, true));
+        expect(hasColour(hot, cv::Scalar(0, 255, 0), 10), "fire_allowed 时预测点变绿");
+
+        // 没有目标：只画相机与 no target，不该出现车心的红点。
+        rotating_armor::MiniTopDownFrame empty;
+        empty.camera_position = Eigen::Vector3d(0.0, 0.0, 0.0);
+        const cv::Mat no_target = rotating_armor::renderMiniTopDown(empty);
+        expect(!no_target.empty() && nonBlackPixelCount(no_target) < 2000,
+               "无目标时迷你俯视图不崩、内容很少");
+        expect(!hasColour(no_target, cv::Scalar(0, 0, 255), 20), "无目标时不画车心红点");
+    }
 
     if (g_failures != 0)
     {

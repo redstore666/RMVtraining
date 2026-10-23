@@ -448,4 +448,204 @@ cv::Mat SystemView::compose(const cv::Mat &camera, const cv::Mat &overview) cons
     return canvas;
 }
 
+
+// ===== 迷你俯视图 =====
+//
+// 只画"车在哪里、板朝哪边、瞄哪一点"，不画相机画面、不画网格/轨迹/图例：
+// 右下角那一小块地方要一眼看懂，而不是塞满信息。
+cv::Mat renderMiniTopDown(const MiniTopDownFrame &frame, const MiniTopDownOptions &options)
+{
+    const int width = std::max(80, options.width);
+    const int height = std::max(60, options.height);
+    cv::Mat canvas(height, width, CV_8UC3, cv::Scalar(0, 0, 0));
+
+    // 画布坐标：右 = +x，上 = +y（与俯视图 HUD 的 +x/+y 一致）。
+    //
+    // 缩放口径：**以车为准**（4 块板 + 车心 + 瞄准点），按包围盒自动定尺度。
+    // 相机在 2 m 外，若把它也算进包围盒，车就只有几十像素、板看不清——所以
+    // 默认只用车定尺度，相机落在画面外时贴边画一个箭头 + 距离，"往哪边、多远"
+    // 照样一眼看到。options.fit_camera=true 才是"相机与车一起装进画面"的字面口径。
+    std::vector<Eigen::Vector2d> vehicle;
+    if (frame.has_body)
+        vehicle.emplace_back(frame.body_centre.x(), frame.body_centre.y());
+    for (const Eigen::Vector3d &centre : frame.plate_centres)
+        vehicle.emplace_back(centre.x(), centre.y());
+    if (frame.has_valid_aim)
+        vehicle.emplace_back(frame.valid_aim.x(), frame.valid_aim.y());
+    if (frame.has_predicted_aim)
+        vehicle.emplace_back(frame.predicted_aim.x(), frame.predicted_aim.y());
+
+    // 只有相机、没有任何车体信息时，退回"以原点为中心"的默认视野。
+    if (vehicle.empty())
+    {
+        vehicle.emplace_back(0.0, 0.0);
+        vehicle.emplace_back(frame.camera_position.x(), frame.camera_position.y());
+    }
+
+    double min_x = vehicle.front().x(), max_x = min_x;
+    double min_y = vehicle.front().y(), max_y = min_y;
+    for (const Eigen::Vector2d &p : vehicle)
+    {
+        min_x = std::min(min_x, p.x());
+        max_x = std::max(max_x, p.x());
+        min_y = std::min(min_y, p.y());
+        max_y = std::max(max_y, p.y());
+    }
+    double centre_x = 0.5 * (min_x + max_x);
+    double centre_y = 0.5 * (min_y + max_y);
+    double half_x = 0.5 * (max_x - min_x);
+    double half_y = 0.5 * (max_y - min_y);
+
+    if (options.fit_camera)
+    {
+        // 字面口径：相机与车一起装进画面。
+        const double cam_x = frame.camera_position.x();
+        const double cam_y = frame.camera_position.y();
+        min_x = std::min(min_x, cam_x);
+        max_x = std::max(max_x, cam_x);
+        min_y = std::min(min_y, cam_y);
+        max_y = std::max(max_y, cam_y);
+        centre_x = 0.5 * (min_x + max_x);
+        centre_y = 0.5 * (min_y + max_y);
+        half_x = 0.5 * (max_x - min_x);
+        half_y = 0.5 * (max_y - min_y);
+    }
+
+    // 视野半径 = 内容半宽 + 外扩；再兜一个下限，避免"全在原点"时放大到无穷。
+    double half_extent = std::max(half_x, half_y) + options.margin_m;
+    half_extent = std::max(half_extent, options.min_half_extent_m);
+    const double ppm = 0.5 * static_cast<double>(std::min(width, height)) / half_extent;
+
+    const auto to_px = [&](double x, double y)
+    {
+        return cv::Point(cvRound(0.5 * width + (x - centre_x) * ppm),
+                         cvRound(0.5 * height - (y - centre_y) * ppm));
+    };
+    const auto to_px3 = [&](const Eigen::Vector3d &p) { return to_px(p.x(), p.y()); };
+    const cv::Rect canvas_rect(0, 0, width, height);
+
+    // 板：一段粗线（长度 = 整板宽），aim 板多画一圈白描边。
+    static const cv::Scalar kPlateColours[4] = {
+        cv::Scalar(255, 160, 0),  // 蓝
+        cv::Scalar(0, 200, 255),  // 黄
+        cv::Scalar(0, 140, 255),  // 橙
+        cv::Scalar(255, 0, 200),  // 紫
+    };
+    for (std::size_t i = 0; i < frame.plate_centres.size(); ++i)
+    {
+        const double yaw = i < frame.plate_yaws.size() ? frame.plate_yaws[i] : 0.0;
+        const double half_w = i < frame.plate_half_widths.size() ? frame.plate_half_widths[i]
+                                                                : 0.115;
+        if (!std::isfinite(yaw))
+            continue;
+        // 与 TopDownView 的板绘制同一定义：tangent = (-sin(yaw), cos(yaw))。
+        const double tx = -std::sin(yaw);
+        const double ty = std::cos(yaw);
+        const cv::Point a = to_px(frame.plate_centres[i].x() - half_w * tx,
+                                  frame.plate_centres[i].y() - half_w * ty);
+        const cv::Point b = to_px(frame.plate_centres[i].x() + half_w * tx,
+                                  frame.plate_centres[i].y() + half_w * ty);
+        const bool is_aim = (frame.aim_slot >= 0 && static_cast<int>(i) == frame.aim_slot);
+        if (is_aim)
+        {
+            cv::line(canvas, a, b, cv::Scalar(255, 255, 255), 6, cv::LINE_AA);
+        }
+        cv::line(canvas, a, b, kPlateColours[i % 4], 3, cv::LINE_AA);
+    }
+
+    // 云台原点：灰色空心小圆（"相机装在云台前面一点"，两者要能分开看）。
+    const cv::Point origin_px = to_px(0.0, 0.0);
+    if (canvas_rect.contains(origin_px))
+        cv::circle(canvas, origin_px, 4, cv::Scalar(120, 120, 120), 1, cv::LINE_AA);
+
+    // 相机位置：白色小方块 + 朝 +x 的短线。落在画面外时贴边画，指着真实方向，
+    // 并把距离写出来——"车往哪边走、离相机多远"不用再回头看数字。
+    const cv::Point cam_raw = to_px(frame.camera_position.x(), frame.camera_position.y());
+    const int edge = 12;
+    const bool cam_visible = cam_raw.x >= edge && cam_raw.x < width - edge &&
+                             cam_raw.y >= edge && cam_raw.y < height - edge;
+    cv::Point cam = cam_raw;
+    if (!cam_visible)
+    {
+        const cv::Point2d mid(0.5 * width, 0.5 * height);
+        cv::Point2d dir(cam_raw.x - mid.x, cam_raw.y - mid.y);
+        const double len = std::hypot(dir.x, dir.y);
+        if (len < 1e-6)
+            dir = cv::Point2d(-1.0, 0.0), dir = dir / cv::norm(dir);
+        else
+            dir = dir / len;
+        const double limit_x = (0.5 * width - edge) / std::max(std::fabs(dir.x), 1e-6);
+        const double limit_y = (0.5 * height - edge) / std::max(std::fabs(dir.y), 1e-6);
+        const double t = std::min(limit_x, limit_y);
+        cam = cv::Point(cvRound(mid.x + dir.x * t), cvRound(mid.y + dir.y * t));
+        // 指外的小三角：说明"相机在这个方向的画面外"。
+        const cv::Point tip(cvRound(cam.x - dir.x * 8), cvRound(cam.y - dir.y * 8));
+        const cv::Point side(dir.y * 5, -dir.x * 5);
+        const std::vector<cv::Point> arrow = {tip, cv::Point(cvRound(cam.x + side.x),
+                                                             cvRound(cam.y + side.y)),
+                                              cv::Point(cvRound(cam.x - side.x),
+                                                        cvRound(cam.y - side.y))};
+        cv::fillConvexPoly(canvas, arrow, cv::Scalar(255, 255, 255), cv::LINE_AA);
+    }
+    else
+    {
+        cv::rectangle(canvas, cv::Rect(cam.x - 4, cam.y - 4, 8, 8), cv::Scalar(255, 255, 255),
+                      cv::FILLED);
+        cv::line(canvas, cam, cam + cv::Point(16, 0), cv::Scalar(255, 255, 255), 1,
+                 cv::LINE_AA);
+    }
+
+    // 车心：红色实心圆 + 十字。
+    if (frame.has_body)
+    {
+        const cv::Point body = to_px3(frame.body_centre);
+        cv::circle(canvas, body, 5, cv::Scalar(0, 0, 255), cv::FILLED, cv::LINE_AA);
+        cv::drawMarker(canvas, body, cv::Scalar(0, 0, 255), cv::MARKER_CROSS, 14, 1);
+    }
+
+    // 瞄准：青 = 有效（当前板位，不含提前量），黄 = 预测（含提前量/飞行时间）。
+    // 允许开火时预测点变绿并画一条相机→瞄准点的虚线，一眼看出"现在能不能打"。
+    if (frame.has_predicted_aim)
+    {
+        const cv::Point p = to_px3(frame.predicted_aim);
+        if (frame.fire_allowed)
+        {
+            cv::circle(canvas, p, 6, cv::Scalar(0, 255, 0), cv::FILLED, cv::LINE_AA);
+            // 虚线：32 位 alpha 通道画不了，这里用分段线模拟。
+            const int segments = 12;
+            for (int si = 0; si < segments; si += 2)
+            {
+                const double t0 = static_cast<double>(si) / segments;
+                const double t1 = static_cast<double>(si + 1) / segments;
+                const cv::Point a(cvRound(cam.x + (p.x - cam.x) * t0),
+                                  cvRound(cam.y + (p.y - cam.y) * t0));
+                const cv::Point b(cvRound(cam.x + (p.x - cam.x) * t1),
+                                  cvRound(cam.y + (p.y - cam.y) * t1));
+                cv::line(canvas, a, b, cv::Scalar(0, 160, 0), 1, cv::LINE_AA);
+            }
+        }
+        else
+        {
+            cv::drawMarker(canvas, p, cv::Scalar(0, 200, 255), cv::MARKER_TILTED_CROSS, 18, 2);
+        }
+    }
+    if (frame.has_valid_aim)
+    {
+        const cv::Point p = to_px3(frame.valid_aim);
+        cv::circle(canvas, p, 7, cv::Scalar(255, 255, 0), 1, cv::LINE_AA);
+        cv::drawMarker(canvas, p, cv::Scalar(255, 255, 0), cv::MARKER_CROSS, 12, 1);
+    }
+
+    // 左下角小字：距离/半径/角速度；没有目标时明确写 no target。
+    const std::string caption = frame.caption.empty()
+        ? (frame.has_body ? std::string() : std::string("no target"))
+        : frame.caption;
+    if (!caption.empty())
+    {
+        cv::putText(canvas, caption, cv::Point(8, height - 8), cv::FONT_HERSHEY_SIMPLEX, 0.45,
+                    cv::Scalar(200, 200, 200), 1, cv::LINE_AA);
+    }
+    return canvas;
+}
+
 } // namespace rotating_armor

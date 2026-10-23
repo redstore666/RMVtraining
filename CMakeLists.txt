@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(ENABLE_WEB_DEBUG "Build the scalar Web Debug dashboard" ON)
+option(ENABLE_WEB_SYSTEM "Build the web system view (tests/web_system, test_camera_system)" ON)
 option(BUILD_TESTING "Build the starter-project tests" ON)
 
 find_package(Eigen3 REQUIRED)
@@ -21,6 +22,11 @@ add_subdirectory(serialPort)
 
 if(ENABLE_WEB_DEBUG)
     add_subdirectory(web_debug)
+endif()
+
+# 系统视图用的 webdebug 副本（多一条 /frame.jpg 图片通道）；与 web_debug 互不影响。
+if(ENABLE_WEB_SYSTEM)
+    add_subdirectory(tests/web_system)
 endif()
 
 # MVS SDK 路径变量（放在 add_library 之前）
@@ -63,13 +69,20 @@ add_library(topdown_view STATIC
 )
 target_link_libraries(topdown_view PUBLIC rotating_armor_ekf opencv_imgproc)
 
-# 系统总览图：把"信息面板 + 相机画面 + 俯视图"拼成一张画布（一次 imshow 看全）。
-# 与 web_debug 互补：网页看曲线、这张图看"曲线 + 画面 + 俯视图"的对应关系。
+# 实验性视图代码（卡片/折线拼图、迷你俯视图）。全部放在 tests/ 下：
+# 这部分只在调试工具里用，不进 training_core，主程序 rmv_training 不依赖它。
 add_library(system_view STATIC
-    src/SystemView.cpp
+    tests/SystemView.cpp
 )
-target_include_directories(system_view PUBLIC include)
-target_link_libraries(system_view PUBLIC opencv_core opencv_imgproc)
+target_include_directories(system_view PUBLIC tests)
+target_link_libraries(system_view PUBLIC Eigen3::Eigen opencv_core opencv_imgproc)
+
+# 相机叠加层（检测框/坐标轴/PnP 面板/EKF 面板）：两个实时工具共用一份画法。
+add_library(camera_overlay STATIC
+    tests/CameraOverlay.cpp
+)
+target_include_directories(camera_overlay PUBLIC tests)
+target_link_libraries(camera_overlay PUBLIC training_core opencv_core opencv_imgproc)
 
 add_library(training_core STATIC
     src/AppSupport.cpp
@@ -254,12 +267,16 @@ target_include_directories(test_ekf_viewer PRIVATE ${OpenCV_INCLUDE_DIRS})
 # 实时相机取流 + 装甲板检测（相机必须已连接）。
 add_executable(test_camera_live tests/test_camera_live.cpp)
 # topdown_view：EKF 俯视图渲染（与 test_camera_playback 的 --topdown 共用同一份实现）。
-target_link_libraries(test_camera_live PRIVATE training_core topdown_view system_view
+target_link_libraries(test_camera_live PRIVATE training_core topdown_view camera_overlay
                       ${OpenCV_LIBS})
-# web_debug：与 rmv_training 用的是同一份实现，但本工具以独立进程、独立端口运行，
-# 因此不会影响主程序那条 webdebug（网页看同一批键）。
-if(ENABLE_WEB_DEBUG)
-    target_link_libraries(test_camera_live PRIVATE web_debug)
+
+# 系统视图（网页版）：遥测 + 右下角迷你俯视图都推到浏览器，不画相机画面。
+# 与 test_camera_live 完全独立，互不影响（第一阶段验收仍用 test_camera_live）。
+add_executable(test_camera_system tests/test_camera_system.cpp)
+target_link_libraries(test_camera_system PRIVATE training_core camera_overlay system_view
+                      ${OpenCV_LIBS})
+if(ENABLE_WEB_SYSTEM)
+    target_link_libraries(test_camera_system PRIVATE system_web)
 endif()
 target_include_directories(test_camera_live PRIVATE ${OpenCV_INCLUDE_DIRS})
 
