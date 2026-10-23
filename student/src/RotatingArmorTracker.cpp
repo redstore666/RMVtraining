@@ -1569,6 +1569,9 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
         return;
     }
     const double span = rate_samples_.back().timestamp_s - rate_samples_.front().timestamp_s;
+    // 窗口预热：刚到 min_span 的窗点对太少（min_pair_dt 只有 0.5*span），Theil-Sen
+    // 的中位数斜率方差巨大——H3 实测预热期（span 0.18~0.25s）斜率 ±2.6、MAD 0.4~1.5，
+    // 而满窗（span≈0.35s）斜率小且紧。要求 1.5 倍 min_span 才估速，等窗热了再说。
     if (span < config_.rate_min_span_s)
     {
         return;
@@ -1589,6 +1592,42 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
     // 车心固定、当时车心的抖动才是噪声源。按当前转速选极点。
     const bool spinning_now = std::fabs(ekf_.state()(7)) >= 0.5;
     const Eigen::Vector2d pole(ekf_.state()(0), ekf_.state()(2));
+
+    // 几何自检：极点/半径坏了的时候，绕它算出的方位角斜率必然是伪值（R 崩到
+    // 0.152 或极点偏 0.2 m 时 bearing 斜率冲到 +8~+10）。两类不可信一起判：
+    // R 掉出物理合理范围；板心到极点的距离与 R 对不上的样本过半（圆被拉歪）。
+    // 命中就整窗放弃，让衰减项接管——静态/平移目标车心没收敛时也走这条路，
+    // 不会把"车心在收敛"读成转动。
+    const double radius_now = ekf_.state()(8);
+    int off_circle = 0;
+    for (int i = 0; i < count; ++i)
+    {
+        const RateSample &sample = rate_samples_[static_cast<std::size_t>(i)];
+        const Eigen::Vector2d &center = spinning_now ? pole : sample.center;
+        const double residual =
+            std::fabs((sample.position.head<2>() - center).norm() - radius_now);
+        if (residual > config_.rate_pole_residual_m)
+        {
+            ++off_circle;
+        }
+    }
+    if ((radius_now < config_.radius_plausible_min_m ||
+        radius_now > config_.radius_plausible_max_m || off_circle * 2 > count))
+    {
+        if (trackDebugEnabled())
+            std::fprintf(stderr, "[evskip] n=%d R=%.3f bad=%d/%d (R/极点不可信)\n",
+                         count, radius_now, off_circle, count);
+        return;
+    }
+
+    // 非自转 + 车心在移动：方位角路整条不收集。纯平移下真方位角是常数，
+    // 斜率只可能来自车心估计误差的漂移（与车速同源，H3 实测稳定 +0.4~+0.7），
+    // 拟合得再准也是伪值。法向路不受影响；自转时极点是同一个点，平移共模，
+    // 不需要这道闸。
+    const double centre_speed = std::hypot(ekf_.state()(1), ekf_.state()(3));
+    const bool bearing_trusted =
+        spinning_now ||
+        centre_speed <= config_.rate_bearing_max_centre_speed_m_s;
     // 方位角序列只收"位置连续的同一块板"的样本（见 RateSample::continuous）。
     std::vector<double> bearing_times;
     std::vector<double> bearing_values;
@@ -1601,6 +1640,10 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
         const RateSample &sample = rate_samples_[static_cast<std::size_t>(i)];
         times[static_cast<std::size_t>(i)] = sample.timestamp_s;
         yaws[static_cast<std::size_t>(i)] = sample.unwrapped_yaw;
+        if (!bearing_trusted)
+        {
+            continue;
+        }
         const Eigen::Vector2d &center = spinning_now ? pole : sample.center;
         const double dx = sample.position.x() - center.x();
         const double dy = sample.position.y() - center.y();
@@ -1651,7 +1694,8 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
     //     法向在实拍小目标上会"整段地"漂（v4 的板心在 ±45° 折叠边界附近来回
     //     翻，解缠后是每帧 +5° 的锯齿，Theil-Sen 也救不了——实测斜率 -10 rad/s，
     //     而车其实没转）。位置没有这个问题：目标平移时板与车心一起动，方位角
-    //     不变。两路证据打架时以"说不清"处理：不更新，让衰减项把 omega 停在 0。
+    //     不变（前提是车心估计没在动——非自转且车心速度超限的窗，这条路上面
+    //     已经整条关了）。两路证据打架时以"说不清"处理：不更新，让衰减项把 omega 停在 0。
     double bearing_mad = 0.0;
     const double bearing_slope =
         bearing_times.size() >= 8
@@ -1666,8 +1710,17 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
     //     位置相位没有这个问题——板心到车心的方位角每帧只走 ω·dt（166fps、5rad/s
     //     时 0.03 rad，远小于折叠半周期 45°），位置噪声 1-3cm 又比法向噪声
     //     （~20°）小一个量级。法向斜率只在它和位置相位一致时用来抬高可信度。
-    const double bearing_sigma =
+    const double bearing_sigma_base =
         std::max(1.4826 * bearing_mad, config_.rate_sigma_floor_rad_s);
+    // 非自转时方位角斜率的偏差 ~ 车心误差漂移/R，而误差漂移与车速同源且在
+    // 车心收敛期最大（H3：v_est 爬升期 bear 稳定 +0.4~+0.7，R=0.19）。车速是
+    // ė 的可观测代理，折进 sigma 让 EKF 自己降权——比一刀切拒绝保留更多
+    // 低速下的可用证据（偏差 0 的纯平移稳态不受影响）。
+    const double bearing_sigma =
+        spinning_now
+            ? bearing_sigma_base
+            : std::max(bearing_sigma_base,
+                       centre_speed / std::max(2.0 * radius_now, 0.10));
     double used_slope = bearing_slope;
     double used_sigma = bearing_sigma;
     if (std::isfinite(slope) && std::isfinite(bearing_slope))
@@ -3794,12 +3847,10 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
         timestamp_seconds - last_rate_update_s_ > config_.rate_decay_after_s &&
         std::fabs(ekf_.state()(7)) > 0.05)
     {
-        if (ekf_.updateYawRate(0.0, config_.rate_decay_sigma_rad_s))
-        {
-            // 衰减本身也算动过 omega：盖章后下一轮要再等 rate_decay_after_s，
-            // 否则这里每帧都在拉 0，把刚吃进来的斜率量测对冲掉。
-            last_rate_update_s_ = timestamp_seconds;
-        }
+        // 注意这里**不**盖章：缺席期间的泄漏是连续的（位置更新经协方差耦合
+        // 每帧都在推 omega，实测能推到 ∓6 rad/s），对抗它的弱伪量测也必须
+        // 每帧都在。盖章只发生在上面三处真证据入口——它们的帧衰减让路。
+        ekf_.updateYawRate(0.0, config_.rate_decay_sigma_rad_s);
     }
     updateBodyFromPair(world);
     updateRadiusFromPairs(world);
