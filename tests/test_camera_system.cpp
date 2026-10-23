@@ -14,7 +14,11 @@
 // 用法: ./build/test_camera_system [--red|--blue] [--video FILE] [--web-port N]
 //        [--show-camera] [--no-display] [--dump-every N]
 //
-//   --video FILE   不连相机、改读视频（没有相机的机器上验证整条链路）
+//   --video FILE   不连相机、改读视频（没有相机的机器上验证整条链路）。
+//                  按视频自己的时间轴喂 EKF（time = frame_index / fps），所以
+//                  转速、提前量和实拍一致，与 test_camera_playback 同一口径。
+//   --video-loop   视频放完从头再来（网页一直有数据，适合慢慢看）
+//   --hold S       视频放完后继续服务 S 秒再退出（默认 0 = 立即退出）
 //   --web-port N   网页端口（默认 8081；生产程序的 webdebug 是 8080，互不影响）
 //   --show-camera  额外开一个窗口显示相机画面 + 检测框 + 坐标轴 + EKF 叠加
 //   --no-display   不开任何窗口（只推网页；纯吞吐/后台跑）
@@ -40,6 +44,7 @@
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <opencv2/highgui.hpp>
@@ -69,6 +74,8 @@ int main(int argc, char **argv)
     std::string video_path;
     int web_port = 8081;
     int dump_every = 0;
+    bool video_loop = false;
+    double hold_s = 0.0;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -89,6 +96,22 @@ int main(int argc, char **argv)
                 return 2;
             }
             video_path = argv[++i];
+        }
+        else if (arg == "--video-loop")
+            video_loop = true;
+        else if (arg == "--hold")
+        {
+            if (i + 1 >= argc)
+            {
+                std::cerr << "--hold 后面要跟秒数\n";
+                return 2;
+            }
+            hold_s = std::atof(argv[++i]);
+            if (hold_s < 0.0)
+            {
+                std::cerr << "--hold 不能是负数\n";
+                return 2;
+            }
         }
         else if (arg == "--web-port")
         {
@@ -154,7 +177,8 @@ int main(int argc, char **argv)
     std::cout << "[web] 系统视图: http://127.0.0.1:" << web_port << "/\n";
     std::cout << "[web] 迷你俯视图原图: http://127.0.0.1:" << web_port << "/frame.jpg\n";
 
-    if (!no_display)
+    // 只有真的要显示相机画面时才建窗口：不建空窗口，纯网页模式不会弹出黑框。
+    if (show_camera)
     {
         cv::namedWindow("camera_system", cv::WINDOW_NORMAL);
         std::cout << "ESC/q 退出, r 重置 EKF\n";
@@ -176,6 +200,11 @@ int main(int argc, char **argv)
     const auto t_start = std::chrono::steady_clock::now();
 
     cv::VideoCapture video_capture;
+    double video_fps = 30.0;
+    double video_duration_s = 0.0;
+    double video_time_offset_s = 0.0; // 循环播放时累计的时间轴偏移
+    long long video_frame_index = 0;  // 当前循环内的帧号（从 0 起）
+    int video_loop_count = 0;
     if (!video_path.empty())
     {
         video_capture.open(video_path);
@@ -184,9 +213,19 @@ int main(int argc, char **argv)
             std::cerr << "无法打开视频: " << video_path << "\n";
             return 2;
         }
+        video_fps = video_capture.get(cv::CAP_PROP_FPS);
+        if (!(video_fps > 1.0))
+            video_fps = 30.0; // 容器里没写帧率时按 30 处理，别让 dt 变成 0
+        const double frames = video_capture.get(cv::CAP_PROP_FRAME_COUNT);
+        video_duration_s = frames > 0.0 ? frames / video_fps : 0.0;
         std::cout << "[--video] " << video_path << "  " << video_capture.get(cv::CAP_PROP_FRAME_WIDTH)
-                  << "x" << video_capture.get(cv::CAP_PROP_FRAME_HEIGHT) << "  "
-                  << video_capture.get(cv::CAP_PROP_FPS) << " fps\n";
+                  << "x" << video_capture.get(cv::CAP_PROP_FRAME_HEIGHT) << "  " << video_fps
+                  << " fps  " << static_cast<long long>(frames) << " 帧  "
+                  << cv::format("%.1f s", video_duration_s) << "\n";
+        std::cout << "[--video] 时间轴按视频自己的帧率走（frame_index / fps），"
+                     "转速与实拍一致\n";
+        if (video_loop)
+            std::cout << "[--video] 循环播放中（--video-loop）\n";
     }
 
     // 迷你俯视图 30 Hz 渲染门（检测/滤波照常全速跑）。
@@ -198,11 +237,24 @@ int main(int argc, char **argv)
         const int64_t t0 = cv::getTickCount();
         if (!video_path.empty())
         {
-            if (!video_capture.read(frame) || frame.empty())
+            bool got = video_capture.read(frame) && !frame.empty();
+            if (!got && video_loop)
+            {
+                // 回到第一帧接着放；时间轴不回退（否则 EKF 会看到负的 dt）。
+                video_time_offset_s += video_duration_s > 0.0
+                    ? video_duration_s
+                    : static_cast<double>(video_frame_index) / video_fps;
+                video_frame_index = 0;
+                video_capture.set(cv::CAP_PROP_POS_FRAMES, 0.0);
+                ++video_loop_count;
+                got = video_capture.read(frame) && !frame.empty();
+            }
+            if (!got)
             {
                 std::cout << "[--video] 播放结束\n";
                 break;
             }
+            ++video_frame_index;
         }
         else if (!get_pic(frame))
         {
@@ -228,8 +280,12 @@ int main(int argc, char **argv)
             }
         }
 
-        const double time_s =
-            std::chrono::duration<double>(std::chrono::steady_clock::now() - t_start).count();
+        // 视频回放用视频自己的时间轴（与 test_camera_playback 一致）：按墙钟走的话，
+        // 1440×1080@166fps 的片子在本机只跑到 ~110fps，EKF 看到的转速会偏慢 0.66 倍。
+        // 实车（get_pic）仍用 steady_clock。
+        const double time_s = video_path.empty()
+            ? std::chrono::duration<double>(std::chrono::steady_clock::now() - t_start).count()
+            : video_time_offset_s + static_cast<double>(video_frame_index - 1) / video_fps;
         const double latency_s = tick_ms(t0, t3) / 1000.0;
         const PredictionResult prediction = tracker.step(poses, gimbal, time_s, latency_s);
         const rotating_armor::TrackerDiagnostics &diagnostics = tracker.diagnostics();
@@ -385,6 +441,24 @@ int main(int argc, char **argv)
                 tracker.reset();
                 std::cout << "已重置 EKF\n";
             }
+        }
+    }
+
+    // 视频放完后可以让网页多活一会儿：最后一帧 JPEG 和曲线都还在，方便对着看。
+    if (hold_s > 0.0)
+    {
+        std::cout << "[hold] 网页保持 " << hold_s << " 秒（Ctrl+C 立即退出）\n";
+        const auto until = std::chrono::steady_clock::now() +
+                           std::chrono::milliseconds(static_cast<long long>(hold_s * 1000.0));
+        while (std::chrono::steady_clock::now() < until)
+        {
+            if (show_camera)
+            {
+                const int key = cv::pollKey();
+                if (key == 27 || key == 'q')
+                    break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
     }
 
