@@ -1,12 +1,14 @@
 // SystemView 的布局/绘制冒烟测试：不需要相机、不开窗口。
 //
 // 验证三件事：
-//  1) 画布尺寸 = pad + 左列 + pad + 相机 + pad + 右列 + pad，高度 = 相机高 + 2*pad；
-//  2) 相机画面被原样搬到中间（不被卡片覆盖）；
+//  1) 画布宽度 = pad + 左列 + pad + 相机 + pad + 右列 + pad，
+//     高度 = pad + max(相机高, 右列卡片 + 俯视图最小高度) + pad；
+//  2) 相机画面被原样搬到中间（不被卡片覆盖，列比画面高时垂直居中）；
 //  3) 左右两列真的画了东西（不是空白），且空曲线/单点/时间回退都不崩。
 
 #include "SystemView.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -95,29 +97,40 @@ int main()
     const int expected_width =
         options.pad + options.left_width + options.pad + camera.cols + options.pad +
         options.right_width + options.pad;
-    const int expected_height = options.pad + camera.rows + options.pad;
+    // 高度由"相机画面"和"右列（卡片 + 俯视图最小高度）"里的大者决定。
+    const auto column_height = [&options](int count)
+    {
+        if (count <= 0)
+            return 0;
+        return options.title_height + count * options.card_height + (count - 1) * options.card_gap;
+    };
+    const int right_need =
+        column_height(2) + options.card_gap + options.overview_min_height;
+    const int content_h = std::max({camera.rows, column_height(2), right_need});
+    const int expected_height = options.pad + content_h + options.pad;
     expect(canvas.cols == expected_width,
            "画布宽度 = pad + 左列 + pad + 相机 + pad + 右列 + pad");
-    expect(canvas.rows == expected_height, "画布高度 = 相机高 + 2*pad");
+    expect(canvas.rows == expected_height, "画布高度 = pad + max(相机高, 右列需求) + pad");
     if (canvas.cols != expected_width || canvas.rows != expected_height)
     {
         std::printf("      实际 %dx%d, 期望 %dx%d\n", canvas.cols, canvas.rows, expected_width,
                     expected_height);
     }
 
-    // 相机画面原样搬进中间（抽查中心像素）。
+    // 相机画面原样搬进中间，列更高时垂直居中（抽查中心像素）。
     const int camera_x = options.pad + options.left_width + options.pad;
-    const cv::Vec3b centre = canvas.at<cv::Vec3b>(options.pad + camera.rows / 2,
+    const int camera_y = options.pad + (content_h - camera.rows) / 2;
+    const cv::Vec3b centre = canvas.at<cv::Vec3b>(camera_y + camera.rows / 2,
                                                   camera_x + camera.cols / 2);
-    expect(centre == cv::Vec3b(10, 120, 200), "相机画面像素被原样拷贝到中间");
+    expect(centre == cv::Vec3b(10, 120, 200), "相机画面像素被原样拷贝到中间（垂直居中）");
 
     const cv::Mat left_column =
-        canvas(cv::Rect(options.pad, options.pad, options.left_width, camera.rows));
-    const cv::Mat right_column = canvas(cv::Rect(options.pad + options.left_width + options.pad +
-                                                     camera.cols + options.pad,
-                                                 options.pad, options.right_width, camera.rows));
+        canvas(cv::Rect(options.pad, options.pad, options.left_width, content_h));
+    const cv::Mat right_patch = canvas(cv::Rect(
+        options.pad + options.left_width + options.pad + camera.cols + options.pad,
+        options.pad, options.right_width, content_h));
     expect(nonWhitePixelCount(left_column) > 2000, "左列画出卡片（非空白）");
-    expect(nonWhitePixelCount(right_column) > 2000, "右列画出卡片（非空白）");
+    expect(nonWhitePixelCount(right_patch) > 2000, "右列画出卡片（非空白）");
 
     // 空曲线 / 单点 / 时间回退都不该崩，也不该把画布搞坏。
     rotating_armor::SystemView empty_view(options);
@@ -126,8 +139,12 @@ int main()
     single.push(0.0, 42.0);
     const cv::Mat empty_canvas = empty_view.compose(camera, cv::Mat{});
     expect(!empty_canvas.empty(), "空曲线 + 无俯视图时仍能 compose");
-    expect(empty_canvas.cols == canvas.cols && empty_canvas.rows == canvas.rows,
-           "无俯视图时画布尺寸不变");
+    // 只有各 1 条曲线、且没有俯视图 → 高度退回"相机画面对齐"，宽度不变。
+    const int one_card_h = options.title_height + options.card_height;
+    expect(empty_canvas.cols == expected_width &&
+               empty_canvas.rows ==
+                   options.pad + std::max(camera.rows, one_card_h) + options.pad,
+           "无俯视图 + 卡片不多时，画布高度回到相机画面高度");
 
     auto &rewound = empty_view.leftTrace("rewound", "ms");
     rewound.push(10.0, 1.0);

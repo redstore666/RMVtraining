@@ -14,7 +14,7 @@
 //   --topdown-out DIR 俯视图每 50 帧导出 DIR/t%06d.png
 //   --no-system-view  退回"两个窗口"（相机一个、俯视图一个）；默认是把
 //                  webdebug 的遥测卡片 + 相机画面 + 俯视图拼成一张总览图
-//   --view-scale S   总览图的显示缩放（默认 0.6，画布本身是全分辨率）
+//   --view-scale S   相机画面在总览图里的缩放（默认 0.72；卡片不缩放，见下方说明）
 //   --web-port N     webdebug 曲线页面端口（默认 8081，与主程序的 8080 错开）
 //
 // 按键:  ESC/q 退出 | s 保存当前帧(./tmp/) | m 打印各观测 PnP 的 R/t 矩阵（全精度）
@@ -229,7 +229,7 @@ int main(int argc, char **argv)
     // --no-system-view：默认把"遥测卡片 + 相机 + 俯视图"拼成一张总览图
     // （一个 imshow 看全，对应"系统视图"）；关掉则退回原来的两个窗口。
     bool system_view_enabled = true;
-    double view_scale = 0.6;
+    double view_scale = 0.72;
     // --web-port N：webdebug 曲线页面端口。默认为 8081：主程序 rmv_training 用
     // 8080，两者同时跑也不会抢端口（"另建一份 webdebug"就是这个意思）。
     int web_port = 8081;
@@ -286,7 +286,7 @@ int main(int argc, char **argv)
         {
             if (i + 1 >= argc)
             {
-                std::cerr << "--view-scale 后面要跟一个数（0.1~1.5）\n";
+                std::cerr << "--view-scale 后面要跟一个数（0.2~1.0）\n";
                 return 2;
             }
             view_scale = std::atof(argv[++i]);
@@ -369,10 +369,10 @@ int main(int argc, char **argv)
     topdown_options.pixels_per_meter = topdown_ppm;
     if (system_view_enabled && !no_display)
     {
-        // 总览图里俯视图那一格约 400px：直接按这个尺寸渲染（putText 的字号是
+        // 总览图里俯视图那一格正好 300px：直接按这个尺寸渲染（putText 的字号是
         // 绝对像素，缩图会让 HUD 变成糊字），单独开窗口时才用 800。
-        topdown_options.width = 400;
-        topdown_options.height = 400;
+        topdown_options.width = 300;
+        topdown_options.height = 300;
     }
     rotating_armor::TopDownView topdown_view(topdown_options);
     const std::string topdown_window = "EKF top-down";
@@ -382,8 +382,9 @@ int main(int argc, char **argv)
     // 中间 = 相机画面。数值只为本窗口服务，与 WEB_LOG 推给网页的是同一批量。
     rotating_armor::SystemViewOptions system_options;
     system_options.left_width = 320;   // 左列：耗时/检测质量
-    system_options.right_width = 400;  // 右列：EKF 卡片 + 下方俯视图
-    system_options.left_card_height = 104; // 左列拉高填满（右列要给俯视图留位置）
+    system_options.right_width = 380;  // 右列：EKF 卡片 + 下方俯视图
+    // left_card_height = 0 → 左列卡片自动摊开填满整列（右列要给俯视图留位置）。
+    system_options.left_card_height = 0;
     rotating_armor::SystemView system_view(system_options);
     // 左列（detect / capture）
     auto &trace_fps = system_view.leftTrace("fps_cam", "fps");
@@ -458,6 +459,7 @@ int main(int argc, char **argv)
     double last_frame_time_s = 0.0; // 帧间隔（frame_dt_ms）用
     double fps_nodisp_ema = 0.0; // "不带显示窗口"的吞吐（处理段耗时倒数，受相机帧率封顶）
     int64_t last_show_tick = 0; // imshow 限频用：上次真正显示的 tick
+    bool window_sized = false; // 首帧把窗口调到图像原始尺寸，避免 imshow 缩放糊字
     std::vector<cv::Mat> dbg_rvecs, dbg_tvecs;
     std::vector<int> dbg_ids;
 
@@ -528,26 +530,77 @@ int main(int argc, char **argv)
         {
             cv::Mat topdown_canvas; // 本帧俯视图（30fps 门内才真正 imshow）
 
+            // ===== 叠加层：先把相机画面缩到显示尺寸，再按显示像素画 =====
+            // 以前是"在全分辨率图上画完，再整图缩到 0.6"，字的边缘被重采样糊掉；
+            // 现在缩放只作用于视频本身，文字按最终像素栅格化，缩多少都清晰。
+            // 单窗口模式（--no-system-view）不做缩放：原来就是 1:1 显示相机画面。
+            const double k = system_view_enabled ? view_scale : 1.0;
+            cv::Mat canvas;
+            if (std::fabs(k - 1.0) > 1e-6)
+                cv::resize(frame, canvas, cv::Size(), k, k, cv::INTER_AREA);
+            else
+                canvas = frame.clone();
+
+            // 图像坐标（角点、PnP 投影点）按 k 换算；面板位置与字号是"界面像素"，
+            // 不随 k 变——画面缩小了，字不会跟着缩成蚂蚁。
+            const auto px = [k](const cv::Point2f &p)
+            { return cv::Point(cvRound(p.x * k), cvRound(p.y * k)); };
+            const auto wd = [k](int w) { return std::max(1, cvRound(w * k)); };
+            const auto text = [&canvas](const std::string &str, cv::Point at,
+                                        const cv::Scalar &colour, double font, int thick)
+            { cv::putText(canvas, str, at, cv::FONT_HERSHEY_SIMPLEX, font, colour, thick,
+                          cv::LINE_AA); };
+
+            // 半透明底板：画面暗/亮区域会让叠加字看不清，先压一层黑底再写字。
+            const auto backdrop = [&canvas](cv::Rect rect)
+            {
+                rect &= cv::Rect(0, 0, canvas.cols, canvas.rows);
+                if (rect.width <= 0 || rect.height <= 0)
+                    return;
+                cv::Mat layer = canvas.clone();
+                cv::rectangle(layer, rect, cv::Scalar(0, 0, 0), cv::FILLED);
+                cv::addWeighted(layer, 0.62, canvas, 0.38, 0.0, canvas);
+            };
+            // PnP 面板贴着左下角往上排：画面中间的装甲板和角点标签在别处，
+            // 这样多块板时也不会把检测框压住。
+            const int pose_line_h = 20;
+            const int pose_panel_h = 6 * pose_line_h + 24;
+            const auto posePanelTop = [&](std::size_t index, std::size_t count)
+            {
+                const int rows = static_cast<int>(count);
+                return canvas.rows - 12 - pose_panel_h * (rows - static_cast<int>(index));
+            };
+
+            backdrop(cv::Rect(6, 10, 620, 34)); // 状态栏
+            for (std::size_t bi = 0; bi < poses.size(); ++bi) // 每块板的 PnP 面板
+                backdrop(cv::Rect(6, posePanelTop(bi, poses.size()), 404, pose_panel_h));
+            if (ekf_enabled)
+                backdrop(cv::Rect(std::max(8, canvas.cols - 462), 44, 456, 124)); // 右上 EKF 面板
+
             // ===== 画检测框 + 角点标签 =====
-            drawDetections(frame, dets);
             for (const auto &det : dets)
             {
+                std::vector<cv::Point> box;
+                box.reserve(4);
+                for (int ci = 0; ci < 4; ++ci)
+                    box.push_back(px(det.corners[ci]));
+                cv::polylines(canvas, box, true, cv::Scalar(0, 255, 0), wd(2), cv::LINE_AA);
+                cv::circle(canvas, box[0], wd(5), cv::Scalar(0, 0, 255), -1, cv::LINE_AA);
+                text(cv::format("ID=%d %c %.2f", det.target_id,
+                                det.size == ArmorSize::Small ? 'S' : 'L', det.confidence),
+                     box[0] + cv::Point(0, -24), cv::Scalar(0, 255, 0), 0.6, 2);
+
                 const char *labels[4] = {"TL", "TR", "BR", "BL"};
-                const cv::Scalar colors[4] = {
+                const cv::Scalar colours[4] = {
                     cv::Scalar(255, 0, 0),  // 蓝 = TL
                     cv::Scalar(0, 255, 0),  // 绿 = TR
                     cv::Scalar(0, 0, 255),  // 红 = BR
                     cv::Scalar(0, 255, 255) // 黄 = BL
                 };
-                for (int k = 0; k < 4; ++k)
+                for (int ci = 0; ci < 4; ++ci)
                 {
-                    const cv::Point pt(cvRound(det.corners[k].x),
-                                       cvRound(det.corners[k].y));
-                    cv::circle(frame, pt, 4, colors[k], -1);
-                    cv::putText(frame, labels[k],
-                                pt + cv::Point(6, -6),
-                                cv::FONT_HERSHEY_SIMPLEX, 0.5,
-                                colors[k], 1);
+                    cv::circle(canvas, box[ci], wd(4), colours[ci], -1, cv::LINE_AA);
+                    text(labels[ci], box[ci] + cv::Point(7, -7), colours[ci], 0.5, 1);
                 }
             }
 
@@ -587,20 +640,21 @@ int main(int argc, char **argv)
                     cv::projectPoints(obj, rvec, tvec, camera.camera_matrix,
                                       camera.distortion_coefficients, projected);
                     double err_sq = 0.0;
-                    for (std::size_t k = 0; k < projected.size(); ++k)
+                    for (std::size_t ci = 0; ci < projected.size(); ++ci)
                     {
-                        const double e = cv::norm(projected[k] - img[k]);
+                        const double e = cv::norm(projected[ci] - img[ci]);
                         err_sq += e * e;
                     }
                     if (!projected.empty())
                         display_reproj_error = std::sqrt(err_sq / projected.size());
 
-                    // BGR：x 轴红、y 轴绿、z 轴蓝。只有蓝轴端点做调试显示平滑。
-                    const auto pixel = [](const cv::Point2f &point)
-                    { return cv::Point(cvRound(point.x), cvRound(point.y)); };
-                    cv::line(frame, pixel(axis_origin), pixel(x_end), cv::Scalar(0, 0, 255), 2, cv::LINE_AA);
-                    cv::line(frame, pixel(axis_origin), pixel(y_end), cv::Scalar(0, 255, 0), 2, cv::LINE_AA);
-                    cv::line(frame, pixel(axis_origin), pixel(blue_end), cv::Scalar(255, 0, 0), 2, cv::LINE_AA);
+                    // BGR：x 轴红、y 轴绿、z 轴蓝。
+                    cv::line(canvas, px(axis_origin), px(x_end), cv::Scalar(0, 0, 255), wd(2),
+                             cv::LINE_AA);
+                    cv::line(canvas, px(axis_origin), px(y_end), cv::Scalar(0, 255, 0), wd(2),
+                             cv::LINE_AA);
+                    cv::line(canvas, px(axis_origin), px(blue_end), cv::Scalar(255, 0, 0), wd(2),
+                             cv::LINE_AA);
 
                     dbg_rvecs.push_back(rvec.clone());
                     dbg_tvecs.push_back(tvec.clone());
@@ -621,33 +675,30 @@ int main(int argc, char **argv)
                               "pos=(%+.3f, %+.3f, %+.3f)m",
                               p[0], p[1], p[2]);
                 std::snprintf(line3, sizeof(line3),
-                              "posYaw=%+.1f  pitch=%+.1f  armYaw=%+.1f  [deg, cam frame]",
+                              "posYaw=%+.1f  pitch=%+.1f  armYaw=%+.1f",
                               pos_yaw, pitch, armor_yaw);
 
-                const cv::Point base(20, 80 + static_cast<int>(pi) * 150);
+                const int line_h = pose_line_h;
+                const cv::Point base(14, posePanelTop(pi, poses.size()) + 26);
                 const cv::Scalar color(0, 255, 255); // 黄
-                cv::putText(frame, line1, base, cv::FONT_HERSHEY_SIMPLEX, 0.55, color, 1);
-                cv::putText(frame, line2, base + cv::Point(0, 22), cv::FONT_HERSHEY_SIMPLEX, 0.55, color, 1);
-                cv::putText(frame, line3, base + cv::Point(0, 44), cv::FONT_HERSHEY_SIMPLEX, 0.55, color, 1);
+                text(line1, base, color, 0.58, 1);
+                text(line2, base + cv::Point(0, line_h), color, 0.58, 1);
+                text(line3, base + cv::Point(0, 2 * line_h), color, 0.58, 1);
 
                 if (axis_ok)
                 {
-                    cv::putText(frame,
-                                cv::format("R= [%+.3f %+.3f %+.3f]", R.at<double>(0, 0),
-                                           R.at<double>(0, 1), R.at<double>(0, 2)),
-                                base + cv::Point(0, 64), cv::FONT_HERSHEY_SIMPLEX, 0.5, color, 1);
-                    cv::putText(frame,
-                                cv::format("    [%+.3f %+.3f %+.3f]", R.at<double>(1, 0),
-                                           R.at<double>(1, 1), R.at<double>(1, 2)),
-                                base + cv::Point(0, 82), cv::FONT_HERSHEY_SIMPLEX, 0.5, color, 1);
-                    cv::putText(frame,
-                                cv::format("    [%+.3f %+.3f %+.3f]", R.at<double>(2, 0),
-                                           R.at<double>(2, 1), R.at<double>(2, 2)),
-                                base + cv::Point(0, 100), cv::FONT_HERSHEY_SIMPLEX, 0.5, color, 1);
-                    cv::putText(frame,
-                                cv::format("t= [%+.3f %+.3f %+.3f] m", tvec.at<double>(0),
-                                           tvec.at<double>(1), tvec.at<double>(2)),
-                                base + cv::Point(0, 120), cv::FONT_HERSHEY_SIMPLEX, 0.5, color, 1);
+                    text(cv::format("R= [%+.3f %+.3f %+.3f]", R.at<double>(0, 0),
+                                    R.at<double>(0, 1), R.at<double>(0, 2)),
+                         base + cv::Point(0, 3 * line_h), color, 0.52, 1);
+                    text(cv::format("    [%+.3f %+.3f %+.3f]", R.at<double>(1, 0),
+                                    R.at<double>(1, 1), R.at<double>(1, 2)),
+                         base + cv::Point(0, 4 * line_h), color, 0.52, 1);
+                    text(cv::format("    [%+.3f %+.3f %+.3f]", R.at<double>(2, 0),
+                                    R.at<double>(2, 1), R.at<double>(2, 2)),
+                         base + cv::Point(0, 5 * line_h), color, 0.52, 1);
+                    text(cv::format("t= [%+.3f %+.3f %+.3f] m", tvec.at<double>(0),
+                                    tvec.at<double>(1), tvec.at<double>(2)),
+                         base + cv::Point(0, 6 * line_h), color, 0.52, 1);
                 }
             }
 
@@ -685,11 +736,10 @@ int main(int argc, char **argv)
                     if (project_gimbal_point(
                             cv::Vec3d(c_gimbal.x(), c_gimbal.y(), c_gimbal.z()), center_px))
                     {
-                        const cv::Point p(cvRound(center_px.x), cvRound(center_px.y));
-                        cv::drawMarker(frame, p, cv::Scalar(255, 0, 255), cv::MARKER_CROSS, 26, 2);
-                        cv::putText(frame, cv::format("body R=%.2f m", s(8)),
-                                    p + cv::Point(16, -16), cv::FONT_HERSHEY_SIMPLEX, 0.55,
-                                    cv::Scalar(255, 0, 255), 1);
+                        const cv::Point p = px(center_px);
+                        cv::drawMarker(canvas, p, cv::Scalar(255, 0, 255), cv::MARKER_CROSS, 24, 2);
+                        text(cv::format("body R=%.2f m", s(8)), p + cv::Point(16, -16),
+                             cv::Scalar(255, 0, 255), 0.58, 1);
                     }
                 }
 
@@ -703,12 +753,11 @@ int main(int argc, char **argv)
                     if (project_gimbal_point(
                             cv::Vec3d(aim_gimbal.x(), aim_gimbal.y(), aim_gimbal.z()), aim_px))
                     {
-                        const cv::Point p(cvRound(aim_px.x), cvRound(aim_px.y));
-                        cv::drawMarker(frame, p, cv::Scalar(0, 255, 255), cv::MARKER_TILTED_CROSS,
+                        const cv::Point p = px(aim_px);
+                        cv::drawMarker(canvas, p, cv::Scalar(0, 255, 255), cv::MARKER_TILTED_CROSS,
                                        22, 2);
-                        cv::putText(frame, cv::format("AIM %.2f m", prediction.distance_m),
-                                    p + cv::Point(16, -16), cv::FONT_HERSHEY_SIMPLEX, 0.55,
-                                    cv::Scalar(0, 255, 255), 1);
+                        text(cv::format("AIM %.2f m", prediction.distance_m),
+                             p + cv::Point(16, -16), cv::Scalar(0, 255, 255), 0.58, 1);
                     }
                 }
 
@@ -716,16 +765,18 @@ int main(int argc, char **argv)
                 const char *state_text = prediction.state == TrackingState::Stable ? "Stable"
                                        : prediction.state == TrackingState::Unstable ? "Unstable"
                                                                                      : "NoTarget";
-                const int panel_x = std::max(20, frame.cols - 540);
-                const int panel_y = 80;
+                const int panel_x = std::max(14, canvas.cols - 452);
+                const int panel_y = 62;
                 const cv::Scalar ekf_color =
                     prediction.fire_allowed ? cv::Scalar(0, 255, 0) : cv::Scalar(0, 200, 255);
                 const std::string ekf_lines[] = {
                     cv::format("EKF %s  id=%d  R=%.2fm  w=%+.1f rad/s", state_text,
                                static_cast<int>(prediction.target_id), prediction.radius_1_m,
                                prediction.body_yaw_velocity),
-                    cv::format("aim slot=%d  d=%.2fm  yaw=%+.1f pitch=%+.1f deg",
-                               diagnostics.aim_slot, prediction.distance_m,
+                    // 分成两行：合成一行会顶到画面右缘被截断（putText 不换行）。
+                    cv::format("aim slot=%d  d=%.2fm", diagnostics.aim_slot,
+                               prediction.distance_m),
+                    cv::format("yaw=%+.1f  pitch=%+.1f deg",
                                prediction.target_yaw * 180.0 / CV_PI,
                                prediction.target_pitch * 180.0 / CV_PI),
                     cv::format("NIS=%.1f  upd=%d  miss=%d  lat=%.0fms  obs=%.0fmm",
@@ -742,10 +793,9 @@ int main(int argc, char **argv)
                     // putText 只画 ASCII，中文注释留在源码里。
                     std::string("(no IMU: fire/miss vs boresight)"),
                 };
-                for (int li = 0; li < 5; ++li)
+                for (int li = 0; li < 6; ++li)
                 {
-                    cv::putText(frame, ekf_lines[li], cv::Point(panel_x, panel_y + li * 22),
-                                cv::FONT_HERSHEY_SIMPLEX, 0.55, ekf_color, 1);
+                    text(ekf_lines[li], cv::Point(panel_x, panel_y + li * 21), ekf_color, 0.56, 1);
                 }
             }
 
@@ -782,58 +832,28 @@ int main(int argc, char **argv)
                 }
             }
 
-        // ===== 状态栏：相机固件帧率 + 无显示吞吐（EMA，滞后一帧无碍）=====
-        const float cam_fps = cameraResultingFps();
-        const double nodisp_show =
-            cam_fps > 0.0F ? std::min(fps_nodisp_ema, static_cast<double>(cam_fps))
-                           : fps_nodisp_ema;
-        const std::string fps_text = cam_fps >= 0.0F
-            ? cv::format("fps_cam=%.1f fps_nodisp=%.1f", cam_fps, nodisp_show)
-            : cv::format("fps_cam=n/a fps_nodisp=%.1f", nodisp_show);
-        cv::putText(frame,
-                    cv::format("Det=%zu Poses=%zu save=%d  %s",
-                               dets.size(), poses.size(), save_idx, fps_text.c_str()),
-                    cv::Point(20, 40),
-                    cv::FONT_HERSHEY_SIMPLEX, 0.8,
-                    cv::Scalar(0, 255, 255), 2);
+            // ===== 状态栏：相机固件帧率 + 无显示吞吐（EMA，滞后一帧无碍）=====
+            const float cam_fps = cameraResultingFps();
+            const double nodisp_show =
+                cam_fps > 0.0F ? std::min(fps_nodisp_ema, static_cast<double>(cam_fps))
+                               : fps_nodisp_ema;
+            const std::string fps_text = cam_fps >= 0.0F
+                ? cv::format("fps_cam=%.1f fps_nodisp=%.1f", cam_fps, nodisp_show)
+                : cv::format("fps_cam=n/a fps_nodisp=%.1f", nodisp_show);
+            text(cv::format("Det=%zu Poses=%zu save=%d  %s",
+                            dets.size(), poses.size(), save_idx, fps_text.c_str()),
+                 cv::Point(14, 32), cv::Scalar(0, 255, 255), 0.75, 2);
 
-            // ===== 显示 =====
-            // 默认拼总览图：[遥测卡片 | 相机画面 | EKF 卡片 + 俯视图]。
-            // compose 用的是全分辨率的 frame，缩放只作用于显示用的副本，
-            // 所以 --dump-every 导出的是全分辨率总览图。
+            // ===== 显示：不缩放地拼总览图（相机画面已经是显示尺寸）=====
             cv::Mat view_canvas;
             if (system_view_enabled)
             {
-                view_canvas = system_view.compose(frame, topdown_canvas);
+                view_canvas = system_view.compose(canvas, topdown_canvas);
             }
-
-            cv::Mat display;
-            if (!view_canvas.empty())
+            const cv::Mat display = view_canvas.empty() ? canvas : view_canvas;
+            if (dump_every > 0 && frame_cnt % dump_every == 0)
             {
-                if (dump_every > 0 && frame_cnt % dump_every == 0)
-                {
-                    cv::imwrite(cv::format("./tmp/live_dump_%06d.png", frame_cnt), view_canvas);
-                }
-                if (std::fabs(view_scale - 1.0) > 1e-6)
-                {
-                    cv::resize(view_canvas, display, cv::Size(), view_scale, view_scale,
-                               cv::INTER_AREA);
-                }
-                else
-                {
-                    display = view_canvas;
-                }
-            }
-            else
-            {
-                if (frame.cols > 1920)
-                    cv::resize(frame, display, cv::Size(), 0.5, 0.5);
-                else
-                    display = frame;
-                if (dump_every > 0 && frame_cnt % dump_every == 0)
-                {
-                    cv::imwrite(cv::format("./tmp/live_dump_%06d.png", frame_cnt), frame);
-                }
+                cv::imwrite(cv::format("./tmp/live_dump_%06d.png", frame_cnt), display);
             }
 
             t35 = cv::getTickCount(); // 绘制完成（GUI 开始前的分界）
@@ -845,6 +865,16 @@ int main(int argc, char **argv)
                 33.0 / 1000.0 * cv::getTickFrequency();
             if (cv::getTickCount() - last_show_tick >= show_interval_ticks)
             {
+                if (!window_sized)
+                {
+                    // 窗口必须和图像一样大：WINDOW_NORMAL 下 imshow 会把图像缩放进
+                    // 当前窗口，窗口比图小就又糊了。
+                    if (system_view_enabled)
+                        cv::resizeWindow(system_window, display.cols, display.rows);
+                    else
+                        cv::resizeWindow("camera_live", display.cols, display.rows);
+                    window_sized = true;
+                }
                 if (system_view_enabled)
                 {
                     cv::imshow(system_window, display);

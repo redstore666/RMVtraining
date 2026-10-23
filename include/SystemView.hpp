@@ -51,9 +51,13 @@ struct SystemViewOptions
     int pad{10};
     int title_height{26};
     int card_height{62};
-    // 左列单独的高度：0 表示与 card_height 相同。左列卡片少、又不需要给俯视图
-    // 留位置，所以可以拉高填满整列；右列要腾出下方空间画俯视图。
+    // 左列卡片高度：0 = 自动摊开填满整列（上限 left_card_max_height，至少
+    // card_height）；>0 = 固定高度。左列不需要给俯视图留位置，不摊开会留白。
     int left_card_height{0};
+    int left_card_max_height{210};
+    // 俯视图至少占的高度：右列卡片排完后剩余空间不够时，画布变高、相机画面
+    // 在中间垂直居中，而不是把俯视图压成一个小方块。
+    int overview_min_height{300};
     int card_gap{6};
     bool white_background{true};
     bool show_left{true};
@@ -67,7 +71,11 @@ struct SystemViewOptions
 // （用 vector 存就会在扩容时变成悬垂引用，写进去的样本会丢）。
 //
 // 布局: [pad][左列卡片][pad][相机画面][pad][右列卡片 + 下方俯视图][pad]
-// 画布高度 = 相机高度 + 上下 pad；俯视图按剩余空间等比缩到方形区域内。
+// 画布高度 = max(相机高度, 右列卡片 + overview_min_height)，相机画面垂直居中；
+// 俯视图按剩余空间等比缩到方形区域内（不会放大到超过它自己的分辨率）。
+//
+// 关键：本模块**不做整图缩放**。调用方应把相机画面先缩到最终显示尺寸再传进来，
+// 这样卡片文字与相机叠加文字都是按最终像素栅格化的，不会糊。
 class SystemView
 {
   public:

@@ -164,11 +164,11 @@ void drawSparkline(cv::Mat &canvas, const cv::Rect &box, const TelemetryTrace &t
     // 右上/右下角标出窗口内的极值，省得为了读数去量像素。
     char buffer[32];
     std::snprintf(buffer, sizeof(buffer), "%.*f", std::fabs(vmax) >= 10.0 ? 1 : 2, vmax);
-    cv::putText(canvas, buffer, cv::Point(box.x + box.width - 58, box.y + 9),
-                cv::FONT_HERSHEY_SIMPLEX, 0.28, cv::Scalar(150, 150, 150), 1, cv::LINE_AA);
+    cv::putText(canvas, buffer, cv::Point(box.x + box.width - 64, box.y + 11),
+                cv::FONT_HERSHEY_SIMPLEX, 0.36, cv::Scalar(140, 140, 140), 1, cv::LINE_AA);
     std::snprintf(buffer, sizeof(buffer), "%.*f", std::fabs(vmin) >= 10.0 ? 1 : 2, vmin);
-    cv::putText(canvas, buffer, cv::Point(box.x + box.width - 58, box.y + box.height - 2),
-                cv::FONT_HERSHEY_SIMPLEX, 0.28, cv::Scalar(150, 150, 150), 1, cv::LINE_AA);
+    cv::putText(canvas, buffer, cv::Point(box.x + box.width - 64, box.y + box.height - 3),
+                cv::FONT_HERSHEY_SIMPLEX, 0.36, cv::Scalar(140, 140, 140), 1, cv::LINE_AA);
 }
 
 void drawCard(cv::Mat &canvas, cv::Point origin, int width, int height, const TelemetryTrace &trace,
@@ -178,20 +178,24 @@ void drawCard(cv::Mat &canvas, cv::Point origin, int width, int height, const Te
     cv::rectangle(canvas, card, cv::Scalar(247, 247, 247), cv::FILLED);
     cv::rectangle(canvas, card, cv::Scalar(212, 212, 212), 1, cv::LINE_AA);
 
-    cv::putText(canvas, trace.name, cv::Point(card.x + 8, card.y + 16),
-                cv::FONT_HERSHEY_SIMPLEX, 0.38, cv::Scalar(95, 95, 95), 1, cv::LINE_AA);
-    cv::rectangle(canvas, cv::Rect(card.x + 8, card.y + 4, 3, 12), colour, cv::FILLED);
+    // 字号是"最终显示像素"，卡片按显示尺寸直接画（不再整体缩图），所以这里放大到
+    // 0.5 左右：1080p 上一个字符约 15 px，隔着屏幕也能读。
+    const double name_font = 0.50;
+    const double value_font = 0.55;
+    cv::putText(canvas, trace.name, cv::Point(card.x + 9, card.y + 19),
+                cv::FONT_HERSHEY_SIMPLEX, name_font, cv::Scalar(80, 80, 80), 1, cv::LINE_AA);
+    cv::rectangle(canvas, cv::Rect(card.x + 8, card.y + 6, 4, 15), colour, cv::FILLED);
 
     const std::string value =
         !trace.text.empty() ? trace.text : formatValue(trace.latest(), trace.unit);
     const cv::Size value_size =
-        cv::getTextSize(value, cv::FONT_HERSHEY_SIMPLEX, 0.45, 1, nullptr);
+        cv::getTextSize(value, cv::FONT_HERSHEY_SIMPLEX, value_font, 1, nullptr);
     cv::putText(canvas, value,
-                cv::Point(card.x + card.width - 8 - value_size.width, card.y + 17),
-                cv::FONT_HERSHEY_SIMPLEX, 0.45, cv::Scalar(25, 25, 25), 1, cv::LINE_AA);
+                cv::Point(card.x + card.width - 9 - value_size.width, card.y + 20),
+                cv::FONT_HERSHEY_SIMPLEX, value_font, cv::Scalar(20, 20, 20), 1, cv::LINE_AA);
 
-    const int spark_y = card.y + 23;
-    const int spark_h = card.height - 30;
+    const int spark_y = card.y + 27;
+    const int spark_h = card.height - 34;
     if (spark_h >= 6)
     {
         drawSparkline(canvas,
@@ -207,8 +211,8 @@ int drawColumn(cv::Mat &canvas, int x, int width, int top, int avail_height, int
 {
     cv::rectangle(canvas, cv::Rect(x, top, width, options.title_height), cv::Scalar(236, 236, 236),
                   cv::FILLED);
-    cv::putText(canvas, title, cv::Point(x + 8, top + 18), cv::FONT_HERSHEY_SIMPLEX, 0.42,
-                cv::Scalar(70, 70, 70), 1, cv::LINE_AA);
+    cv::putText(canvas, title, cv::Point(x + 9, top + 20), cv::FONT_HERSHEY_SIMPLEX, 0.55,
+                cv::Scalar(60, 60, 60), 1, cv::LINE_AA);
 
     int y = top + options.title_height + options.card_gap / 2;
     for (std::size_t i = 0; i < traces.size(); ++i)
@@ -339,6 +343,35 @@ cv::Mat SystemView::compose(const cv::Mat &camera, const cv::Mat &overview) cons
 
     const int left_w = options_.show_left ? options_.left_width : 0;
     const int right_w = options_.show_right ? options_.right_width : 0;
+    const int left_n = static_cast<int>(left_.size());
+    const int right_n = static_cast<int>(right_.size());
+
+    // 一列需要的高度：标题 + n 张卡 + 卡片间隙。
+    const auto column_height = [&](int count, int card_h)
+    {
+        if (count <= 0)
+        {
+            return 0;
+        }
+        return options_.title_height + count * card_h + (count - 1) * options_.card_gap;
+    };
+
+    // 画布高度先由"相机画面"和"右列卡片 + 俯视图最小高度"里的大者决定，
+    // 相机画面在中间垂直居中；否则俯视图会被右列卡片挤成一个小方块。
+    int content_h = camera.rows;
+    if (right_w > 0)
+    {
+        int right_need = column_height(right_n, options_.card_height);
+        if (!overview.empty())
+        {
+            right_need += options_.card_gap + options_.overview_min_height;
+        }
+        content_h = std::max(content_h, right_need);
+    }
+    if (left_w > 0)
+    {
+        content_h = std::max(content_h, column_height(left_n, options_.card_height));
+    }
 
     int x = options_.pad;
     if (left_w > 0)
@@ -353,44 +386,56 @@ cv::Mat SystemView::compose(const cv::Mat &camera, const cv::Mat &overview) cons
         x += right_w + options_.pad;
     }
     const int width = x;
-    const int height = options_.pad + camera.rows + options_.pad;
+    const int height = options_.pad + content_h + options_.pad;
 
     const cv::Scalar background =
         options_.white_background ? cv::Scalar(255, 255, 255) : cv::Scalar(28, 28, 28);
     cv::Mat canvas(height, width, CV_8UC3, background);
 
-    camera.copyTo(canvas(cv::Rect(camera_x, options_.pad, camera.cols, camera.rows)));
-    cv::rectangle(canvas, cv::Rect(camera_x - 1, options_.pad - 1, camera.cols + 2, camera.rows + 2),
-                  cv::Scalar(200, 200, 200), 1, cv::LINE_AA);
+    // 相机画面已由调用方缩到显示尺寸，这里只做平移，绝不缩放——文字才是清晰的。
+    const int camera_y = options_.pad + (content_h - camera.rows) / 2;
+    camera.copyTo(canvas(cv::Rect(camera_x, camera_y, camera.cols, camera.rows)));
+    cv::rectangle(canvas, cv::Rect(camera_x - 1, camera_y - 1, camera.cols + 2, camera.rows + 2),
+                  cv::Scalar(190, 190, 190), 1, cv::LINE_AA);
 
     const double now_s = latestTimestamp(left_, latestTimestamp(right_, 0.0));
 
-    if (left_w > 0)
+    if (left_w > 0 && left_n > 0)
     {
-        const int left_card_height =
-            options_.left_card_height > 0 ? options_.left_card_height : options_.card_height;
-        drawColumn(canvas, options_.pad, left_w, options_.pad, camera.rows, left_card_height,
-                   left_, options_.left_title, options_, now_s);
+        int left_card_h = options_.left_card_height;
+        if (left_card_h <= 0)
+        {
+            // 自动摊开：把整列高度平分给 n 张卡，至少 card_height、至多上限。
+            const int avail =
+                content_h - options_.title_height - (left_n - 1) * options_.card_gap;
+            left_card_h = std::clamp(avail / left_n, options_.card_height,
+                                     options_.left_card_max_height);
+        }
+        drawColumn(canvas, options_.pad, left_w, options_.pad, content_h, left_card_h, left_,
+                   options_.left_title, options_, now_s);
     }
 
     if (right_w > 0)
     {
         const int right_used =
-            drawColumn(canvas, right_x, right_w, options_.pad, camera.rows,
-                       options_.card_height, right_, options_.right_title, options_, now_s);
+            drawColumn(canvas, right_x, right_w, options_.pad, content_h, options_.card_height,
+                       right_, options_.right_title, options_, now_s);
         // 俯视图塞进右列剩下的空间（等比缩成正方形，居中）。
         if (!overview.empty())
         {
-            const int avail = camera.rows - right_used - options_.card_gap;
+            const int avail = content_h - right_used - options_.card_gap;
+            const int natural = std::max(overview.cols, overview.rows);
             if (avail > 80)
             {
-                const int side = std::min(right_w, avail);
-                const double scale =
-                    static_cast<double>(side) / std::max(overview.cols, overview.rows);
+                const int side = std::min({right_w, avail, natural});
+                const double scale = static_cast<double>(side) / natural;
                 const int w = std::max(1, static_cast<int>(std::lround(overview.cols * scale)));
                 const int h = std::max(1, static_cast<int>(std::lround(overview.rows * scale)));
-                cv::Mat scaled;
-                cv::resize(overview, scaled, cv::Size(w, h), 0, 0, cv::INTER_AREA);
+                cv::Mat scaled = overview;
+                if (w != overview.cols || h != overview.rows)
+                {
+                    cv::resize(overview, scaled, cv::Size(w, h), 0, 0, cv::INTER_AREA);
+                }
                 const int ox = right_x + (right_w - w) / 2;
                 const int oy = options_.pad + right_used + (avail - h) / 2;
                 if (ox >= 0 && oy >= 0 && ox + w <= canvas.cols && oy + h <= canvas.rows)
