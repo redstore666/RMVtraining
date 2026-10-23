@@ -1683,16 +1683,62 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
             used_sigma = std::sqrt(1.0 / (w_n + w_b));
         }
     }
+    // 3d) 物理闸门。
+    //
+    //     上面那套"以位置相位为主证据"在实拍里仍然会被喂进伪转速：v4 左车
+    //     （自转+平移）实测 bear 斜率 +19~+34 rad/s，远超 4 板车 8 rad/s 的物理
+    //     上限——这些值来自"续接到了另一块板 / 极点选错 / 折叠算术出错"，不是
+    //     转速。直接喂进 EKF 就会把 omega 打成 ±10 的方波（v4 实测 |omega|>=5
+    //     占 20.6%），再反馈回预测，瞄准点整块飘走。所以先用物理上限筛一遍：
+    //     主证据不可信就退到另一路，两路都不可信就这一窗不用（留给衰减项）。
+    const auto plausible = [&](double value)
+    {
+        return std::isfinite(value) &&
+               (config_.rate_max_abs_rad_s <= 0.0 ||
+                std::fabs(value) <= config_.rate_max_abs_rad_s);
+    };
+    const char *source = "bear";
+    if (!plausible(used_slope))
+    {
+        if (plausible(bearing_slope))
+        {
+            used_slope = bearing_slope;
+            used_sigma = bearing_sigma;
+            source = "bear";
+        }
+        else if (plausible(slope))
+        {
+            used_slope = slope;
+            used_sigma = sigma;
+            source = "yaw";
+        }
+        else
+        {
+            if (trackDebugEnabled())
+                std::fprintf(stderr,
+                             "[evskip] n=%d yaw=%+.2f(%.2f) bear=%+.2f(%.2f) (超物理闸门)\n",
+                             count, slope, mad, bearing_slope, bearing_mad);
+            return;
+        }
+    }
+    if (used_sigma > config_.rate_max_sigma_rad_s)
+    {
+        if (trackDebugEnabled())
+            std::fprintf(stderr, "[evskip] n=%d used=%+.2f(%.2f) src=%s (sigma 过大)\n",
+                         count, used_slope, used_sigma, source);
+        return;
+    }
+
     if (trackDebugEnabled())
-        std::fprintf(stderr, "[ev] n=%d yaw=%+.2f(%.2f) bear=%+.2f(%.2f) used=%+.2f\n", count,
-                     slope, mad, bearing_slope, bearing_mad, used_slope);
+        std::fprintf(stderr, "[ev] n=%d yaw=%+.2f(%.2f) bear=%+.2f(%.2f) used=%+.2f(%.2f) src=%s\n",
+                     count, slope, mad, bearing_slope, bearing_mad, used_slope, used_sigma, source);
 
     if (!ekf_.updateYawRate(used_slope, used_sigma))
     {
         return;
     }
     diagnostics_.rate_obs_used = true;
-    diagnostics_.rate_obs_rad_s = slope;
+    diagnostics_.rate_obs_rad_s = used_slope;
     diagnostics_.rate_obs_sigma_rad_s = sigma;
     diagnostics_.rate_obs_samples = count;
 }
