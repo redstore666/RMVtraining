@@ -52,6 +52,19 @@ public:
     // 取最近一帧 JPEG 与其序号（序号用于网页侧判断"是不是同一帧"）。
     std::vector<unsigned char> latestFrame(std::uint64_t* sequence = nullptr) const;
 
+    // ---- 网页端"选车"（本副本独有，调试特化）----
+    // 网页 GET /select?id=N 写入；0 = 自动（让跟踪器自己挑目标）。
+    // 工具每帧读 selectedTarget()，只把该 id 的观测喂给跟踪器，所以选了谁就一直看谁，
+    // 丢了也不自动切到别的 id。
+    void selectTarget(int id) noexcept;
+    int selectedTarget() const noexcept;
+
+    // 工具定期发布"累计见过的 id / 本帧可见的 id"，网页上的下拉菜单用它。
+    // pinned / lost 由本类自己拼（pinned 来自 selectTarget），所以 /select 的响应
+    // 立刻就带上新的选择，不用等工具下一轮发布。
+    void publishTargets(const std::vector<int>& seen, const std::vector<int>& visible);
+    std::string targetsJson() const;
+
     // 返回不会改变内部状态的快照，供诊断和测试使用。
     nlohmann::json getBufferJSON() const;
 
@@ -89,12 +102,21 @@ private:
     mutable std::mutex frame_mutex_;
     std::vector<unsigned char> frame_jpeg_;
     std::uint64_t frame_sequence_{0};
+
+    std::atomic<int> selected_target_{0};
+    mutable std::mutex targets_mutex_;
+    std::vector<int> seen_ids_;
+    std::vector<int> visible_ids_;
 };
 
 #define START_SYSTEM_WEB(port) SystemWebLogger::getInstance().start(port)
 #define STOP_SYSTEM_WEB() SystemWebLogger::getInstance().stop()
 #define SYSTEM_LOG(key, value) SystemWebLogger::getInstance().log((key), (value))
 #define SYSTEM_FRAME(jpeg) SystemWebLogger::getInstance().publishFrame((jpeg))
+// 网页上选了哪个 id（0 = 自动）。工具每帧读它来决定把哪些观测喂给跟踪器。
+#define SYSTEM_TARGET() SystemWebLogger::getInstance().selectedTarget()
+#define SYSTEM_TARGETS(...) SystemWebLogger::getInstance().publishTargets(__VA_ARGS__)
+#define SYSTEM_TARGET_SET(id) SystemWebLogger::getInstance().selectTarget((id))
 
 #else
 
@@ -104,5 +126,8 @@ private:
 #define STOP_SYSTEM_WEB() ((void)0)
 #define SYSTEM_LOG(key, value) ((void)0)
 #define SYSTEM_FRAME(jpeg) ((void)0)
+#define SYSTEM_TARGET() 0
+#define SYSTEM_TARGETS(...) ((void)0)
+#define SYSTEM_TARGET_SET(id) ((void)0)
 
 #endif // WEB_SYSTEM

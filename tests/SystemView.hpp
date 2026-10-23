@@ -134,8 +134,13 @@ struct MiniTopDownFrame
     // 切线方向与 TopDownView 一致：tangent = (-sin(yaw), cos(yaw))。
     std::vector<Eigen::Vector3d> plate_centres;
     std::vector<double> plate_yaws;
-    // 每块板的半宽（米）：大板 0.115、小板 0.0675。缺省按大板画。
+    // 每块板的半宽（米）：缺省 0.0675（小板）。工具里传固定值，长度不随板型跳。
     std::vector<double> plate_half_widths;
+
+    // 本帧"看到的"板（白色小十字 + 一条法向短线），用来核对模型板有没有跟着真实
+    // 板转：白十字贴在彩色板上 = 跟上了；白十字明显领先/落后 = 相位或 ω 有滞后。
+    std::vector<Eigen::Vector3d> observed_centres;
+    std::vector<double> observed_yaws;
     int aim_slot{-1};
 
     // 有效瞄准 = 当前时刻那块板的位置（弹丸瞬间到达会打中的点）；

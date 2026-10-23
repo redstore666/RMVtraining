@@ -553,6 +553,24 @@ cv::Mat renderMiniTopDown(const MiniTopDownFrame &frame, const MiniTopDownOption
         cv::line(canvas, a, b, kPlateColours[i % 4], 3, cv::LINE_AA);
     }
 
+    // 本帧观测到的板：白色小十字 + 法向短线（12 px）。彩色模型板压在它上面还是
+    // 落后它，一眼能看出来——这就是"模型有没有跟着真实板转"的直观检验。
+    for (std::size_t i = 0; i < frame.observed_centres.size(); ++i)
+    {
+        const cv::Point c = to_px3(frame.observed_centres[i]);
+        if (!canvas_rect.contains(c))
+            continue;
+        cv::drawMarker(canvas, c, cv::Scalar(255, 255, 255), cv::MARKER_CROSS, 8, 1,
+                       cv::LINE_AA);
+        const double yaw = i < frame.observed_yaws.size() ? frame.observed_yaws[i] : 0.0;
+        if (std::isfinite(yaw))
+        {
+            const cv::Point tip(cvRound(c.x + 12.0 * std::cos(yaw)),
+                                cvRound(c.y - 12.0 * std::sin(yaw)));
+            cv::line(canvas, c, tip, cv::Scalar(200, 200, 200), 1, cv::LINE_AA);
+        }
+    }
+
     // 云台原点：灰色空心小圆（"相机装在云台前面一点"，两者要能分开看）。
     const cv::Point origin_px = to_px(0.0, 0.0);
     if (canvas_rect.contains(origin_px))

@@ -262,7 +262,7 @@
             right: 12px;
             bottom: 12px;
             width: 22vw;
-            min-width: 260px;
+            min-width: 280px;
             aspect-ratio: 4 / 3;
             background: #000;
             border: 1px solid var(--line);
@@ -270,26 +270,48 @@
             overflow: hidden;
             box-shadow: 0 8px 22px rgba(0, 0, 0, 0.5);
             z-index: 50;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* 顶部工具条：左边标题、中间选车、右边状态（丢了就变红） */
+        #mini-topdown .td-head {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 8px;
+            background: #0b0e10;
+            border-bottom: 1px solid var(--line);
+            font-size: 11px;
+            color: var(--muted);
+            flex: 0 0 auto;
+        }
+
+        #mini-topdown select {
+            background: var(--surface-raised);
+            color: var(--text);
+            border: 1px solid var(--line);
+            border-radius: 4px;
+            padding: 1px 4px;
+            font-size: 11px;
+        }
+
+        #mini-topdown .td-state {
+            margin-left: auto;
+            font-variant-numeric: tabular-nums;
+        }
+
+        #mini-topdown .td-state.lost {
+            color: var(--danger);
         }
 
         #mini-topdown img {
+            flex: 1 1 auto;
+            min-height: 0;
             width: 100%;
-            height: 100%;
             display: block;
             object-fit: contain;
             image-rendering: auto;
-        }
-
-        #mini-topdown .badge {
-            position: absolute;
-            left: 8px;
-            top: 6px;
-            font-size: 11px;
-            letter-spacing: 0.04em;
-            color: var(--muted);
-            background: rgba(0, 0, 0, 0.45);
-            padding: 1px 6px;
-            border-radius: 4px;
         }
     </style>
 </head>
@@ -675,11 +697,79 @@
 
     <!-- 迷你俯视图（/frame.jpg）：黑底、四块板 + 车心 + 相机 + 两个瞄准点 -->
     <div id="mini-topdown">
-        <span class="badge">top-down</span>
+        <div class="td-head">
+            <span>top-down</span>
+            <select id="target-select" title="只看这个 id（0 = 自动）"></select>
+            <span id="target-state" class="td-state">auto</span>
+        </div>
         <img id="mini-frame" alt="top-down view">
     </div>
 
     <script>
+        // 右下角"选车"：轮询 /targets 拿"见过哪些 id"，下拉框改变时 GET /select?id=N。
+        // 选了 id 之后服务端只喂那个 id 的观测：丢了就空图（状态变红），不会自动换车。
+        (function () {
+            const select = document.getElementById("target-select");
+            const stateEl = document.getElementById("target-state");
+            let lastSeenKey = "";
+            let pending = false;
+
+            async function refreshTargets() {
+                if (pending) return;
+                pending = true;
+                try {
+                    const response = await fetch("/targets", { cache: "no-store" });
+                    if (!response.ok) return;
+                    const data = await response.json();
+                    const seen = Array.isArray(data.seen) ? data.seen : [];
+                    const key = seen.join(",") + "|" + (data.pinned || 0);
+                    if (key !== lastSeenKey) {
+                        lastSeenKey = key;
+                        const pinned = data.pinned || 0;
+                        select.innerHTML = "";
+                        const auto = document.createElement("option");
+                        auto.value = "0";
+                        auto.textContent = "auto";
+                        select.appendChild(auto);
+                        for (const id of seen) {
+                            const option = document.createElement("option");
+                            option.value = String(id);
+                            option.textContent = "id " + id;
+                            select.appendChild(option);
+                        }
+                        select.value = String(pinned);
+                    }
+                    const pinned = data.pinned || 0;
+                    if (pinned === 0) {
+                        stateEl.textContent = "auto";
+                        stateEl.classList.remove("lost");
+                    } else if (data.lost) {
+                        stateEl.textContent = "id " + pinned + " lost";
+                        stateEl.classList.add("lost");
+                    } else {
+                        stateEl.textContent = "id " + pinned;
+                        stateEl.classList.remove("lost");
+                    }
+                } catch (error) {
+                    /* 页面关了或服务停了，下次再试 */
+                } finally {
+                    pending = false;
+                }
+            }
+
+            select.addEventListener("change", async () => {
+                try {
+                    await fetch("/select?id=" + encodeURIComponent(select.value),
+                                 { cache: "no-store" });
+                } catch (error) { /* 忽略 */ }
+                lastSeenKey = ""; // 强制刷新状态文字
+                refreshTargets();
+            });
+
+            window.setInterval(refreshTargets, 1000);
+            refreshTargets();
+        })();
+
         // /frame.jpg 是"最近一帧"通道：用隐藏 Image 预加载，加载完再换到可见的
         // <img> 上，这样切帧时不会闪白。33 ms 一跳 ≈ 30 Hz（与主循环渲染门一致）。
         (function () {

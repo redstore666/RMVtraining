@@ -20,12 +20,20 @@
 //   --video-loop   视频放完从头再来（网页一直有数据，适合慢慢看）
 //   --hold S       视频放完后继续服务 S 秒再退出（默认 0 = 立即退出）
 //   --web-port N   网页端口（默认 8081；生产程序的 webdebug 是 8080，互不影响）
+//   --id N         启动就只看 id=N（0 = 自动）。网页下拉菜单随时可以改；切 id 时跟踪器
+//                  会 reset，不会把两台车的观测混进同一个状态。
+//   --plate-width M  迷你俯视图里装甲板的长度（米，默认 0.135 = 小板）。
+//                  固定长度：不随"这一帧检测到的是大板还是小板"变来变去。
 //   --show-camera  额外开一个窗口显示相机画面 + 检测框 + 坐标轴 + EKF 叠加
 //   --no-display   不开任何窗口（只推网页；纯吞吐/后台跑）
 //   --dump-every N 每 N 帧把迷你俯视图存到 ./tmp/system_mini_XXXXXX.png
 //                  （--show-camera 时同时存相机叠加图 ./tmp/system_cam_XXXXXX.png）
 //
 // 按键（有窗口时）: ESC/q 退出 | r 重置 EKF
+//
+// 选车：网页右下角的下拉菜单按 id 选目标（数据来自"这条视频/这场里累计检测到的 id"）。
+// 选中后只把该 id 的观测喂给跟踪器：不会自动切到别的 id；该 id 丢失时俯视图直接空掉，
+// 面板显示 `id=3 lost`，直到它重新出现。选 0（auto）恢复自动跟踪。
 //
 // 外参说明：本工具把相机→云台旋转当单位阵、平移当 0（外参未标定），所以
 // "世界系 = 云台系"，俯视图里的相机与云台原点重合、gimbal 的 yaw/pitch 保持 0。
@@ -43,6 +51,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -54,11 +63,6 @@
 
 namespace
 {
-
-double plateHalfWidth(ArmorSize size)
-{
-    return size == ArmorSize::Large ? 0.115 : 0.0675;
-}
 
 // 板数固定 4（旋转车体模型），phase = state(6) + k*pi/2 与
 // RotatingArmorModel::measurement() 是同一个公式。
@@ -76,6 +80,8 @@ int main(int argc, char **argv)
     int dump_every = 0;
     bool video_loop = false;
     double hold_s = 0.0;
+    double plate_width_m = 0.135; // 固定长度，不随检测到的板型变
+    int initial_pin = 0;          // --id N：启动就只看这个 id（网页下拉菜单仍可改）
 
     for (int i = 1; i < argc; ++i)
     {
@@ -96,6 +102,41 @@ int main(int argc, char **argv)
                 return 2;
             }
             video_path = argv[++i];
+        }
+        else if (arg == "--help" || arg == "-h")
+        {
+            std::cout << "用法: test_camera_system [--red|--blue] [--video FILE] [--video-loop]\n"
+                         "       [--hold S] [--web-port N] [--id N] [--plate-width M]\n"
+                         "       [--show-camera] [--no-display] [--dump-every N]\n"
+                         "  --id N           启动就只看 id=N（0=自动）；网页下拉菜单随时可改\n"
+                         "  --plate-width M  迷你图里的板长（米，默认 0.135，四块板等长）\n"
+                         "  --show-camera    另开窗口显示相机画面（不影响网页帧率）\n"
+                         "  --video-loop     视频放完从头循环\n"
+                         "  浏览器: http://127.0.0.1:8081/  （右下角可切换跟踪的 id）\n";
+            return 0;
+        }
+        else if (arg == "--id")
+        {
+            if (i + 1 >= argc)
+            {
+                std::cerr << "--id 后面要跟目标 id（0 = 自动）\n";
+                return 2;
+            }
+            initial_pin = std::atoi(argv[++i]);
+        }
+        else if (arg == "--plate-width")
+        {
+            if (i + 1 >= argc)
+            {
+                std::cerr << "--plate-width 后面要跟米数\n";
+                return 2;
+            }
+            plate_width_m = std::atof(argv[++i]);
+            if (!(plate_width_m > 0.02 && plate_width_m < 0.60))
+            {
+                std::cerr << "--plate-width 应在 0.02~0.60 m 之间\n";
+                return 2;
+            }
         }
         else if (arg == "--video-loop")
             video_loop = true;
@@ -192,7 +233,12 @@ int main(int argc, char **argv)
     bool window_sized = false;
     double fps_loop_ema = 0.0;
     double last_frame_time_s = 0.0;
-    ArmorSize last_size = ArmorSize::Small;
+    // 网页选车：pinned=0 表示自动；切换时要 reset，免得新车的观测喂进旧车的状态。
+    int pinned_last = 0;
+    double pinned_last_seen_s = -1.0e9;
+    int targets_tick = 0;
+    std::set<int> seen_ids;
+    std::set<int> visible_ids;
 
     auto tick_ms = [](int64_t a, int64_t b)
     { return static_cast<double>(b - a) * 1000.0 / cv::getTickFrequency(); };
@@ -232,6 +278,9 @@ int main(int argc, char **argv)
     const double mini_interval_ticks = 1.0 / 30.0 * cv::getTickFrequency();
     const double show_interval_ticks = 1.0 / 30.0 * cv::getTickFrequency();
 
+    if (initial_pin > 0)
+        SYSTEM_TARGET_SET(initial_pin);
+
     while (true)
     {
         const int64_t t0 = cv::getTickCount();
@@ -267,19 +316,6 @@ int main(int argc, char **argv)
         const auto poses = armor_solve(dets, camera, gimbal);
         const int64_t t3 = cv::getTickCount();
 
-        // 板型（决定迷你俯视图里板画的长度）：取本帧置信度最高的观测。
-        {
-            float best = -1.0F;
-            for (const ArmorPose &pose : poses)
-            {
-                if (pose.detection.confidence > best)
-                {
-                    best = pose.detection.confidence;
-                    last_size = pose.detection.size;
-                }
-            }
-        }
-
         // 视频回放用视频自己的时间轴（与 test_camera_playback 一致）：按墙钟走的话，
         // 1440×1080@166fps 的片子在本机只跑到 ~110fps，EKF 看到的转速会偏慢 0.66 倍。
         // 实车（get_pic）仍用 steady_clock。
@@ -287,9 +323,84 @@ int main(int argc, char **argv)
             ? std::chrono::duration<double>(std::chrono::steady_clock::now() - t_start).count()
             : video_time_offset_s + static_cast<double>(video_frame_index - 1) / video_fps;
         const double latency_s = tick_ms(t0, t3) / 1000.0;
-        const PredictionResult prediction = tracker.step(poses, gimbal, time_s, latency_s);
+
+        // ===== 网页选车：只把选中的 id 喂给跟踪器 =====
+        // 这样"选了 id=3 却跟到 id=1"就不会发生：id=3 丢了就没人更新，跟踪器自己衰减。
+        const int pinned = SYSTEM_TARGET();
+        if (pinned != pinned_last)
+        {
+            tracker.reset();
+            pinned_last = pinned;
+            pinned_last_seen_s = -1.0e9;
+            std::cout << (pinned > 0 ? cv::format("[pin] 只看 id=%d（丢失也不自动切换）\n", pinned)
+                                     : std::string("[pin] 自动选择目标\n"));
+        }
+        std::vector<ArmorPose> tracked_poses;
+        tracked_poses.reserve(poses.size());
+        visible_ids.clear();
+        for (const ArmorPose &pose : poses)
+        {
+            const int id = pose.detection.target_id;
+            if (id > 0)
+            {
+                visible_ids.insert(id);
+                seen_ids.insert(id);
+            }
+            if (pinned <= 0 || id == pinned)
+                tracked_poses.push_back(pose);
+        }
+        if (pinned > 0 && visible_ids.count(pinned) != 0)
+            pinned_last_seen_s = time_s;
+
+        const PredictionResult prediction =
+            tracker.step(tracked_poses, gimbal, time_s, latency_s);
         const rotating_armor::TrackerDiagnostics &diagnostics = tracker.diagnostics();
         const int64_t t3b = cv::getTickCount();
+
+        // ===== 相位差（"板转得跟不跟得上"的量化）=====
+        // 把每个观测按最近的模型槽位配对，比较观测法向与模型法向：
+        //   |lag| 长期接近 90° → 槽位归属错了一格（板"跳半圈"的典型来源）；
+        //   |lag| 一路变大     → ω 偏小，相位在慢慢滑（窗口估计的固有滞后）。
+        double phase_lag_deg = 0.0;
+        bool has_phase_lag = false;
+        if (tracker.initialized())
+        {
+            const rotating_armor::State &st = tracker.ekf().state();
+            const int want_id = pinned > 0 ? pinned : diagnostics.target_id;
+            double best_d = 0.10; // 只认 10 cm 内的板：够近才说明配对可信
+            for (const ArmorPose &pose : poses)
+            {
+                if (pose.detection.target_id != want_id)
+                    continue;
+                const Eigen::Vector3d obs(pose.position_gimbal_m[0], pose.position_gimbal_m[1],
+                                          pose.position_gimbal_m[2]);
+                for (int slot = 0; slot < kPlateCount; ++slot)
+                {
+                    const Eigen::Vector3d model =
+                        rotating_armor::platePosition(st, slot, kPlateCount);
+                    const double d = (model - obs).norm();
+                    if (d < best_d)
+                    {
+                        best_d = d;
+                        // 模型里板的外法向 = 相位 + π（RotatingArmorModel.cpp 的
+                        // platePhaseToWorldYaw），直接用相位比会差 180°。
+                        const double model_phase = st(6) + M_PI * 0.5 * slot;
+                        const double model_yaw = rotating_armor::wrapToPi(model_phase + M_PI);
+                        phase_lag_deg = rotating_armor::wrapToPi(pose.armor_yaw - model_yaw) *
+                                        180.0 / M_PI;
+                        has_phase_lag = true;
+                        static const bool lag_debug = std::getenv("LAG_DEBUG") != nullptr;
+                        if (lag_debug)
+                            std::printf("[lag] id=%d slot=%d d=%.3f yaw=%+.0f model=%+.0f "
+                                        "phase6=%+.0f R=%.3f w=%+.2f\n",
+                                        pose.detection.target_id, slot, d,
+                                        pose.armor_yaw * 180.0 / M_PI,
+                                        model_yaw * 180.0 / M_PI, st(6) * 180.0 / M_PI, st(8),
+                                        st(7));
+                    }
+                }
+            }
+        }
 
         const double frame_dt_ms =
             last_frame_time_s > 0.0 ? (time_s - last_frame_time_s) * 1000.0 : 0.0;
@@ -303,14 +414,19 @@ int main(int argc, char **argv)
             last_mini_tick = cv::getTickCount();
             rotating_armor::MiniTopDownFrame mini;
             mini.camera_position = Eigen::Vector3d(0.0, 0.0, 0.0); // 外参未标定，与云台重合
-            if (tracker.initialized())
+            // 选中的 id 丢了就整块空掉（不自动换成别的车），最多容忍 0.25 s 的检测抖动。
+            const bool pinned_visible =
+                pinned <= 0 || (time_s - pinned_last_seen_s) < 0.25;
+            if (tracker.initialized() && pinned_visible)
             {
                 const rotating_armor::State &state = tracker.ekf().state();
                 mini.has_body = true;
                 mini.body_centre = Eigen::Vector3d(
                     state(0), state(2), state(4) + tracker.slotZOffsetMean());
                 const double radius = state(8);
-                const double half_w = plateHalfWidth(last_size);
+                // 固定半宽：四块板画一样长。以前取"本帧检测到的板型"，两台车大小板
+                // 交替出现时长度会一格一格跳，看着很难受。
+                const double half_w = 0.5 * plate_width_m;
                 for (int slot = 0; slot < kPlateCount; ++slot)
                 {
                     const double phase = state(6) + M_PI * 0.5 * slot;
@@ -320,6 +436,14 @@ int main(int argc, char **argv)
                                         state(4) + tracker.slotZOffsetMean()));
                     mini.plate_yaws.push_back(phase);
                     mini.plate_half_widths.push_back(half_w);
+                }
+                // 观测叠加：白十字 + 法向短线（只看选中的那条轨迹）。
+                for (const ArmorPose &pose : tracked_poses)
+                {
+                    mini.observed_centres.push_back(
+                        Eigen::Vector3d(pose.position_gimbal_m[0], pose.position_gimbal_m[1],
+                                        pose.position_gimbal_m[2]));
+                    mini.observed_yaws.push_back(pose.armor_yaw);
                 }
                 mini.aim_slot = diagnostics.aim_slot;
                 if (diagnostics.aim_slot >= 0 && diagnostics.aim_slot < kPlateCount)
@@ -336,6 +460,12 @@ int main(int argc, char **argv)
                 mini.fire_allowed = prediction.fire_allowed;
                 mini.caption = cv::format("d=%.2fm R=%.2fm w=%+.1f", prediction.distance_m, radius,
                                           prediction.body_yaw_velocity);
+                if (has_phase_lag)
+                    mini.caption += cv::format("  lag=%+.0f", phase_lag_deg);
+            }
+            else if (pinned > 0)
+            {
+                mini.caption = cv::format("id=%d lost", pinned);
             }
             mini_canvas = rotating_armor::renderMiniTopDown(mini);
             std::vector<unsigned char> jpeg;
@@ -410,7 +540,18 @@ int main(int argc, char **argv)
             SYSTEM_LOG("aim_miss", prediction.fire_miss_m * 1000.0);
             SYSTEM_LOG("fire", prediction.fire_allowed ? 1.0 : 0.0);
             SYSTEM_LOG("latency_ms", diagnostics.measured_latency_s * 1000.0);
+            if (has_phase_lag)
+                SYSTEM_LOG("phase_lag_deg", phase_lag_deg);
+            SYSTEM_LOG("pinned_id", pinned);
             SYSTEM_LOG("state_code", state_code);
+        }
+
+        // ===== 把"可选 id"发给网页（10 Hz 足够，下拉菜单不用每帧重建）=====
+        if (++targets_tick >= 10)
+        {
+            targets_tick = 0;
+            SYSTEM_TARGETS(std::vector<int>(seen_ids.begin(), seen_ids.end()),
+                           std::vector<int>(visible_ids.begin(), visible_ids.end()));
         }
 
         // ===== 吞吐统计（每 150 帧一行）=====
@@ -424,11 +565,15 @@ int main(int argc, char **argv)
         if (++stat_cnt >= 150)
         {
             stat_cnt = 0;
+            const std::string lag_text = has_phase_lag
+                ? cv::format(" lag=%+.0f", phase_lag_deg)
+                : std::string();
             std::printf("[%d帧] fps_loop=%.1f | grab=%.1f detect=%.1f pnp=%.1f ekf=%.1f ms | "
-                        "Det=%zu Poses=%zu | EKF id=%d R=%.2f\n",
+                        "Det=%zu Poses=%zu | EKF id=%d R=%.2f w=%+.2f%s\n",
                         frame_cnt, fps_loop_ema, tick_ms(t0, t1), tick_ms(t1, t2),
                         tick_ms(t2, t3), tick_ms(t3, t3b), dets.size(), poses.size(),
-                        static_cast<int>(prediction.target_id), prediction.radius_1_m);
+                        static_cast<int>(prediction.target_id), prediction.radius_1_m,
+                        prediction.body_yaw_velocity, lag_text.c_str());
         }
 
         if (!no_display && show_camera)

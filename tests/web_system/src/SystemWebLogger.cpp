@@ -4,6 +4,7 @@
 
 #include "httplib.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <iostream>
@@ -162,12 +163,66 @@ std::vector<unsigned char> SystemWebLogger::latestFrame(std::uint64_t* sequence)
     return frame_jpeg_;
 }
 
+void SystemWebLogger::selectTarget(int id) noexcept {
+    selected_target_.store(id, std::memory_order_release);
+}
+
+int SystemWebLogger::selectedTarget() const noexcept {
+    return selected_target_.load(std::memory_order_acquire);
+}
+
+void SystemWebLogger::publishTargets(const std::vector<int>& seen,
+                                     const std::vector<int>& visible) {
+    std::lock_guard<std::mutex> lock(targets_mutex_);
+    seen_ids_ = seen;
+    visible_ids_ = visible;
+}
+
+std::string SystemWebLogger::targetsJson() const {
+    std::vector<int> seen;
+    std::vector<int> visible;
+    {
+        std::lock_guard<std::mutex> lock(targets_mutex_);
+        seen = seen_ids_;
+        visible = visible_ids_;
+    }
+    const int pinned = selectedTarget();
+    const bool lost = pinned > 0 &&
+        std::find(visible.begin(), visible.end(), pinned) == visible.end();
+
+    std::string json = "{\"seen\":[";
+    for (std::size_t i = 0; i < seen.size(); ++i) {
+        if (i != 0) json += ",";
+        json += std::to_string(seen[i]);
+    }
+    json += "],\"pinned\":" + std::to_string(pinned) + ",\"visible\":[";
+    for (std::size_t i = 0; i < visible.size(); ++i) {
+        if (i != 0) json += ",";
+        json += std::to_string(visible[i]);
+    }
+    json += "],\"lost\":" + std::string(lost ? "true" : "false") + "}";
+    return json;
+}
+
 void SystemWebLogger::configureServer(httplib::Server& server) {
     server.Get("/health", [this](const httplib::Request&, httplib::Response& response) {
         response.set_header("Cache-Control", "no-store");
         response.set_content(
             running_.load(std::memory_order_acquire) ? "OK" : "STOPPING", "text/plain");
     });
+
+    // 网页端"选车"：GET /select?id=N 写入并回当前状态；GET /targets 只读。
+    // 两个路由都返回同一份 JSON：{"seen":[..],"pinned":N,"visible":[..]}
+    const auto targets_handler = [this](const httplib::Request& request,
+                                        httplib::Response& response) {
+        if (request.has_param("id")) {
+            selectTarget(std::atoi(request.get_param_value("id").c_str()));
+        }
+        response.set_header("Cache-Control", "no-store");
+        response.set_content(targetsJson(), "application/json");
+    };
+    server.Get("/select", targets_handler);
+    server.Get("/targets", targets_handler);
 
     // 迷你俯视图：返回最近一帧 JPEG。网页用 <img> 每 33 ms 换一次 src，
     // no-store 让浏览器真的重新取（否则会拿缓存里的旧帧）。
