@@ -412,8 +412,10 @@ int main(int argc, char **argv)
         if (pose_debug && tracker.initialized() && !tracked_poses.empty())
         {
             const Eigen::VectorXd st = tracker.ekf().state();
-            std::printf("[state] c=(%+.3f,%+.3f) z=%+.3f R=%.3f yaw=%+7.1f w=%+.2f\n",
-                        st(0), st(2), st(4), st(8), st(6) * 180.0 / M_PI, st(7));
+            // ts 供 gt_omega.py 做时间轴（[pose] 行没有自己的时间戳，解析时
+            // 继承所属 [state] 的 ts）。
+            std::printf("[state] ts=%.3f c=(%+.3f,%+.3f) z=%+.3f R=%.3f yaw=%+7.1f w=%+.2f\n",
+                        time_s, st(0), st(2), st(4), st(8), st(6) * 180.0 / M_PI, st(7));
             const double cx = tracker.ekf().state()(0);
             const double cy = tracker.ekf().state()(2);
             const double body_yaw = tracker.ekf().state()(6);

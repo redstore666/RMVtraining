@@ -1791,6 +1791,10 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
         return;
     }
     // 刚吃过转速证据，盖章：update() 末尾的衰减块以此为据判断"证据缺席"。
+    // 注意曾试过"只有 sigma<衰减强度的证据才盖章"（想把 v4 非自转车上
+    // ω≈+1.3 的弱伪证据交给衰减压回 0），但 H3 平移用例对衰减时序极其
+    // 敏感（omega 从 +0.02 翻到 -2.22）——弱证据+衰减的交互没有干净解，
+    // 已回退；v4 的 ω 偏置记录在 docs/v4_webdebug_report.md §12。
     last_rate_update_s_ = timestamp_s;
     diagnostics_.rate_obs_used = true;
     diagnostics_.rate_obs_rad_s = used_slope;
