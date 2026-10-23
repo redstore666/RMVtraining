@@ -1737,9 +1737,11 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
     {
         return;
     }
+    // 刚吃过转速证据，盖章：update() 末尾的衰减块以此为据判断"证据缺席"。
+    last_rate_update_s_ = timestamp_s;
     diagnostics_.rate_obs_used = true;
     diagnostics_.rate_obs_rad_s = used_slope;
-    diagnostics_.rate_obs_sigma_rad_s = sigma;
+    diagnostics_.rate_obs_sigma_rad_s = used_sigma;
     diagnostics_.rate_obs_samples = count;
 }
 
@@ -2722,7 +2724,10 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                                                     : config_.rate_tracklet_sigma_floor_rad_s;
                         const double sigma_omega = std::max(0.35, sig_theta / dt);
                         const double sigma_used = std::max(sigma_omega, sig_floor);
-                        ekf_.updateRate(omega_meas, sigma_used);
+                        if (ekf_.updateRate(omega_meas, sigma_used))
+                        {
+                            last_rate_update_s_ = timestamp_s;
+                        }
                         diagnostics_.rate_measurements += 1;
                         // 只有"真的在转 + 板心确实在半径上"的量测才用来调 Q：
                         // 静止目标遇到云台抖动时，噪声差分会一路灌到 12 rad/s，
@@ -3789,7 +3794,12 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
         timestamp_seconds - last_rate_update_s_ > config_.rate_decay_after_s &&
         std::fabs(ekf_.state()(7)) > 0.05)
     {
-        ekf_.updateYawRate(0.0, config_.rate_decay_sigma_rad_s);
+        if (ekf_.updateYawRate(0.0, config_.rate_decay_sigma_rad_s))
+        {
+            // 衰减本身也算动过 omega：盖章后下一轮要再等 rate_decay_after_s，
+            // 否则这里每帧都在拉 0，把刚吃进来的斜率量测对冲掉。
+            last_rate_update_s_ = timestamp_seconds;
+        }
     }
     updateBodyFromPair(world);
     updateRadiusFromPairs(world);
@@ -3939,7 +3949,10 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
                     if (std::fabs(slope) >= config_.rate_window_min_rate_rad_s ||
                         std::fabs(ekf_.state()(7)) >= config_.rate_window_min_rate_rad_s)
                     {
-                        ekf_.updateRate(slope, sigma_rate);
+                        if (ekf_.updateRate(slope, sigma_rate))
+                        {
+                            last_rate_update_s_ = timestamp_seconds;
+                        }
                         diagnostics_.rate_measurements += 1;
                         static const bool win_dbg = std::getenv("RATE_DEBUG") != nullptr;
                         if (win_dbg)
