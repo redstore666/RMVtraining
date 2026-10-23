@@ -535,6 +535,22 @@ int main(int argc, char **argv)
             SYSTEM_LOG("omega", prediction.body_yaw_velocity);
             SYSTEM_LOG("radius", prediction.radius_1_m);
             SYSTEM_LOG("nis", diagnostics.last_nis);
+            // 更新被拒的诊断：best_gate_distance_m 是"走到 NIS 门那一步的候选"
+            // 里最近的板距（inf = 一个都没走到，位置门/连续性门就先拒了）；
+            // cont_rej 是连续性门累计拒掉的候选数。用来看 60% 空帧到底卡在哪。
+            // 没锁上时 associateAndUpdate 根本不跑，diagnostics 里是上一轮的旧值，
+            // 直接按 99 记（= 没走到门那一步），免得把陈旧值读成"候选就在门口"。
+            const bool linked = tracker.initialized();
+            SYSTEM_LOG("gate_dist",
+                       linked && std::isfinite(diagnostics.best_gate_distance_m)
+                           ? diagnostics.best_gate_distance_m
+                           : 99.0);
+            SYSTEM_LOG("gate_nis",
+                       linked && std::isfinite(diagnostics.best_gate_nis)
+                           ? diagnostics.best_gate_nis
+                           : 99.0);
+            SYSTEM_LOG("cont_rej", static_cast<double>(diagnostics.continuity_rejects));
+            SYSTEM_LOG("rej_frame", static_cast<double>(diagnostics.rejected_this_frame));
             SYSTEM_LOG("updates", diagnostics.updates_this_frame);
             SYSTEM_LOG("missed", diagnostics.missed_frames);
             SYSTEM_LOG("aim_miss", prediction.fire_miss_m * 1000.0);
