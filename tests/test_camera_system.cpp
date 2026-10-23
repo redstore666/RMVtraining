@@ -86,6 +86,7 @@ int main(int argc, char **argv)
     bool pair_body = false;       // --pair-body：打开"双板整车求解"（库默认关）
     bool rate_pll = false;        // --rate-pll：打开残差 PLL 的转速量测（库默认关）
     bool rate_tracklet = false;   // --rate-tracklet：打开 Tracklet 单板角速度（库默认关）
+    double pair_phase_err = -1.0; // --pair-phase-err RAD：覆盖双板解的相位差门限（默认 -1=用库值 0.35）
 
     for (int i = 1; i < argc; ++i)
     {
@@ -118,10 +119,15 @@ int main(int argc, char **argv)
                          "  --pair-body      打开双板整车求解（两块相邻板闭式解 c/R/yaw，库默认关）\n"
                          "  --rate-pll       打开残差 PLL 转速量测（库默认关；四板相位只有 mod 90 度可观测）\n"
                          "  --rate-tracklet  打开 Tracklet 单板角速度量测（库默认关）\n"
+                         "  --pair-phase-err RAD  覆盖双板解的相位差门限（默认 0.35；实测法向有 45 度偏置）\n"
                          "  --show-camera    另开窗口显示相机画面（不影响网页帧率）\n"
                          "  --video-loop     视频放完从头循环\n"
                          "  浏览器: http://127.0.0.1:8081/  （右下角可切换跟踪的 id）\n";
             return 0;
+        }
+        else if (arg == "--pair-phase-err" && i + 1 < argc)
+        {
+            pair_phase_err = std::atof(argv[++i]);
         }
         else if (arg == "--rate-pll")
         {
@@ -246,6 +252,10 @@ int main(int argc, char **argv)
     tracker_config.pair_body_solve_enabled = pair_body;
     tracker_config.rate_from_residual_enabled = rate_pll;
     tracker_config.tracklet_rate_enabled = rate_tracklet;
+    if (pair_phase_err >= 0.0)
+    {
+        tracker_config.pair_body_max_phase_error_rad = pair_phase_err;
+    }
     rotating_armor::RotatingArmorTracker tracker(tracker_config);
     if (pair_body || rate_pll || rate_tracklet)
     {
