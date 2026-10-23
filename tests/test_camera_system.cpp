@@ -83,6 +83,9 @@ int main(int argc, char **argv)
     double plate_width_m = 0.135; // 固定长度，不随检测到的板型变
     int initial_pin = 0;          // --id N：启动就只看这个 id（网页下拉菜单仍可改）
     float conf_thres = -1.0F;     // --conf T：检测置信度门限（<0 = 用库默认 0.7）
+    bool pair_body = false;       // --pair-body：打开"双板整车求解"（库默认关）
+    bool rate_pll = false;        // --rate-pll：打开残差 PLL 的转速量测（库默认关）
+    bool rate_tracklet = false;   // --rate-tracklet：打开 Tracklet 单板角速度（库默认关）
 
     for (int i = 1; i < argc; ++i)
     {
@@ -112,10 +115,25 @@ int main(int argc, char **argv)
                          "  --id N           启动就只看 id=N（0=自动）；网页下拉菜单随时可改\n"
                          "  --plate-width M  迷你图里的板长（米，默认 0.135，四块板等长）\n"
                          "  --conf T         检测置信度门限（默认用库里的 0.7；调低会多出弱检\n"
+                         "  --pair-body      打开双板整车求解（两块相邻板闭式解 c/R/yaw，库默认关）\n"
+                         "  --rate-pll       打开残差 PLL 转速量测（库默认关；四板相位只有 mod 90 度可观测）\n"
+                         "  --rate-tracklet  打开 Tracklet 单板角速度量测（库默认关）\n"
                          "  --show-camera    另开窗口显示相机画面（不影响网页帧率）\n"
                          "  --video-loop     视频放完从头循环\n"
                          "  浏览器: http://127.0.0.1:8081/  （右下角可切换跟踪的 id）\n";
             return 0;
+        }
+        else if (arg == "--rate-pll")
+        {
+            rate_pll = true;
+        }
+        else if (arg == "--rate-tracklet")
+        {
+            rate_tracklet = true;
+        }
+        else if (arg == "--pair-body")
+        {
+            pair_body = true;
         }
         else if (arg == "--conf")
         {
@@ -223,7 +241,17 @@ int main(int argc, char **argv)
     GimbalState gimbal{};
 
     rotating_armor::TrackerConfig tracker_config;
+    // 双板整车求解：两相邻板的闭式解直接给出 c/R/yaw，是"单板位置几乎不含相位信息"
+    // 的唯一补救；库里默认关着，这里留个开关做 A/B。
+    tracker_config.pair_body_solve_enabled = pair_body;
+    tracker_config.rate_from_residual_enabled = rate_pll;
+    tracker_config.tracklet_rate_enabled = rate_tracklet;
     rotating_armor::RotatingArmorTracker tracker(tracker_config);
+    if (pair_body || rate_pll || rate_tracklet)
+    {
+        std::cout << cv::format("[tracker] pair_body=%d rate_pll=%d rate_tracklet=%d\n",
+                                pair_body ? 1 : 0, rate_pll ? 1 : 0, rate_tracklet ? 1 : 0);
+    }
 
     if (conf_thres > 0.0F)
     {
@@ -367,6 +395,34 @@ int main(int argc, char **argv)
         }
         if (pinned > 0 && visible_ids.count(pinned) != 0)
             pinned_last_seen_s = time_s;
+
+        // POSE_DEBUG=1：逐帧打印每块板的"位置 bearing vs 法向"，用来判断
+        // 模型的"外法向 = 相位 + π"约定和实拍法向到底差多少（45 度偏置的来源）。
+        static const bool pose_debug = std::getenv("POSE_DEBUG") != nullptr;
+        if (pose_debug && tracker.initialized() && !tracked_poses.empty())
+        {
+            const Eigen::VectorXd st = tracker.ekf().state();
+            std::printf("[state] c=(%+.3f,%+.3f) z=%+.3f R=%.3f yaw=%+7.1f w=%+.2f\n",
+                        st(0), st(2), st(4), st(8), st(6) * 180.0 / M_PI, st(7));
+            const double cx = tracker.ekf().state()(0);
+            const double cy = tracker.ekf().state()(2);
+            const double body_yaw = tracker.ekf().state()(6);
+            for (const ArmorPose &pose : tracked_poses)
+            {
+                const double px = pose.position_gimbal_m[0];
+                const double py = pose.position_gimbal_m[1];
+                const double bearing = std::atan2(py - cy, px - cx);
+                const double normal = pose.armor_yaw;
+                const double slot_phase = body_yaw + 0.0;
+                std::printf("[pose] id=%d x=%+.3f y=%+.3f bear=%+7.1f normal=%+7.1f "
+                            "normal-bear=%+7.1f model_phase=%+7.1f yaw=%+7.1f\n",
+                            pose.detection.target_id, px, py,
+                            bearing * 180.0 / M_PI, normal * 180.0 / M_PI,
+                            (normal - bearing) * 180.0 / M_PI,
+                            slot_phase * 180.0 / M_PI, body_yaw * 180.0 / M_PI);
+                (void)slot_phase;
+            }
+        }
 
         const PredictionResult prediction =
             tracker.step(tracked_poses, gimbal, time_s, latency_s);
@@ -588,6 +644,23 @@ int main(int argc, char **argv)
                 }
             }
             SYSTEM_LOG("near_other", near_other);
+            // "四块板只振荡不转"的直接嫌疑人：单板重锚是硬对齐（rotatePhase +
+            // shiftCenter），每触发一次就把相位瞬间拽到观测上，观感就是来回跳。
+            // 双板整车解要求观测带法向（has_yaw）；法向缺失时它永远不会触发。
+            double yaw_poses = 0.0;
+            for (const ArmorPose &pose : tracked_poses)
+            {
+                const double n = std::sqrt(pose.normal_gimbal[0] * pose.normal_gimbal[0] +
+                                           pose.normal_gimbal[1] * pose.normal_gimbal[1] +
+                                           pose.normal_gimbal[2] * pose.normal_gimbal[2]);
+                if (n > 0.5)
+                    ++yaw_poses;
+            }
+            SYSTEM_LOG("yaw_poses", yaw_poses);
+            SYSTEM_LOG("realigns", static_cast<double>(diagnostics.single_plate_realigns));
+            SYSTEM_LOG("pair_solves", static_cast<double>(diagnostics.pair_body_solves));
+            SYSTEM_LOG("body_refits", static_cast<double>(diagnostics.body_refits));
+            SYSTEM_LOG("yaw_deg", prediction.body_yaw * 180.0 / M_PI);
             SYSTEM_LOG("cont_rej", static_cast<double>(diagnostics.continuity_rejects));
             SYSTEM_LOG("rej_frame", static_cast<double>(diagnostics.rejected_this_frame));
             SYSTEM_LOG("updates", diagnostics.updates_this_frame);
