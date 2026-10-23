@@ -63,6 +63,14 @@ add_library(topdown_view STATIC
 )
 target_link_libraries(topdown_view PUBLIC rotating_armor_ekf opencv_imgproc)
 
+# 系统总览图：把"信息面板 + 相机画面 + 俯视图"拼成一张画布（一次 imshow 看全）。
+# 与 web_debug 互补：网页看曲线、这张图看"曲线 + 画面 + 俯视图"的对应关系。
+add_library(system_view STATIC
+    src/SystemView.cpp
+)
+target_include_directories(system_view PUBLIC include)
+target_link_libraries(system_view PUBLIC opencv_core opencv_imgproc)
+
 add_library(training_core STATIC
     src/AppSupport.cpp
     src/AutoAimTypes.cpp
@@ -179,6 +187,11 @@ if(BUILD_TESTING)
 
     # 俯视图冒烟测试：合成一圈旋转车体，确认渲染器能跑完并落盘
     # （不开窗口、不连相机，几秒内完成；只验证"能画、不崩、状态收敛"）。
+    # 总览图布局冒烟测试：不需要相机/窗口，验证画布尺寸与各分区都画了东西
+    add_executable(test_system_view tests/test_system_view.cpp)
+    target_link_libraries(test_system_view PRIVATE system_view ${OpenCV_LIBS})
+    add_test(NAME system_view_layout COMMAND test_system_view)
+
     add_test(NAME ekf_viewer_smoke
              COMMAND test_ekf_viewer --no-show --frames 40
                      --out ${CMAKE_CURRENT_BINARY_DIR}/topdown_smoke)
@@ -241,7 +254,13 @@ target_include_directories(test_ekf_viewer PRIVATE ${OpenCV_INCLUDE_DIRS})
 # 实时相机取流 + 装甲板检测（相机必须已连接）。
 add_executable(test_camera_live tests/test_camera_live.cpp)
 # topdown_view：EKF 俯视图渲染（与 test_camera_playback 的 --topdown 共用同一份实现）。
-target_link_libraries(test_camera_live PRIVATE training_core topdown_view ${OpenCV_LIBS})
+target_link_libraries(test_camera_live PRIVATE training_core topdown_view system_view
+                      ${OpenCV_LIBS})
+# web_debug：与 rmv_training 用的是同一份实现，但本工具以独立进程、独立端口运行，
+# 因此不会影响主程序那条 webdebug（网页看同一批键）。
+if(ENABLE_WEB_DEBUG)
+    target_link_libraries(test_camera_live PRIVATE web_debug)
+endif()
 target_include_directories(test_camera_live PRIVATE ${OpenCV_INCLUDE_DIRS})
 
 # 同 test_camera：让 dlopen 能按 RPATH 找到 libFormatConversion.so。

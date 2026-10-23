@@ -12,6 +12,10 @@
 //   --video FILE  不连相机、改读视频（上车前在没相机的机器上验收 EKF 显示用）
 //   --dump-every N 每 N 帧把带标注画面存到 ./tmp/live_dump_XXXXXX.png
 //   --topdown-out DIR 俯视图每 50 帧导出 DIR/t%06d.png
+//   --no-system-view  退回"两个窗口"（相机一个、俯视图一个）；默认是把
+//                  webdebug 的遥测卡片 + 相机画面 + 俯视图拼成一张总览图
+//   --view-scale S   总览图的显示缩放（默认 0.6，画布本身是全分辨率）
+//   --web-port N     webdebug 曲线页面端口（默认 8081，与主程序的 8080 错开）
 //
 // 按键:  ESC/q 退出 | s 保存当前帧(./tmp/) | m 打印各观测 PnP 的 R/t 矩阵（全精度）
 //        | r 重置 EKF（换车/换场地后手动清状态）
@@ -35,7 +39,15 @@
 //   imshow 已限频 30fps + pollKey 不等待；要测纯吞吐用 --no-display。
 #include "StudentTasks.hpp"
 #include "RotatingArmorTracker.hpp"
+#include "SystemView.hpp"
 #include "TopDownView.hpp"
+
+// web_debug 的宏在未启用时是空操作（连参数都不求值），所以下面可以无条件写。
+// 这里链接的是与 rmv_training 同一份实现，但本工具是独立进程、独立端口，
+// 不会影响主程序那条 webdebug。
+// WebLogger.hpp 自己按 WEB_DEBUG 处理两种情况：启用时是真实现，禁用时在文件末尾
+// 把 START_WEB_SERVER/STOP_WEB_SERVER/WEB_LOG 定义成空操作宏（参数不求值）。
+#include "WebLogger.hpp"
 #include <cmath>
 #include <cstdio>
 #include <iostream>
@@ -214,6 +226,13 @@ int main(int argc, char **argv)
     int dump_every = 0;
     // --topdown-out DIR：把俯视图逐帧写成 DIR/t%06d.png（无需看窗口也能留证据）。
     std::string topdown_out;
+    // --no-system-view：默认把"遥测卡片 + 相机 + 俯视图"拼成一张总览图
+    // （一个 imshow 看全，对应"系统视图"）；关掉则退回原来的两个窗口。
+    bool system_view_enabled = true;
+    double view_scale = 0.6;
+    // --web-port N：webdebug 曲线页面端口。默认为 8081：主程序 rmv_training 用
+    // 8080，两者同时跑也不会抢端口（"另建一份 webdebug"就是这个意思）。
+    int web_port = 8081;
     for (int i = 1; i < argc; ++i)
     {
         const std::string arg = argv[i];
@@ -260,6 +279,36 @@ int main(int argc, char **argv)
                 return 2;
             }
             video_path = argv[++i];
+        }
+        else if (arg == "--no-system-view")
+            system_view_enabled = false;
+        else if (arg == "--view-scale")
+        {
+            if (i + 1 >= argc)
+            {
+                std::cerr << "--view-scale 后面要跟一个数（0.1~1.5）\n";
+                return 2;
+            }
+            view_scale = std::atof(argv[++i]);
+            if (!(view_scale > 0.05 && view_scale <= 2.0))
+            {
+                std::cerr << "--view-scale 应在 0.05~2.0 之间\n";
+                return 2;
+            }
+        }
+        else if (arg == "--web-port")
+        {
+            if (i + 1 >= argc)
+            {
+                std::cerr << "--web-port 后面要跟端口号\n";
+                return 2;
+            }
+            web_port = std::atoi(argv[++i]);
+            if (web_port <= 0 || web_port > 65535)
+            {
+                std::cerr << "--web-port 必须是 1~65535\n";
+                return 2;
+            }
         }
         else if (arg == "--topdown-ppm")
         {
@@ -318,10 +367,58 @@ int main(int argc, char **argv)
     rotating_armor::TopDownOptions topdown_options;
     topdown_options.follow_target = topdown_follow;
     topdown_options.pixels_per_meter = topdown_ppm;
+    if (system_view_enabled && !no_display)
+    {
+        // 总览图里俯视图那一格约 400px：直接按这个尺寸渲染（putText 的字号是
+        // 绝对像素，缩图会让 HUD 变成糊字），单独开窗口时才用 800。
+        topdown_options.width = 400;
+        topdown_options.height = 400;
+    }
     rotating_armor::TopDownView topdown_view(topdown_options);
     const std::string topdown_window = "EKF top-down";
-    if (topdown_enabled)
-        cv::namedWindow(topdown_window, cv::WINDOW_AUTOSIZE);
+
+    // ===== 系统总览图：把 webdebug 的信息（同名的键）画成卡片 =====
+    // 左列 = 取图/检测/PnP 的耗时与质量，右列 = EKF/瞄准，右下 = 俯视图，
+    // 中间 = 相机画面。数值只为本窗口服务，与 WEB_LOG 推给网页的是同一批量。
+    rotating_armor::SystemViewOptions system_options;
+    system_options.left_width = 320;   // 左列：耗时/检测质量
+    system_options.right_width = 400;  // 右列：EKF 卡片 + 下方俯视图
+    system_options.left_card_height = 104; // 左列拉高填满（右列要给俯视图留位置）
+    rotating_armor::SystemView system_view(system_options);
+    // 左列（detect / capture）
+    auto &trace_fps = system_view.leftTrace("fps_cam", "fps");
+    auto &trace_dt = system_view.leftTrace("frame_dt_ms", "ms");
+    auto &trace_grab = system_view.leftTrace("grab_ms", "ms");
+    auto &trace_detect = system_view.leftTrace("detect_ms", "ms");
+    auto &trace_pnp = system_view.leftTrace("pnp_ms", "ms");
+    auto &trace_draw = system_view.leftTrace("draw_ms", "ms");
+    auto &trace_count = system_view.leftTrace("detect_count");
+    auto &trace_reproj = system_view.leftTrace("reproj_px", "px");
+    auto &trace_dist = system_view.leftTrace("distance_m", "m");
+    // 右列（EKF / aim）
+    auto &trace_state = system_view.rightTrace("state");
+    auto &trace_omega = system_view.rightTrace("omega", "rad/s");
+    auto &trace_radius = system_view.rightTrace("radius", "m");
+    auto &trace_nis = system_view.rightTrace("nis");
+    auto &trace_updates = system_view.rightTrace("updates");
+    auto &trace_missed = system_view.rightTrace("missed");
+    auto &trace_aimerr = system_view.rightTrace("aim_miss", "cm");
+    auto &trace_latency = system_view.rightTrace("latency", "ms");
+    auto &trace_ekfms = system_view.rightTrace("ekf_ms", "ms");
+    const std::string system_window = "system view";
+    if (!no_display)
+    {
+        if (system_view_enabled)
+        {
+            cv::namedWindow(system_window, cv::WINDOW_NORMAL);
+        }
+        else
+        {
+            cv::namedWindow("camera_live", cv::WINDOW_NORMAL);
+            if (topdown_enabled)
+                cv::namedWindow(topdown_window, cv::WINDOW_AUTOSIZE);
+        }
+    }
     if (topdown_enabled && !topdown_out.empty())
     {
         std::error_code mkdir_error;
@@ -338,6 +435,13 @@ int main(int argc, char **argv)
     }
     std::cout << "[extr not calibrated] yaw/pitch 相对相机光轴\n";
 
+    // webdebug：独立进程、独立端口（默认 8081），与主程序 rmv_training 的 8080
+    // 互不干扰；键名与主程序一致，网页上看到的曲线含义相同。
+    START_WEB_SERVER(web_port);
+    std::cout << "[web] 曲线页面 http://127.0.0.1:" << web_port << "/\n";
+    if (system_view_enabled)
+        std::cout << "[view] 总览图：左=耗时/检测 中=相机 右=EKF 卡片+俯视图（--no-system-view 退回两窗口）\n";
+
     cv::Mat frame;
     int save_idx = 0;
     int stat_cnt = 0;
@@ -351,6 +455,7 @@ int main(int argc, char **argv)
     { return static_cast<double>(b - a) * 1000.0 / cv::getTickFrequency(); };
 
     double last_wait_ms = 0.0;
+    double last_frame_time_s = 0.0; // 帧间隔（frame_dt_ms）用
     double fps_nodisp_ema = 0.0; // "不带显示窗口"的吞吐（处理段耗时倒数，受相机帧率封顶）
     int64_t last_show_tick = 0; // imshow 限频用：上次真正显示的 tick
     std::vector<cv::Mat> dbg_rvecs, dbg_tvecs;
@@ -693,15 +798,42 @@ int main(int argc, char **argv)
                     cv::Scalar(0, 255, 255), 2);
 
             // ===== 显示 =====
-            cv::Mat display;
-            if (frame.cols > 1920)
-                cv::resize(frame, display, cv::Size(), 0.5, 0.5);
-            else
-                display = frame;
-
-            if (dump_every > 0 && frame_cnt % dump_every == 0)
+            // 默认拼总览图：[遥测卡片 | 相机画面 | EKF 卡片 + 俯视图]。
+            // compose 用的是全分辨率的 frame，缩放只作用于显示用的副本，
+            // 所以 --dump-every 导出的是全分辨率总览图。
+            cv::Mat view_canvas;
+            if (system_view_enabled)
             {
-                cv::imwrite(cv::format("./tmp/live_dump_%06d.png", frame_cnt), frame);
+                view_canvas = system_view.compose(frame, topdown_canvas);
+            }
+
+            cv::Mat display;
+            if (!view_canvas.empty())
+            {
+                if (dump_every > 0 && frame_cnt % dump_every == 0)
+                {
+                    cv::imwrite(cv::format("./tmp/live_dump_%06d.png", frame_cnt), view_canvas);
+                }
+                if (std::fabs(view_scale - 1.0) > 1e-6)
+                {
+                    cv::resize(view_canvas, display, cv::Size(), view_scale, view_scale,
+                               cv::INTER_AREA);
+                }
+                else
+                {
+                    display = view_canvas;
+                }
+            }
+            else
+            {
+                if (frame.cols > 1920)
+                    cv::resize(frame, display, cv::Size(), 0.5, 0.5);
+                else
+                    display = frame;
+                if (dump_every > 0 && frame_cnt % dump_every == 0)
+                {
+                    cv::imwrite(cv::format("./tmp/live_dump_%06d.png", frame_cnt), frame);
+                }
             }
 
             t35 = cv::getTickCount(); // 绘制完成（GUI 开始前的分界）
@@ -713,9 +845,16 @@ int main(int argc, char **argv)
                 33.0 / 1000.0 * cv::getTickFrequency();
             if (cv::getTickCount() - last_show_tick >= show_interval_ticks)
             {
-                cv::imshow("camera_live", display);
-                if (!topdown_canvas.empty())
-                    cv::imshow(topdown_window, topdown_canvas);
+                if (system_view_enabled)
+                {
+                    cv::imshow(system_window, display);
+                }
+                else
+                {
+                    cv::imshow("camera_live", display);
+                    if (!topdown_canvas.empty())
+                        cv::imshow(topdown_window, topdown_canvas);
+                }
                 last_show_tick = cv::getTickCount();
             }
             t4 = cv::getTickCount();
@@ -736,6 +875,7 @@ int main(int argc, char **argv)
                 {
                     tracker.reset();
                     topdown_view.reset();
+                    system_view.reset();
                     std::cout << "已重置 EKF / 俯视图轨迹\n";
                 }
                 else if (key == 'm')
@@ -770,6 +910,79 @@ int main(int argc, char **argv)
             cam_fps_now > 0.0F ? std::min(fps_nodisp_ema, static_cast<double>(cam_fps_now))
                                : fps_nodisp_ema;
 
+        // ===== 遥测：喂总览图卡片，同时推给 webdebug 网页（同一批量、同一键名）=====
+        // 注意总览图是"本帧画面 + 上一帧遥测"：compose 发生在上面显示块里，
+        // 这里才拿到 t4/t5/帧率，差一帧在 30fps 显示下看不出来。
+        const double frame_dt_ms =
+            last_frame_time_s > 0.0 ? (time_s - last_frame_time_s) * 1000.0 : 0.0;
+        last_frame_time_s = time_s;
+        const double reproj_px = poses.empty() ? 0.0 : poses.front().reprojection_error;
+        const double distance_m =
+            poses.empty() ? 0.0 : cv::norm(poses.front().position_gimbal_m);
+        const char *state_text = "off";
+        if (ekf_enabled)
+        {
+            if (diagnostics.phase == rotating_armor::LockPhase::Tracking)
+            {
+                state_text = prediction.state == TrackingState::Stable ? "Stable" : "Tracking";
+            }
+            else if (diagnostics.phase == rotating_armor::LockPhase::Collecting)
+            {
+                state_text = "Collecting";
+            }
+            else
+            {
+                state_text = "Idle";
+            }
+        }
+        trace_fps.push(time_s, cam_fps_now > 0.0F ? static_cast<double>(cam_fps_now) : 0.0);
+        trace_dt.push(time_s, frame_dt_ms);
+        trace_grab.push(time_s, tick_ms(t0, t1));
+        trace_detect.push(time_s, tick_ms(t1, t2));
+        trace_pnp.push(time_s, tick_ms(t2, t3));
+        trace_draw.push(time_s, tick_ms(t3b, t4));
+        trace_count.push(time_s, static_cast<double>(dets.size()));
+        trace_reproj.push(time_s, reproj_px);
+        trace_dist.push(time_s, distance_m);
+        trace_state.push(time_s, static_cast<double>(static_cast<int>(diagnostics.phase)));
+        trace_state.text = state_text;
+        trace_omega.push(time_s, prediction.body_yaw_velocity);
+        trace_radius.push(time_s, prediction.radius_1_m);
+        trace_nis.push(time_s, diagnostics.last_nis);
+        trace_updates.push(time_s, static_cast<double>(diagnostics.updates_this_frame));
+        trace_missed.push(time_s, static_cast<double>(diagnostics.missed_frames));
+        trace_aimerr.push(time_s, static_cast<double>(prediction.fire_miss_m) * 100.0);
+        trace_latency.push(time_s, diagnostics.measured_latency_s * 1000.0);
+        trace_ekfms.push(time_s, tick_ms(t3, t3b));
+
+        // 与 rmv_training / test_camera_playback 同名的键 → 网页上的曲线含义一致。
+        WEB_LOG("camera_fps", cam_fps_now > 0.0F ? cam_fps_now : 0.0);
+        WEB_LOG("frame_dt_ms", frame_dt_ms);
+        WEB_LOG("grab_ms", tick_ms(t0, t1));
+        WEB_LOG("detect_ms", tick_ms(t1, t2));
+        WEB_LOG("pnp_ms", tick_ms(t2, t3));
+        WEB_LOG("ekf_ms", tick_ms(t3, t3b));
+        WEB_LOG("draw_ms", tick_ms(t3b, t4));
+        WEB_LOG("armor_count", static_cast<double>(dets.size()));
+        WEB_LOG("pnp_reprojection_error", reproj_px);
+        WEB_LOG("pnp_distance_m", distance_m);
+        WEB_LOG("ekf_state", static_cast<double>(prediction.state));
+        WEB_LOG("tracking",
+                diagnostics.phase == rotating_armor::LockPhase::Tracking ? 1.0 : 0.0);
+        WEB_LOG("target_id", static_cast<double>(prediction.target_id));
+        WEB_LOG("target_yaw", prediction.target_yaw);
+        WEB_LOG("target_pitch", prediction.target_pitch);
+        WEB_LOG("target_distance", prediction.distance_m);
+        WEB_LOG("ekf_x_m", prediction.center_x_m);
+        WEB_LOG("ekf_y_m", prediction.center_y_m);
+        WEB_LOG("ekf_yaw_rate_rad_s", prediction.body_yaw_velocity);
+        WEB_LOG("ekf_radius_1_m", prediction.radius_1_m);
+        WEB_LOG("nis", diagnostics.last_nis);
+        WEB_LOG("updates", static_cast<double>(diagnostics.updates_this_frame));
+        WEB_LOG("missed", static_cast<double>(diagnostics.missed_frames));
+        WEB_LOG("aim_err_mm", static_cast<double>(prediction.fire_miss_m) * 1000.0);
+        WEB_LOG("latency_ms", diagnostics.measured_latency_s * 1000.0);
+
         // ===== 统计（精简输出：每 150 帧一行；err 分布每 300 帧）=====
         ++frame_cnt;
         if (frame_cnt % 150 == 0)
@@ -801,6 +1014,7 @@ int main(int argc, char **argv)
         }
     }
 
+    STOP_WEB_SERVER();
     if (video_path.empty())
         release_camera();
     cv::destroyAllWindows();
