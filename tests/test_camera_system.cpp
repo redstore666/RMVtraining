@@ -549,6 +549,7 @@ int main(int argc, char **argv)
                        linked && std::isfinite(diagnostics.best_gate_nis)
                            ? diagnostics.best_gate_nis
                            : 99.0);
+            SYSTEM_LOG("pin_poses", static_cast<double>(tracked_poses.size()));
             SYSTEM_LOG("cont_rej", static_cast<double>(diagnostics.continuity_rejects));
             SYSTEM_LOG("rej_frame", static_cast<double>(diagnostics.rejected_this_frame));
             SYSTEM_LOG("updates", diagnostics.updates_this_frame);
