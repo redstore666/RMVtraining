@@ -82,6 +82,7 @@ int main(int argc, char **argv)
     double hold_s = 0.0;
     double plate_width_m = 0.135; // 固定长度，不随检测到的板型变
     int initial_pin = 0;          // --id N：启动就只看这个 id（网页下拉菜单仍可改）
+    float conf_thres = -1.0F;     // --conf T：检测置信度门限（<0 = 用库默认 0.7）
 
     for (int i = 1; i < argc; ++i)
     {
@@ -106,14 +107,24 @@ int main(int argc, char **argv)
         else if (arg == "--help" || arg == "-h")
         {
             std::cout << "用法: test_camera_system [--red|--blue] [--video FILE] [--video-loop]\n"
-                         "       [--hold S] [--web-port N] [--id N] [--plate-width M]\n"
+                         "       [--hold S] [--web-port N] [--id N] [--plate-width M] [--conf T]\n"
                          "       [--show-camera] [--no-display] [--dump-every N]\n"
                          "  --id N           启动就只看 id=N（0=自动）；网页下拉菜单随时可改\n"
                          "  --plate-width M  迷你图里的板长（米，默认 0.135，四块板等长）\n"
+                         "  --conf T         检测置信度门限（默认用库里的 0.7；调低会多出弱检\n"
                          "  --show-camera    另开窗口显示相机画面（不影响网页帧率）\n"
                          "  --video-loop     视频放完从头循环\n"
                          "  浏览器: http://127.0.0.1:8081/  （右下角可切换跟踪的 id）\n";
             return 0;
+        }
+        else if (arg == "--conf")
+        {
+            if (i + 1 >= argc)
+            {
+                std::cerr << "--conf 后面要跟 0~1 的置信度门限\n";
+                return 2;
+            }
+            conf_thres = static_cast<float>(std::atof(argv[++i]));
         }
         else if (arg == "--id")
         {
@@ -214,6 +225,11 @@ int main(int argc, char **argv)
     rotating_armor::TrackerConfig tracker_config;
     rotating_armor::RotatingArmorTracker tracker(tracker_config);
 
+    if (conf_thres > 0.0F)
+    {
+        setArmorScoreThreshold(conf_thres);
+        std::cout << cv::format("[det] 置信度门限 %.2f\n", conf_thres);
+    }
     START_SYSTEM_WEB(web_port);
     std::cout << "[web] 系统视图: http://127.0.0.1:" << web_port << "/\n";
     std::cout << "[web] 迷你俯视图原图: http://127.0.0.1:" << web_port << "/frame.jpg\n";
@@ -550,6 +566,28 @@ int main(int argc, char **argv)
                            ? diagnostics.best_gate_nis
                            : 99.0);
             SYSTEM_LOG("pin_poses", static_cast<double>(tracked_poses.size()));
+            // 这一帧检出了、但不是被选中 id 的观测数——用来区分"压根没检到这台车"
+            // 和"检到了但 id 分成了别的号"（四板车的 id 是靠四块板推出来的）。
+            SYSTEM_LOG("other_poses",
+                       static_cast<double>(poses.size() - tracked_poses.size()));
+            // 其中有多少块"别的 id"的板其实就在当前跟踪中心 0.8 m 以内——即
+            // "同一台车被分成了另一个 id"。这部分是可以救回来的观测。
+            double near_other = 0.0;
+            if (tracker.initialized())
+            {
+                const double cx = prediction.center_x_m;
+                const double cy = prediction.center_y_m;
+                for (const ArmorPose &pose : poses)
+                {
+                    if (pinned > 0 && pose.detection.target_id == pinned)
+                        continue;
+                    const double dx = pose.position_gimbal_m[0] - cx;
+                    const double dy = pose.position_gimbal_m[1] - cy;
+                    if (std::hypot(dx, dy) < 0.8)
+                        ++near_other;
+                }
+            }
+            SYSTEM_LOG("near_other", near_other);
             SYSTEM_LOG("cont_rej", static_cast<double>(diagnostics.continuity_rejects));
             SYSTEM_LOG("rej_frame", static_cast<double>(diagnostics.rejected_this_frame));
             SYSTEM_LOG("updates", diagnostics.updates_this_frame);
