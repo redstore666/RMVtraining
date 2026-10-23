@@ -1,12 +1,24 @@
 // 实时相机测试：取流 + 装甲板检测 + PnP 位姿显示（需连接相机）。
 //
 // 用法: ./build/test_camera_live [--red|--blue] [--no-display]
+//        [--ekf|--no-ekf] [--topdown|--no-topdown] [--topdown-ppm P] [--topdown-follow]
 //   --no-display  纯吞吐模式：无窗口/无绘制/无按键（Ctrl+C 退出），
 //                 用于测处理吞吐上限与相机真实帧率
+//   --ekf         跑旋转车体 EKF 并把结果画到画面上（默认开；--no-ekf 关掉，
+//                 回到"只有 PnP 单帧位姿"的旧行为）
+//   --topdown     额外开一个"EKF 俯视图"窗口（默认开，需要 --ekf）
+//   --topdown-ppm P  俯视图像素/米（默认 200，即 ±2 m 视野）
+//   --topdown-follow 俯视图跟着车体中心走（默认固定原点=云台）
+//   --video FILE  不连相机、改读视频（上车前在没相机的机器上验收 EKF 显示用）
+//   --dump-every N 每 N 帧把带标注画面存到 ./tmp/live_dump_XXXXXX.png
+//   --topdown-out DIR 俯视图每 50 帧导出 DIR/t%06d.png
 //
 // 按键:  ESC/q 退出 | s 保存当前帧(./tmp/) | m 打印各观测 PnP 的 R/t 矩阵（全精度）
+//        | r 重置 EKF（换车/换场地后手动清状态）
 // 画面:  检测框 + 装甲板坐标系(x红/y绿/z蓝，板中心为原点)
 //        + 左上角面板：每个观测的 编号/距离/重投影误差/角度 + PnP 的 R/t 矩阵
+//        + EKF 叠加：品红十字 = 车体中心，黄十字 = EKF 预测瞄准点（含提前量），
+//          右上角文本框 = 锁定状态/半径/角速度/距离/云台指令/开火判据
 //        + 状态栏含两个帧率：fps_cam（相机固件帧率）与 fps_nodisp
 //          （"不带显示窗口"的吞吐——窗口照常显示，只是不计 GUI 时间）
 // 计时:  全部用 OpenCV 库函数 cv::getTickCount()/cv::getTickFrequency()
@@ -22,9 +34,13 @@
 //   GUI（imshow/pollKey，1080p 常被合成器/vsync 限制）的代价。
 //   imshow 已限频 30fps + pollKey 不等待；要测纯吞吐用 --no-display。
 #include "StudentTasks.hpp"
+#include "RotatingArmorTracker.hpp"
+#include "TopDownView.hpp"
 #include <cmath>
 #include <cstdio>
 #include <iostream>
+#include <filesystem>
+#include <string>
 #include <vector>
 
 #include <opencv2/calib3d.hpp> // solvePnP / Rodrigues / drawFrameAxes
@@ -186,6 +202,18 @@ int main(int argc, char **argv)
     // （处理快于相机时 GetOneFrameTimeout 阻塞等真下一帧）。
     // 注意：该模式无按键可退，用 Ctrl+C。
     bool no_display = false;
+    // EKF 默认开：这个工具本来就是看"检测 + 位姿"的，加上 EKF 后
+    // 车体中心/预测瞄准点与俯视图一起看，才能判断"跟踪到底锁没锁住"。
+    bool ekf_enabled = true;
+    bool topdown_enabled = true;
+    double topdown_ppm = 200.0;
+    bool topdown_follow = false;
+    // --video FILE：不连相机，改读视频（上车前在没有相机的机器上验收 EKF 显示用）。
+    std::string video_path;
+    // --dump-every N：每 N 帧把带标注的画面写到 ./tmp/live_dump_XXXXXX.png（0=不写）。
+    int dump_every = 0;
+    // --topdown-out DIR：把俯视图逐帧写成 DIR/t%06d.png（无需看窗口也能留证据）。
+    std::string topdown_out;
     for (int i = 1; i < argc; ++i)
     {
         const std::string arg = argv[i];
@@ -195,11 +223,72 @@ int main(int argc, char **argv)
             enemy = TeamColor::Blue;
         else if (arg == "--no-display")
             no_display = true;
+        else if (arg == "--ekf")
+            ekf_enabled = true;
+        else if (arg == "--no-ekf")
+            ekf_enabled = false;
+        else if (arg == "--topdown")
+            topdown_enabled = true;
+        else if (arg == "--no-topdown")
+            topdown_enabled = false;
+        else if (arg == "--topdown-follow")
+            topdown_follow = true;
+        else if (arg == "--topdown-out")
+        {
+            if (i + 1 >= argc)
+            {
+                std::cerr << "--topdown-out 后面要跟目录\n";
+                return 2;
+            }
+            topdown_out = argv[++i];
+            topdown_enabled = true;
+        }
+        else if (arg == "--dump-every")
+        {
+            if (i + 1 >= argc)
+            {
+                std::cerr << "--dump-every 后面要跟一个整数\n";
+                return 2;
+            }
+            dump_every = std::atoi(argv[++i]);
+        }
+        else if (arg == "--video")
+        {
+            if (i + 1 >= argc)
+            {
+                std::cerr << "--video 后面要跟视频路径\n";
+                return 2;
+            }
+            video_path = argv[++i];
+        }
+        else if (arg == "--topdown-ppm")
+        {
+            if (i + 1 >= argc)
+            {
+                std::cerr << "--topdown-ppm 后面要跟一个数（像素/米）\n";
+                return 2;
+            }
+            topdown_ppm = std::atof(argv[++i]);
+            if (!(topdown_ppm > 0.0))
+            {
+                std::cerr << "--topdown-ppm 必须是正数\n";
+                return 2;
+            }
+        }
         else
         {
             std::cerr << "未知参数: " << arg << "\n";
             return 2;
         }
+    }
+
+    // --no-display 是纯吞吐模式，两个窗口都不建；--topdown 依赖 --ekf。
+    if (no_display)
+        topdown_enabled = false; // 纯吞吐模式不建俯视图窗口；EKF 本身照跑
+    if (topdown_enabled && !ekf_enabled)
+    {
+        std::cerr << "[俯视图] 需要同时开 EKF，已忽略 --topdown\n";
+        topdown_enabled = false;
     }
 
     // ===== 读相机内参 =====
@@ -220,6 +309,24 @@ int main(int argc, char **argv)
     }
 
     GimbalState gimbal{};
+
+    // ===== EKF：实时跟踪旋转车体（与 test_camera_playback 的 --ekf 同一套）=====
+    // 实跑时 yaw/pitch 来自电控；这里没有 IMU，保持 0，于是"世界系 = 云台静止系"，
+    // 俯视图里云台原点就是相机光轴方向，够用来判断跟踪是否锁住。
+    rotating_armor::TrackerConfig tracker_config;
+    rotating_armor::RotatingArmorTracker tracker(tracker_config);
+    rotating_armor::TopDownOptions topdown_options;
+    topdown_options.follow_target = topdown_follow;
+    topdown_options.pixels_per_meter = topdown_ppm;
+    rotating_armor::TopDownView topdown_view(topdown_options);
+    const std::string topdown_window = "EKF top-down";
+    if (topdown_enabled)
+        cv::namedWindow(topdown_window, cv::WINDOW_AUTOSIZE);
+    if (topdown_enabled && !topdown_out.empty())
+    {
+        std::error_code mkdir_error;
+        std::filesystem::create_directories(topdown_out, mkdir_error);
+    }
 
     if (no_display)
     {
@@ -249,10 +356,36 @@ int main(int argc, char **argv)
     std::vector<cv::Mat> dbg_rvecs, dbg_tvecs;
     std::vector<int> dbg_ids;
 
+    // EKF 的时间戳用 steady_clock（单调、不受系统校时影响），起点为程序启动。
+    const auto t_start = std::chrono::steady_clock::now();
+
+    // 视频源（--video）与相机源（get_pic）只影响"取帧"，后面整条链路完全一致。
+    cv::VideoCapture video_capture;
+    if (!video_path.empty())
+    {
+        video_capture.open(video_path);
+        if (!video_capture.isOpened())
+        {
+            std::cerr << "无法打开视频: " << video_path << "\n";
+            return 2;
+        }
+        std::cout << "[--video] " << video_path << "  " << video_capture.get(cv::CAP_PROP_FRAME_WIDTH)
+                  << "x" << video_capture.get(cv::CAP_PROP_FRAME_HEIGHT) << "  "
+                  << video_capture.get(cv::CAP_PROP_FPS) << " fps\n";
+    }
+
     while (true)
     {
         const int64_t t0 = cv::getTickCount();
-        if (!get_pic(frame))
+        if (!video_path.empty())
+        {
+            if (!video_capture.read(frame) || frame.empty())
+            {
+                std::cout << "[--video] 播放结束\n";
+                break;
+            }
+        }
+        else if (!get_pic(frame))
         {
             continue;
         }
@@ -264,15 +397,32 @@ int main(int argc, char **argv)
         const auto poses = armor_solve(dets, camera, gimbal);
         const int64_t t3 = cv::getTickCount();
 
+        // ===== EKF 一步 =====
+        // measured latency 取"开始取图 → 位姿算完"这段（t0→t3），也就是这一帧的
+        // 观测相对真实世界已经过时多久；EKF 用它把预测时域往后推。
+        PredictionResult prediction{};
+        rotating_armor::TrackerDiagnostics diagnostics{};
+        const double time_s =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - t_start).count();
+        if (ekf_enabled)
+        {
+            const double latency_s = tick_ms(t0, t3) / 1000.0;
+            prediction = tracker.step(poses, gimbal, time_s, latency_s);
+            diagnostics = tracker.diagnostics();
+        }
+        const int64_t t3b = cv::getTickCount();
+
         // ===== 绘制 + 显示 + 按键（--no-display 纯吞吐模式整体跳过）=====
         // no_display 时 t4=t5=t35=t3：draw/show/key 三段耗时报 0。
         // t35 = 绘制完成时刻（GUI 开始前）：grab→detect→pnp→draw 的耗时即
         // "不带显示窗口"时的循环时间，其倒数（受相机帧率封顶）即 fps_nodisp。
-        int64_t t4 = t3;
-        int64_t t5 = t3;
-        int64_t t35 = t3;
+        int64_t t4 = t3b;
+        int64_t t5 = t3b;
+        int64_t t35 = t3b;
         if (!no_display)
         {
+            cv::Mat topdown_canvas; // 本帧俯视图（30fps 门内才真正 imshow）
+
             // ===== 画检测框 + 角点标签 =====
             drawDetections(frame, dets);
             for (const auto &det : dets)
@@ -396,6 +546,137 @@ int main(int argc, char **argv)
                 }
             }
 
+            // ===== EKF 叠加：车心 + 预测瞄准点 + 状态文本 =====
+            // 与下面俯视图用的是同一个 prediction / diagnostics，两个窗口不会互相矛盾。
+            if (ekf_enabled)
+            {
+                const auto project_gimbal_point =
+                    [&](const cv::Vec3d &p_gimbal, cv::Point2f &pixel) -> bool
+                {
+                    const cv::Vec3d p_camera = gimbalToCameraPoint(camera, p_gimbal);
+                    if (!(p_camera[2] > 1e-3))
+                        return false; // 落在相机后方，投影没有意义
+                    std::vector<cv::Point2d> projected;
+                    cv::projectPoints(
+                        std::vector<cv::Point3d>{cv::Point3d(p_camera[0], p_camera[1], p_camera[2])},
+                        cv::Vec3d(0.0, 0.0, 0.0), cv::Vec3d(0.0, 0.0, 0.0),
+                        camera.camera_matrix, camera.distortion_coefficients, projected);
+                    if (projected.size() != 1 || !std::isfinite(projected[0].x) ||
+                        !std::isfinite(projected[0].y))
+                        return false;
+                    pixel = cv::Point2f(static_cast<float>(projected[0].x),
+                                        static_cast<float>(projected[0].y));
+                    return true;
+                };
+
+                // 车体中心：状态排布 [x, vx, y, vy, z, vz, theta, omega, R]，中心取 (0, 2, 4)。
+                // z 再补槽位高度偏移均值——state(4) 会被"最近更新的那块板"带得上下跳。
+                if (tracker.initialized())
+                {
+                    const auto s = tracker.ekf().state();
+                    const Eigen::Vector3d c_world(s(0), s(2), s(4) + tracker.slotZOffsetMean());
+                    const Eigen::Vector3d c_gimbal = rotating_armor::toGimbal(gimbal, c_world);
+                    cv::Point2f center_px;
+                    if (project_gimbal_point(
+                            cv::Vec3d(c_gimbal.x(), c_gimbal.y(), c_gimbal.z()), center_px))
+                    {
+                        const cv::Point p(cvRound(center_px.x), cvRound(center_px.y));
+                        cv::drawMarker(frame, p, cv::Scalar(255, 0, 255), cv::MARKER_CROSS, 26, 2);
+                        cv::putText(frame, cv::format("body R=%.2f m", s(8)),
+                                    p + cv::Point(16, -16), cv::FONT_HERSHEY_SIMPLEX, 0.55,
+                                    cv::Scalar(255, 0, 255), 1);
+                    }
+                }
+
+                // 预测瞄准点（含提前量与飞行时间）：直接用 EKF 给出的世界系瞄准点，
+                // 不再由 yaw/pitch/distance 反算，避免两处公式不一致。
+                if (prediction.state != TrackingState::NoTarget)
+                {
+                    const Eigen::Vector3d aim_gimbal =
+                        rotating_armor::toGimbal(gimbal, diagnostics.predicted_aim_world);
+                    cv::Point2f aim_px;
+                    if (project_gimbal_point(
+                            cv::Vec3d(aim_gimbal.x(), aim_gimbal.y(), aim_gimbal.z()), aim_px))
+                    {
+                        const cv::Point p(cvRound(aim_px.x), cvRound(aim_px.y));
+                        cv::drawMarker(frame, p, cv::Scalar(0, 255, 255), cv::MARKER_TILTED_CROSS,
+                                       22, 2);
+                        cv::putText(frame, cv::format("AIM %.2f m", prediction.distance_m),
+                                    p + cv::Point(16, -16), cv::FONT_HERSHEY_SIMPLEX, 0.55,
+                                    cv::Scalar(0, 255, 255), 1);
+                    }
+                }
+
+                // 右上角文本：锁定状态 / 车体参数 / 云台还差多少 / 开火判据
+                const char *state_text = prediction.state == TrackingState::Stable ? "Stable"
+                                       : prediction.state == TrackingState::Unstable ? "Unstable"
+                                                                                     : "NoTarget";
+                const int panel_x = std::max(20, frame.cols - 540);
+                const int panel_y = 80;
+                const cv::Scalar ekf_color =
+                    prediction.fire_allowed ? cv::Scalar(0, 255, 0) : cv::Scalar(0, 200, 255);
+                const std::string ekf_lines[] = {
+                    cv::format("EKF %s  id=%d  R=%.2fm  w=%+.1f rad/s", state_text,
+                               static_cast<int>(prediction.target_id), prediction.radius_1_m,
+                               prediction.body_yaw_velocity),
+                    cv::format("aim slot=%d  d=%.2fm  yaw=%+.1f pitch=%+.1f deg",
+                               diagnostics.aim_slot, prediction.distance_m,
+                               prediction.target_yaw * 180.0 / CV_PI,
+                               prediction.target_pitch * 180.0 / CV_PI),
+                    cv::format("NIS=%.1f  upd=%d  miss=%d  lat=%.0fms  obs=%.0fmm",
+                               diagnostics.last_nis, diagnostics.updates_this_frame,
+                               diagnostics.missed_frames,
+                               diagnostics.measured_latency_s * 1000.0,
+                               diagnostics.observation_noise_m * 1000.0),
+                    // 注意：本机没有 IMU，gimbal.yaw/pitch 恒为 0，所以这里的
+                    // fire/miss 是"相对相机光轴"的量，不是实车上的云台脱靶量。
+                    cv::format("fire=%s  miss=%.1fcm  budget=%.2fdeg",
+                               prediction.fire_allowed ? "YES" : "no",
+                               prediction.fire_miss_m * 100.0,
+                               prediction.fire_budget_rad * 180.0 / CV_PI),
+                    // putText 只画 ASCII，中文注释留在源码里。
+                    std::string("(no IMU: fire/miss vs boresight)"),
+                };
+                for (int li = 0; li < 5; ++li)
+                {
+                    cv::putText(frame, ekf_lines[li], cv::Point(panel_x, panel_y + li * 22),
+                                cv::FONT_HERSHEY_SIMPLEX, 0.55, ekf_color, 1);
+                }
+            }
+
+            // ===== 俯视图：EKF 状态/诊断 + 本帧实测板，画成上帝视角 =====
+            if (topdown_enabled)
+            {
+                rotating_armor::TopDownFrame topdown_frame;
+                topdown_frame.timestamp_s = time_s;
+                topdown_frame.has_state = tracker.initialized();
+                if (topdown_frame.has_state)
+                    topdown_frame.state = tracker.ekf().state();
+                topdown_frame.diagnostics = diagnostics;
+                topdown_frame.result = prediction;
+                topdown_frame.gimbal = gimbal;
+                const Eigen::Matrix3d gimbal_to_world = rotating_armor::gimbalToWorld(gimbal);
+                for (const ArmorPose &pose : poses)
+                {
+                    if (pose.detection.target_id == 0)
+                        continue;
+                    rotating_armor::TopDownObservation observation;
+                    observation.position =
+                        gimbal_to_world * Eigen::Vector3d(pose.position_gimbal_m[0],
+                                                          pose.position_gimbal_m[1],
+                                                          pose.position_gimbal_m[2]);
+                    observation.normal_yaw = rotating_armor::wrapToPi(pose.armor_yaw + gimbal.yaw);
+                    observation.target_id = pose.detection.target_id;
+                    topdown_frame.observations.push_back(observation);
+                }
+                topdown_canvas = topdown_view.render(topdown_frame).clone();
+                if (!topdown_out.empty() && frame_cnt % 50 == 0)
+                {
+                    cv::imwrite(cv::format("%s/t%06d.png", topdown_out.c_str(), frame_cnt),
+                                topdown_canvas);
+                }
+            }
+
         // ===== 状态栏：相机固件帧率 + 无显示吞吐（EMA，滞后一帧无碍）=====
         const float cam_fps = cameraResultingFps();
         const double nodisp_show =
@@ -418,6 +699,11 @@ int main(int argc, char **argv)
             else
                 display = frame;
 
+            if (dump_every > 0 && frame_cnt % dump_every == 0)
+            {
+                cv::imwrite(cv::format("./tmp/live_dump_%06d.png", frame_cnt), frame);
+            }
+
             t35 = cv::getTickCount(); // 绘制完成（GUI 开始前的分界）
 
             // ===== imshow 降频到约 30fps =====
@@ -428,6 +714,8 @@ int main(int argc, char **argv)
             if (cv::getTickCount() - last_show_tick >= show_interval_ticks)
             {
                 cv::imshow("camera_live", display);
+                if (!topdown_canvas.empty())
+                    cv::imshow(topdown_window, topdown_canvas);
                 last_show_tick = cv::getTickCount();
             }
             t4 = cv::getTickCount();
@@ -443,6 +731,12 @@ int main(int argc, char **argv)
                     cv::imwrite(fname, frame);
                     std::cout << "已保存: " << fname << "\n";
                     ++save_idx;
+                }
+                else if (key == 'r')
+                {
+                    tracker.reset();
+                    topdown_view.reset();
+                    std::cout << "已重置 EKF / 俯视图轨迹\n";
                 }
                 else if (key == 'm')
                 {
@@ -481,11 +775,11 @@ int main(int argc, char **argv)
         if (frame_cnt % 150 == 0)
         {
             printf("[%d帧] fps_cam=%.1f fps_nodisp=%.1f | grab=%.1f detect=%.1f "
-                   "pnp=%.1f draw=%.1f show=%.1f key=%.1f ms | "
+                   "pnp=%.1f ekf=%.1f draw=%.1f show=%.1f key=%.1f ms | "
                    "Det=%zu Poses=%zu | 拒绝 reproj=%d depth=%d fin=%d pnpFail=%d\n",
                    frame_cnt, cam_fps_now, fps_nodisp,
-                   tick_ms(t0, t1), tick_ms(t1, t2), tick_ms(t2, t3), tick_ms(t3, t4),
-                   last_wait_ms,
+                   tick_ms(t0, t1), tick_ms(t1, t2), tick_ms(t2, t3), tick_ms(t3, t3b),
+                   tick_ms(t3b, t4), last_wait_ms, tick_ms(t4, t5),
                    dets.size(), poses.size(),
                    g_rej_reproj, g_rej_depth, g_rej_finite, g_pnp_fail);
             g_rej_reproj = g_rej_depth = g_rej_finite = g_pnp_fail = 0;
@@ -507,7 +801,8 @@ int main(int argc, char **argv)
         }
     }
 
-    release_camera();
+    if (video_path.empty())
+        release_camera();
     cv::destroyAllWindows();
     return 0;
 }

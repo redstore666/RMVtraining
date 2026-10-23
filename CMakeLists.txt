@@ -240,7 +240,8 @@ target_include_directories(test_ekf_viewer PRIVATE ${OpenCV_INCLUDE_DIRS})
 
 # 实时相机取流 + 装甲板检测（相机必须已连接）。
 add_executable(test_camera_live tests/test_camera_live.cpp)
-target_link_libraries(test_camera_live PRIVATE training_core ${OpenCV_LIBS})
+# topdown_view：EKF 俯视图渲染（与 test_camera_playback 的 --topdown 共用同一份实现）。
+target_link_libraries(test_camera_live PRIVATE training_core topdown_view ${OpenCV_LIBS})
 target_include_directories(test_camera_live PRIVATE ${OpenCV_INCLUDE_DIRS})
 
 # 同 test_camera：让 dlopen 能按 RPATH 找到 libFormatConversion.so。
