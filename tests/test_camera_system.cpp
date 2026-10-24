@@ -47,9 +47,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <complex>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <iostream>
 #include <set>
 #include <string>
@@ -86,6 +88,7 @@ int main(int argc, char **argv)
     bool pair_body = false;       // --pair-body：打开"双板整车求解"（库默认关）
     bool rate_pll = false;        // --rate-pll：打开残差 PLL 的转速量测（库默认关）
     bool rate_tracklet = false;   // --rate-tracklet：打开 Tracklet 单板角速度（库默认关）
+    bool pix_rate = false;        // --pix-rate：图像域转速通道（亮斑图案频率）
     double pair_phase_err = -1.0; // --pair-phase-err RAD：覆盖双板解的相位差门限（默认 -1=用库值 0.35）
 
     for (int i = 1; i < argc; ++i)
@@ -136,6 +139,10 @@ int main(int argc, char **argv)
         else if (arg == "--rate-tracklet")
         {
             rate_tracklet = true;
+        }
+        else if (arg == "--pix-rate")
+        {
+            pix_rate = true;
         }
         else if (arg == "--pair-body")
         {
@@ -261,6 +268,209 @@ int main(int argc, char **argv)
     {
         std::cout << cv::format("[tracker] pair_body=%d rate_pll=%d rate_tracklet=%d\n",
                                 pair_body ? 1 : 0, rate_pll ? 1 : 0, rate_tracklet ? 1 : 0);
+    }
+
+    // ===== 图像域转速通道（--pix-rate）=====
+    // 检测只出"正对板框"时（v4 实拍 8 rad/s 自转：位置/法向/弦向读出的全是
+    // ≈0，转速在跟踪器观测量里不可观测），灯条图案在原始图像里仍以 4×转速
+    // 的频率相干振荡（实测亮斑面积谱 79~91% 功率集中在 5.0~5.3Hz）。这里在
+    // 系统视图层测图案频率：|ω| = π·f/2（四重对称板），符号取"面积-质心"
+    // 互谱相位的 sin（图案扫过方向锁定旋转方向），以量测形式经
+    // tracker.injectRateObservation 喂给 EKF——不是硬写状态，σ 由谱峰显著
+    // 性决定，滤波器自己加权。
+    struct PixRateChannel
+    {
+        struct Sample
+        {
+            double t;
+            double area;
+            double cx;
+        };
+        std::deque<Sample> buf;
+        double last_est_s{-1.0e9};
+        double last_lock_s{-1.0e9};
+        double window_s{1.6};
+        double omega{0.0};
+        double sigma{0.0};
+        double f_peak{0.0};
+        bool valid{false};
+        // ROI 平滑：检测框逐帧抖动会把亮斑序列弄脏（实测注入符号乱跳），
+        // 用 EMA 跟住车的区域；检测缺失时冻结上一帧 ROI（车不会瞬移，
+        // 灯条亮着就能测，检测丢了反而是自转板的常态）。
+        cv::Rect2d roi_ema;
+        bool roi_valid{false};
+
+        void measure(const cv::Mat &bgr, const cv::Rect &roi_raw, bool has_det, double t)
+        {
+            if (has_det)
+            {
+                if (!roi_valid)
+                {
+                    roi_ema = roi_raw;
+                    roi_valid = true;
+                }
+                else
+                {
+                    const double a = 0.15;
+                    roi_ema.x += a * (roi_raw.x - roi_ema.x);
+                    roi_ema.y += a * (roi_raw.y - roi_ema.y);
+                    roi_ema.width += a * (roi_raw.width - roi_ema.width);
+                    roi_ema.height += a * (roi_raw.height - roi_ema.height);
+                }
+                // 自转图案横扫范围远大于单板检测框：ROI 太小会把扫出去的灯条
+                // 截掉、图案频率变弱（实测注入密度不足）。给个下限，围绕中心生长。
+                const double min_w = 420.0, min_h = 320.0;
+                if (roi_ema.width < min_w)
+                {
+                    roi_ema.x -= 0.5 * (min_w - roi_ema.width);
+                    roi_ema.width = min_w;
+                }
+                if (roi_ema.height < min_h)
+                {
+                    roi_ema.y -= 0.5 * (min_h - roi_ema.height);
+                    roi_ema.height = min_h;
+                }
+            }
+            if (!roi_valid)
+            {
+                return;
+            }
+            cv::Rect roi(cvRound(roi_ema.x), cvRound(roi_ema.y),
+                         cvRound(roi_ema.width), cvRound(roi_ema.height));
+            roi &= cv::Rect(0, 0, bgr.cols, bgr.rows);
+            if (roi.width < 8 || roi.height < 8)
+            {
+                return;
+            }
+            cv::Mat gray;
+            cv::cvtColor(bgr(roi), gray, cv::COLOR_BGR2GRAY);
+            cv::Scalar mean, sd;
+            cv::meanStdDev(gray, mean, sd);
+            const double thr = std::max(150.0, mean[0] + 3.0 * sd[0]);
+            double area = 0.0;
+            double sx = 0.0;
+            for (int y = 0; y < gray.rows; ++y)
+            {
+                const uint8_t *row = gray.ptr<uint8_t>(y);
+                for (int x = 0; x < gray.cols; ++x)
+                {
+                    if (row[x] > thr)
+                    {
+                        area += 1.0;
+                        sx += x;
+                    }
+                }
+            }
+            if (area < 20.0)
+            {
+                return;
+            }
+            buf.push_back({t, area, sx / area / std::max(1, gray.cols)});
+            while (!buf.empty() && t - buf.front().t > window_s)
+            {
+                buf.pop_front();
+            }
+        }
+
+        void estimate(double t)
+        {
+            valid = false;
+            if (buf.size() < 60 || t - last_est_s < 0.15)
+            {
+                return;
+            }
+            last_est_s = t;
+            const double t0 = buf.front().t;
+            double mean_area = 0.0;
+            for (const Sample &s : buf)
+            {
+                mean_area += s.area;
+            }
+            mean_area /= static_cast<double>(buf.size());
+            double best_f = 0.0, best_amp = 0.0, median_amp = 0.0, band_share = 0.0;
+            double best_phase = 0.0;
+            std::vector<double> amps;
+            amps.reserve(140);
+            double total_power = 0.0;
+            for (double f = 2.0; f <= 15.0; f += 0.1)
+            {
+                std::complex<double> sa(0.0, 0.0), sx(0.0, 0.0);
+                for (const Sample &s : buf)
+                {
+                    const double dt = s.t - t0;
+                    const double w = 0.5 - 0.5 * std::cos(2.0 * CV_PI * dt / window_s);
+                    const std::complex<double> e{std::cos(-2.0 * CV_PI * f * dt),
+                                                 std::sin(-2.0 * CV_PI * f * dt)};
+                    sa += (s.area - mean_area) * w * e;
+                    sx += (s.cx - 0.5) * w * e;
+                }
+                amps.push_back(std::abs(sa));
+                if (f > 0.5)
+                {
+                    total_power += std::norm(sa);
+                }
+                if (f >= 2.0 && std::abs(sa) > best_amp)
+                {
+                    best_amp = std::abs(sa);
+                    best_f = f;
+                    best_phase = std::arg(sx * std::conj(sa));
+                }
+            }
+            {
+                std::vector<double> sorted = amps;
+                std::sort(sorted.begin(), sorted.end());
+                median_amp = sorted[sorted.size() / 2];
+            }
+            for (std::size_t k = 0; k < amps.size(); ++k)
+            {
+                const double f = 2.0 + 0.1 * static_cast<double>(k);
+                band_share += amps[k] * amps[k];
+            }
+            band_share /= std::max(total_power, 1e-9);
+            if (best_amp < 1e-9 || median_amp <= 0.0)
+            {
+                return;
+            }
+            const double prominence = best_amp / median_amp;
+            const bool strict = buf.size() >= 110 && prominence >= 4.0 && band_share >= 0.50;
+            // 迟滞：刚锁定过（1.5s 内）且谱峰还钉在同一频率上（±0.3Hz）时，
+            // 放宽门槛维持注入——自转在估计窗之间是持续的，间隙里衰减项会
+            // 把 omega 拖回 0。
+            const double age = t - last_lock_s;
+            const bool hold = age < 1.5 && std::abs(best_f - f_peak) <= 0.3 &&
+                              prominence >= 2.0 && band_share >= 0.35;
+            if (!strict && !hold)
+            {
+                return;
+            }
+            if (strict)
+            {
+                f_peak = best_f;
+                omega = CV_PI * best_f / 2.0;
+                omega *= std::sin(best_phase) >= 0.0 ? 1.0 : -1.0;
+                last_lock_s = t;
+            }
+            sigma = 0.4 + 0.8 / std::max(prominence, 1.0) + (hold && !strict ? 0.3 : 0.0);
+            valid = true;
+        }
+        // 惯性滑行：谱估计断续（车出画/谱弱）时，锁定后 1s 内按上次 ω 注入，
+        // σ 随龄期增大，滤波器自行折权。自转是持续运动，短暂盲区不该把
+        // omega 打回 0。
+        bool coast(double t, double &omega_out, double &sigma_out) const
+        {
+            const double age = t - last_lock_s;
+            if (!(age >= 0.0) || age > 1.0 || f_peak <= 0.0)
+            {
+                return false;
+            }
+            omega_out = omega;
+            sigma_out = 0.6 + 0.9 * age;
+            return true;
+        }
+    } pix_rate_channel;
+    if (pix_rate)
+    {
+        std::cout << "[pix-rate] 图像域转速通道开启（亮斑图案频率 -> injectRateObservation）\n";
     }
 
     if (conf_thres > 0.0F)
@@ -433,6 +643,60 @@ int main(int argc, char **argv)
                             (normal - bearing) * 180.0 / M_PI,
                             slot_phase * 180.0 / M_PI, body_yaw * 180.0 / M_PI);
                 (void)slot_phase;
+            }
+        }
+
+        // 图像域转速通道：ROI = 被选 id 检测框的外接矩形放大 2.5 倍（通道内
+        // 再做 EMA 平滑；检测缺失时冻结 ROI 继续测）。
+        if (pix_rate && !frame.empty())
+        {
+            cv::Rect roi;
+            bool has_roi = false;
+            for (const ArmorPose &pose : poses)
+            {
+                if (pose.detection.target_id != pinned || pinned <= 0)
+                {
+                    continue;
+                }
+                for (const cv::Point2f &pt : pose.detection.corners)
+                {
+                    if (!has_roi)
+                    {
+                        roi = cv::Rect(cv::Point(cvRound(pt.x), cvRound(pt.y)), cv::Size(1, 1));
+                        has_roi = true;
+                    }
+                    else
+                    {
+                        roi |= cv::Rect(cv::Point(cvRound(pt.x), cvRound(pt.y)), cv::Size(1, 1));
+                    }
+                }
+            }
+            if (has_roi)
+            {
+                roi.x -= roi.width * 3 / 2;
+                roi.y -= roi.height * 3 / 2;
+                roi.width *= 4;
+                roi.height *= 4;
+                roi &= cv::Rect(0, 0, frame.cols, frame.rows);
+            }
+            pix_rate_channel.measure(frame, roi, has_roi, time_s);
+            pix_rate_channel.estimate(time_s);
+            double inject_omega = 0.0, inject_sigma = 0.0;
+            bool inject = false;
+            if (pix_rate_channel.valid)
+            {
+                inject_omega = pix_rate_channel.omega;
+                inject_sigma = pix_rate_channel.sigma;
+                inject = true;
+            }
+            else if (pix_rate_channel.coast(time_s, inject_omega, inject_sigma))
+            {
+                inject = true;
+            }
+            if (inject && tracker.injectRateObservation(inject_omega, inject_sigma, time_s))
+            {
+                SYSTEM_LOG("pix_rate", inject_omega);
+                SYSTEM_LOG("pix_f", pix_rate_channel.f_peak);
             }
         }
 
