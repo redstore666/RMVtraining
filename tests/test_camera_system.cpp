@@ -351,7 +351,8 @@ int main(int argc, char **argv)
                     }
                 }
             }
-            if (area < 8.0)
+            if (area < 4.0)  // 入口段车小、亮斑少；门太高会让缓冲填充慢、
+                            // 首锁推迟（实测可见 2.0s、锁到 4.0s）
             {
                 return;
             }
@@ -475,21 +476,23 @@ int main(int argc, char **argv)
             valid = false;
             if (!locked)
             {
-                if (buf.size() < 140 || t - buf_start_s < 1.2 || t - last_est_s < 0.15)
+                // 快速临时锁：0.9s 窗单窗 argmax（需 ~0.8s 连续数据）。用严门
+                // （1.44s 连续 + 双窗一致）时第一段可见期（实测只有 1.8s）等
+                // 凑齐数据车就出画了——整段被当成静止，用户看得见旋转而系统
+                // 报 0。先锁个大概（可能落在泄漏鬼峰 4.5~4.8 -> 7.2 rad/s，
+                // 板立刻转起来），梯式（双窗一致 + 谱成熟收敛）在 ~1s 内修正
+                // 到真值；错锁由黑名单 + 断档解锁兜底。
+                if (buf.size() < 70 || t - last_est_s < 0.15)
                 {
                     return;
                 }
                 last_est_s = t;
-                double f12 = 0.0, f16 = 0.0, a16 = 0.0;
-                if (!peak_on_span(t, 1.2, f12) || !peak_on_span(t, 1.6, f16, &a16))
+                double f12 = 0.0;
+                if (!peak_on_span(t, 0.6, f12))
                 {
                     return;
                 }
-                // 双窗一致才锁（用 1.6s 长窗值，分辨率更高）
-                if (std::abs(f12 - f16) > 0.3)
-                {
-                    return;
-                }
+                const double f16 = f12;
                 // 低频候选必须带二倍频伴随（真图案经整流必有 2f；杂波没有）
                 double dummy = 0.0, a2f = 0.0;
                 // 用 1.6s 窗在 2f 处的幅值近似：直接再算一次峰幅对照
@@ -515,6 +518,15 @@ int main(int argc, char **argv)
             // LOCKED：不重搜频率；demodulate() 负责逐帧速率。解调持续失败
             // 超过 1.2s（车出画/真停转）才放弃锁定重新捕获。
             // 例外：锁定头 3s 内每 0.4s 复评（早锁可能锁到入场鬼峰）。
+            if (std::getenv("LADDER_DEBUG") && t - last_est_s >= 0.4)
+            {
+                double d12 = 0.0, d16 = 0.0;
+                const bool ok12 = peak_on_span(t, 1.2, d12);
+                const bool ok16 = peak_on_span(t, 1.6, d16);
+                std::fprintf(stderr, "[ladder] t=%.2f n=%zu f_peak=%.2f conv=%d w12=%s%.2f w16=%s%.2f\n",
+                             t, buf.size(), f_peak, ladder_converged ? 1 : 0,
+                             ok12 ? "" : "X", d12, ok16 ? "" : "X", d16);
+            }
             if (t - lock_started_s < 8.0 && !ladder_converged && t - last_est_s >= 0.4 &&
                 buf.size() >= 140)
             {
@@ -532,8 +544,12 @@ int main(int argc, char **argv)
                             psi_init = false;
                         }
                         // 收敛：谱成熟(>=2.0s)且连续两次双窗一致结果相同
+                        // 收敛三条件：谱成熟(>=2s) + 连续两次一致 + 已离开杂波
+                        // 地板带（f<=4.35 是入场爬坡鬼峰/主瓣泄漏的地盘，在那里
+                        // "一致"只是不成熟谱的自洽——实测 3.5~5.5s 卡 6.28 平台
+                        // 就是提前收敛冻在 4.0）。
                         if (ladder_prev_f > 0.0 && std::abs(f16 - ladder_prev_f) < 0.1 &&
-                            t - buf_start_s >= 2.0)
+                            t - buf_start_s >= 2.0 && f16 > 4.35)
                         {
                             ladder_converged = true;
                         }
@@ -591,13 +607,19 @@ int main(int argc, char **argv)
                 return false;
             }
             const double mag = CV_PI * f_peak / 2.0;
-            if (std::abs(demod_rate_ema) >= 1.0)
+            // 只要解调给过方向就输出 ±πf/2：|ema|<1 时回退 ema 会输出 ≈0
+            // （新锁的符号预热期把"已锁定"变成"静止"，实测 8.0s 锁定却 0）。
+            if (demod_rate_ema > 0.0)
             {
-                omega_out = demod_rate_ema > 0.0 ? mag : -mag;
+                omega_out = mag;
+            }
+            else if (demod_rate_ema < 0.0)
+            {
+                omega_out = -mag;
             }
             else
             {
-                omega_out = demod_rate_ema;
+                omega_out = demod_rate_ema;  // 从未解调过（极短暂）
             }
             return true;
         }
@@ -951,6 +973,7 @@ int main(int argc, char **argv)
             {
                 SYSTEM_LOG("pix_rate", inject_omega);
                 SYSTEM_LOG("pix_f", pix_rate_channel.f_peak);
+                SYSTEM_LOG("pix_lock", pix_rate_channel.locked ? 1.0 : 0.0);
             }
             // ===== 俯视图板相位：由"实际检测的角速度"独立积分（与 EKF 解耦）。
             // 验收口径：俯视图四块板的转速与实拍视频转速一致（学长：目前只要求
