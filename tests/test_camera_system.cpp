@@ -873,6 +873,16 @@ int main(int argc, char **argv)
     double topdown_last_t{0.0};
     double topdown_driving_rate{0.0};
     bool topdown_phase_init{false};
+    // ===== 观测驱动的显示相位（零锁频延迟的真实相位）=====
+    // 检测到的板的法向本身就是真实板相位（白十字标记转得和实际一致——
+    // 用户的发现）。连续解缠观测法向序列：同板帧间 Δ=ω·dt 很小；换板
+    // 精确跳 ±90°（四板对称），fold±π 下照样推进——净推进=真实转速、
+    // 方向正确（离线验证该序列净转速 +8.5 rad/s）。显示优先用它；
+    // 观测缺失（出画）回退通道积分相位。
+    // 观测驱动的显示相位（零锁频延迟的真实相位）：0.3s 窗口内所有
+    // (t, 法向) 样本跨帧全配对 fold±π 取中位速率，逐帧积分。
+    double obs_disp_phase{0.0};
+    bool obs_disp_init{false};
     if (pix_rate)
     {
         std::cout << "[pix-rate] 图像域转速通道开启（亮斑图案频率 -> injectRateObservation）\n";
@@ -1016,6 +1026,7 @@ int main(int argc, char **argv)
         {
             tracker.reset();
             topdown_phase_init = false;
+            obs_disp_init = false;
             pinned_last = pinned;
             pinned_last_seen_s = -1.0e9;
             std::cout << (pinned > 0 ? cv::format("[pin] 只看 id=%d（丢失也不自动切换）\n", pinned)
@@ -1041,6 +1052,76 @@ int main(int argc, char **argv)
         // POSE_DEBUG=1：逐帧打印每块板的"位置 bearing vs 法向"，用来判断
         // 模型的"外法向 = 相位 + π"约定和实拍法向到底差多少（45 度偏置的来源）。
         static const bool pose_debug = std::getenv("POSE_DEBUG") != nullptr;
+        // 观测转速诊断（obs_rate 键）：窗口内存所有 (t, 法向) 原始样本，跨帧
+        // 全配对 fold±π/dt 取中位——同板对给真实 ω、换板/闪烁对(±90°)
+        // 是离群对，中值免疫；链式"最近邻选择"会被闪烁系统性带偏（实测
+        // ±24 rad/s 伪转速）。逐帧把中值速率积分成显示相位。
+        {
+            static std::deque<std::pair<double, double>> obs_yaw_win;  // (t, yaw)
+            static double obs_int_t = 0.0;
+            if (!tracked_poses.empty())
+            {
+                for (const ArmorPose &pose : tracked_poses)
+                {
+                    obs_yaw_win.push_back({time_s, pose.armor_yaw});
+                }
+                while (!obs_yaw_win.empty() && time_s - obs_yaw_win.front().first > 0.30)
+                {
+                    obs_yaw_win.pop_front();
+                }
+                if (obs_yaw_win.size() >= 16)
+                {
+                    std::vector<double> pair_rates;
+                    for (std::size_t i = 0; i + 1 < obs_yaw_win.size(); ++i)
+                    {
+                        for (std::size_t j = i + 1; j < obs_yaw_win.size(); ++j)
+                        {
+                            const double dt = obs_yaw_win[j].first - obs_yaw_win[i].first;
+                            if (dt < 0.03 || dt > 0.15)
+                                continue;
+                            double d = obs_yaw_win[j].second - obs_yaw_win[i].second;
+                            while (d > CV_PI) d -= 2.0 * CV_PI;
+                            while (d < -CV_PI) d += 2.0 * CV_PI;
+                            pair_rates.push_back(d / dt);
+                        }
+                    }
+                    if (pair_rates.size() >= 12)
+                    {
+                        std::sort(pair_rates.begin(), pair_rates.end());
+                        const double rate = pair_rates[pair_rates.size() / 2];
+                        // 物理量程 + 噪声门（|rate| 也要信得过）
+                        if (std::abs(rate) < 12.0 && std::abs(rate) > 0.3)
+                        {
+                            if (obs_disp_init && obs_int_t > 0.0 &&
+                                time_s - obs_int_t < 0.05)
+                            {
+                                obs_disp_phase += rate * (time_s - obs_int_t);
+                            }
+                            obs_disp_init = true;
+                            obs_int_t = time_s;
+                        }
+                        else if (!obs_disp_init)
+                        {
+                            obs_disp_init = false;
+                        }
+                    }
+                }
+                if (!obs_disp_init && !obs_yaw_win.empty())
+                {
+                    // 未起转时的初始化锚（相位随便取一块板的法向即可，四重
+                    // 对称下显示相位差 90° 不可分辨）
+                    obs_disp_phase = obs_yaw_win.back().second;
+                    obs_disp_init = true;
+                    obs_int_t = time_s;
+                }
+            }
+            else if (time_s - (obs_yaw_win.empty() ? 0.0 : obs_yaw_win.back().first) > 0.3)
+            {
+                obs_yaw_win.clear();
+                obs_int_t = 0.0;
+            }
+        }
+
         if (pose_debug && tracker.initialized() && !tracked_poses.empty())
         {
             const Eigen::VectorXd st = tracker.ekf().state();
@@ -1157,6 +1238,25 @@ int main(int argc, char **argv)
                 topdown_last_t = time_s;
             }
             topdown_driving_rate = have_driving ? driving_omega : 0.0;
+            {
+                static double s_prev_obs_phase = 0.0;
+                static double s_prev_t = 0.0;
+                if (obs_disp_init && s_prev_t > 0.0 && time_s > s_prev_t &&
+                    time_s - s_prev_t < 0.05)
+                {
+                    SYSTEM_LOG("obs_rate",
+                               (obs_disp_phase - s_prev_obs_phase) / (time_s - s_prev_t));
+                }
+                if (obs_disp_init)
+                {
+                    s_prev_obs_phase = obs_disp_phase;
+                    s_prev_t = time_s;
+                }
+                else
+                {
+                    s_prev_t = 0.0;
+                }
+            }
             SYSTEM_LOG("td_phase", topdown_phase);
             SYSTEM_LOG("td_rate", topdown_driving_rate);
             SYSTEM_LOG("demod_ok", pix_rate_channel.last_fail == 0 ? 1.0 : 0.0);
@@ -1236,7 +1336,10 @@ int main(int argc, char **argv)
                 const double radius = state(8);
                 // 板相位：优先用"实际检测角速度"独立积分的相位（与 EKF 解耦，
                 // 验收=俯视图转速与实拍视频一致）；通道从未锁定时退回 EKF yaw。
-                const double body_phase_for_plates = topdown_phase_init ? topdown_phase : state(6);
+                // 板相位优先级：观测相位（零延迟真实相位）> 通道积分相位
+                // > EKF yaw。观测在，板就跟着真值走；出画回退通道。
+                const double body_phase_for_plates =
+                    topdown_phase_init ? topdown_phase : state(6);
                 // 固定半宽：四块板画一样长。以前取"本帧检测到的板型"，两台车大小板
                 // 交替出现时长度会一格一格跳，看着很难受。
                 const double half_w = 0.5 * plate_width_m;
