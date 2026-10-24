@@ -227,8 +227,15 @@ void RotatingArmorTracker::applyProcessNoise()
     if (spin_env < 0.0 && config_.adaptive_spin_q_enabled)
     {
         // |ω| 越大，需要的角加速度噪声越大（Q ∝ |ω|²）。
-        const double ratio = std::fabs(measured_rate_ema_) /
-                             std::max(1e-3, config_.adaptive_spin_rate_ref_rad_s);
+        // 参考 sp_vision_25 的角加速度方差 v2=400：大 Q 让 vyaw 通过 a+=w*dt
+        // 的交叉协方差被角度观测隐式、快速地修正（它没有任何伪量测结构）。
+        // 我们原来 base=0.01、上限 2 倍——比参考小 4 个数量级，omega 被 Q
+        // 和衰减压死在 0（实拍 omega 只剩 +10 尖峰的根因之一）。取 max(
+        // 量测EMA, state(7)) 做 bootstrap：静止时 Q 保持小（H 组静态容差
+        // 0.45 不能被随机游走破坏），转起来后 Q 放大到参考量级。
+        const double rate_now =
+            std::max(std::fabs(measured_rate_ema_), std::fabs(ekf_.state()(7)));
+        const double ratio = rate_now / std::max(1e-3, config_.adaptive_spin_rate_ref_rad_s);
         const double adaptive = std::clamp(ratio * ratio, 1.0, config_.adaptive_spin_q_max);
         spin_scale = std::max(spin_scale, adaptive);
     }

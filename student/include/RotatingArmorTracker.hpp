@@ -454,8 +454,8 @@ struct TrackerConfig
     // 依据：v4 上固定 SPIN_Q 从 1 加到 100，EKF ω 从 1.18 涨到 3.64、PIX 91.5→84.5；
     // 而 v1 目标几乎不转，固定大 Q 反而变差，所以只能按实测转速自适应。
     bool adaptive_spin_q_enabled{true};
-    double adaptive_spin_rate_ref_rad_s{1.0}; // 参考转速：|ω| 每高这么多，Q 乘 4
-    double adaptive_spin_q_max{2.0};
+    double adaptive_spin_rate_ref_rad_s{2.0}; // 参考转速：|ω| 每高这么多，Q 乘 4；低于它 Q 保持基础值（静止不放大）
+    double adaptive_spin_q_max{3.0e3};  // 角加速度上限 0.01*3000=30（sp_vision_25 用 400 常量）
     double adaptive_spin_alpha{0.25};
     double adaptive_spin_decay_rad_s{2.0}; // 没有可信量测时 EMA 每秒回落多少 rad/s
     double rate_tracklet_max_step_rad_s{0.4};

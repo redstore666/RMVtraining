@@ -88,7 +88,7 @@ int main(int argc, char **argv)
     bool pair_body = false;       // --pair-body：打开"双板整车求解"（库默认关）
     bool rate_pll = false;        // --rate-pll：打开残差 PLL 的转速量测（库默认关）
     bool rate_tracklet = false;   // --rate-tracklet：打开 Tracklet 单板角速度（库默认关）
-    bool pix_rate = false;        // --pix-rate：图像域转速通道（亮斑图案频率）
+    bool pix_rate = true;         // 图像域转速通道（默认开；--no-pix-rate 关闭）。检测只出正对板框时转速在观测量里不存在，这是 v4 实拍 omega 稳定的唯一来源
     double pair_phase_err = -1.0; // --pair-phase-err RAD：覆盖双板解的相位差门限（默认 -1=用库值 0.35）
 
     for (int i = 1; i < argc; ++i)
@@ -143,6 +143,10 @@ int main(int argc, char **argv)
         else if (arg == "--pix-rate")
         {
             pix_rate = true;
+        }
+        else if (arg == "--no-pix-rate")
+        {
+            pix_rate = false;
         }
         else if (arg == "--pair-body")
         {
