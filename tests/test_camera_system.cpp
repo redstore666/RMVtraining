@@ -975,8 +975,20 @@ int main(int argc, char **argv)
             }
 #endif
             sin_rms_ = std::sqrt(best_cost / static_cast<double>(rate_hist_.size()));
+            const bool was_ok = sin_valid_ || (t - sin_last_ok_s_ < 1.5);
+            const double phase_before = was_ok ? sinPhase(t) : 0.0;
             sin_valid_ = sin_A_ <= 0.95 * sin_b_ && sin_om_ >= 0.2 && sin_om_ <= 6.281 &&
                          sin_b_ >= 3.0 && sin_b_ <= 11.0 && sin_rms_ < 0.8;
+            if (sin_valid_)
+            {
+                if (was_ok)
+                {
+                    // 参数更新后重锚，保持相位连续（不跳变）
+                    sin_anchor_t_ = t;
+                    sin_anchor_theta_ = phase_before;
+                }
+                sin_last_ok_s_ = t;
+            }
             return sin_valid_;
         }
 
@@ -985,6 +997,34 @@ int main(int argc, char **argv)
         {
             const double t0 = rate_hist_.empty() ? 0.0 : rate_hist_.front().first;
             return sin_b_ + sin_A_ * std::sin(sin_om_ * (t - t0) + sin_phi_);
+        }
+
+        // ===== 解析相位（显示层去滞后）=====
+        // ∫(b + A·sin(Ωτ+φ))dτ = b·τ − (A/Ω)·[cos(Ωτ+φ) − cos φ]：拟合有效时
+        // 板相位直接用解析式（零滤波、零数值积分滞后）。锚点在每次重拟合
+        // （参数变化）时重设为当前相位值，避免曲线跳变。
+        double sin_anchor_t_{0.0};
+        double sin_anchor_theta_{0.0};
+
+        double sinPhase(double t) const
+        {
+            const double tau = t - sin_anchor_t_;
+            return sin_anchor_theta_ + sin_b_ * tau -
+                   (sin_A_ / std::max(sin_om_, 0.05)) *
+                       (std::cos(sin_om_ * tau + sin_phi_) - std::cos(sin_phi_));
+        }
+
+        // 拟合可用性带宽限期：模型可以外推，解调短暂失败（<1.5s）不废弃参数
+        double sin_last_ok_s_{-1.0e9};
+        bool sinUsable(double t) const
+        {
+            return (sin_valid_ || t - sin_last_ok_s_ < 1.5) && sin_om_ > 0.0 &&
+                   t - sin_last_ok_s_ < 1.5;
+        }
+        void reanchorSinPhase(double t, double theta)
+        {
+            sin_anchor_t_ = t;
+            sin_anchor_theta_ = theta;
         }
 
         bool stableOmega(double &omega_out)
@@ -1521,7 +1561,25 @@ int main(int argc, char **argv)
             // 这个）。EKF 的效果只由准心评判（青环=锁定板，黄叉=预测瞄准点）。
             // 通道盲区时相位保持（没有观测就没有转速）；车心/半径仍用 EKF
             // （与转速无关、且稳定）。
-            if (have_driving)
+            // 解析相位：拟合可用时板相位直接用 sin 的解析积分（零滞后），
+            // 交接到通道积分相位时以当前解析值为起点（不跳变）。
+            if (pix_rate_channel.sinUsable(time_s))
+            {
+                if (!topdown_phase_init)
+                {
+                    topdown_phase_init = true;
+                    topdown_last_t = time_s;
+                    pix_rate_channel.reanchorSinPhase(
+                        time_s, tracker.initialized() ? tracker.ekf().state()(6) : 0.0);
+                }
+                topdown_phase = pix_rate_channel.sinPhase(time_s);
+                topdown_last_t = time_s;
+                SYSTEM_LOG("td_phase", topdown_phase);
+                SYSTEM_LOG("td_rate", have_driving ? driving_omega : 0.0);
+                SYSTEM_LOG("sin_omega",
+                           pix_rate_channel.sinOmegaAt(time_s));
+            }
+            else if (have_driving)
             {
                 if (!topdown_phase_init)
                 {
