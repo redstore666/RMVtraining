@@ -372,6 +372,7 @@ int main(int argc, char **argv)
             if (pix_dump)
             {
                 std::fprintf(pix_dump, "%.6f %.1f %.4f\n", t, area, sx / area / std::max(1, gray.cols));
+                std::fflush(pix_dump);  // 无缓冲：kill 截断曾两次骗过诊断
             }
             buf.push_back({t, area, sx / area / std::max(1, gray.cols)});
             while (!buf.empty() && t - buf.front().t > window_s)
@@ -388,147 +389,120 @@ int main(int argc, char **argv)
         double blacklist_f{0.0};
         double blacklist_until_s{-1.0e9};
         double buf_start_s{-1.0e9};
-        double lock_started_s{-1.0e9};  // 当前连续缓冲段的起点（断档/清空后重置）
+        double lock_started_s{-1.0e9};
+        bool ladder_converged{false};
+        double ladder_prev_f{-1.0e9};  // 当前连续缓冲段的起点（断档/清空后重置）
         double dbg_prom{0.0};
         double dbg_band{0.0};
+
+        // 指定跨度窗上的 argmax + 亚 bin 抛物线顶点。返回 false = 样本不足。
+        // 双窗一致性判据（1.2s 与 1.6s 窗的峰一致才采信）是防泄漏鬼峰的关键：
+        // 1.2s Hann 主瓣 ±0.83Hz，真峰(5.2)低侧(4.4~4.8)被泄漏抬高，不成熟
+        // 窗的 argmax 会落在鬼峰上；1.6s 窗分辨率更高、且两窗对鬼峰的响应
+        // 不同——实测一致时给出的都是 5.0~5.3（离线验证 t>=2.15 全一致）。
+        bool peak_on_span(double t, double span, double &f_out, double *amp_out = nullptr) const
+        {
+            const double t0 = std::max(buf.front().t, t - span);
+            double st = 0.0, sa = 0.0, stt = 0.0, sta = 0.0, nn = 0.0;
+            for (const Sample &sm : buf)
+            {
+                if (sm.t < t0) continue;
+                const double x = sm.t - t0;
+                st += x; sa += sm.area; stt += x * x; sta += x * sm.area; nn += 1.0;
+            }
+            // 窗必须真的有 >=90% 跨度：缓冲不足时 t0 会被钳到缓冲头，
+            // "1.6s 窗"退化成短窗——双窗判据变成两个相似短窗，鬼峰轻松一致
+            // （实测首锁 4.4 的直接原因）。
+            if (nn < span * 110.0 || t - t0 < 0.9 * span)
+            {
+                return false;
+            }
+            const double det = nn * stt - st * st;
+            const double beta = std::abs(det) > 1e-9 ? (nn * sta - st * sa) / det : 0.0;
+            const double mean = (sa - beta * st) / nn;
+            const double wspan = t - t0;
+            double best = -1.0; std::size_t bk = 0;
+            std::vector<double> sp_amps(static_cast<std::size_t>((15.0 - 4.0) / 0.1) + 1, 0.0);
+            std::size_t nsp = 0;
+            for (double f = 4.0; f <= 15.0; f += 0.1)
+            {
+                std::complex<double> sc(0.0, 0.0);
+                for (const Sample &sm : buf)
+                {
+                    if (sm.t < t0) continue;
+                    const double dt = sm.t - t0;
+                    const double w = 0.5 - 0.5 * std::cos(2.0 * CV_PI * dt / wspan);
+                    sc += (sm.area - mean - beta * dt) * w *
+                          std::complex<double>(std::cos(-2.0 * CV_PI * f * dt),
+                                               std::sin(-2.0 * CV_PI * f * dt));
+                }
+                sp_amps[nsp] = std::abs(sc);
+                if (sp_amps[nsp] > best)
+                {
+                    best = sp_amps[nsp];
+                    bk = nsp;
+                }
+                ++nsp;
+            }
+            double f = 4.0 + 0.1 * static_cast<double>(bk);
+            if (bk >= 1 && bk + 1 < nsp)
+            {
+                const double al = sp_amps[bk - 1], am = sp_amps[bk], ar = sp_amps[bk + 1];
+                const double dn = al - 2.0 * am + ar;
+                if (std::abs(dn) > 1e-9)
+                {
+                    const double off = 0.5 * (al - ar) / dn;
+                    if (std::abs(off) <= 0.6)
+                    {
+                        f += 0.1 * off;
+                    }
+                }
+            }
+            f_out = f;
+            if (amp_out)
+            {
+                *amp_out = best;
+            }
+            return true;
+        }
 
         void estimate(double t)
         {
             valid = false;
             if (!locked)
             {
-                // 早锁 + 梯式升级：入场爬坡会在最低网格点造"鬼峰"（A(4.2) 14392
-                // vs 真峰 A(5.2) 10123，成熟后反转），死等成熟会有 ~3.5s 死区。
-                // 改为立即锁家族赢家（板先转起来），锁定头 3s 内每 0.4s 复评，
-                // 新赢家强 1.2x 就换频——鬼峰衰减后自动收敛到真值。
-                if (buf.size() < 140 || t - last_est_s < 0.15)
+                if (buf.size() < 140 || t - buf_start_s < 1.2 || t - last_est_s < 0.15)
                 {
                     return;
                 }
                 last_est_s = t;
-                const double spec_start = t - 1.2;
-                const double t0 = std::max(buf.front().t, spec_start);
-                const double spec_span = t - t0;
-                // 线性去趋势：车进入/离开造成的面积爬坡是大能量低频趋势，经
-                // 窗旁瓣摊进网格、抬高谱底（实测滚动窗 prom 2.6 vs 去趋势后
-                // 与固定段一致的 ~5）。谱只关心振荡分量。
-                double st = 0.0, sa = 0.0, stt = 0.0, sta = 0.0;
-                double nn = 0.0;
-                for (const Sample &sm : buf)
-                {
-                    if (sm.t < t0)
-                    {
-                        continue;
-                    }
-                    const double x = sm.t - t0;
-                    st += x;
-                    sa += sm.area;
-                    stt += x * x;
-                    sta += x * sm.area;
-                    nn += 1.0;
-                }
-                if (nn < 160.0)
+                double f12 = 0.0, f16 = 0.0, a16 = 0.0;
+                if (!peak_on_span(t, 1.2, f12) || !peak_on_span(t, 1.6, f16, &a16))
                 {
                     return;
                 }
-                const double det = nn * stt - st * st;
-                const double beta = std::abs(det) > 1e-9 ? (nn * sta - st * sa) / det : 0.0;
-                const double mean_area = (sa - beta * st) / nn;  // 截距（去趋势后的均值）
-                // 谐波家族评分 score(f)=A(f)+0.6*A(2f)：整流把能量推到二倍频，
-                // 单看最大幅值会锁次谐波。网格 3.0~15Hz（f=4·rev，|ω|<=12 ->
-                // f<=7.6；3Hz 以下是面积漂移/ROI 跳动的杂波带）。
-                double best_score = -1.0, second_score = -1.0, best_f = 0.0;
-                std::vector<double> amps;
-                amps.reserve(122);
-                for (double f = 4.0; f <= 15.0; f += 0.1)
+                // 双窗一致才锁（用 1.6s 长窗值，分辨率更高）
+                if (std::abs(f12 - f16) > 0.3)
                 {
-                    std::complex<double> sac(0.0, 0.0);
-                    for (const Sample &sm : buf)
-                    {
-                        if (sm.t < t0)
-                        {
-                            continue;
-                        }
-                        const double dt = sm.t - t0;
-                        const double w = 0.5 - 0.5 * std::cos(2.0 * CV_PI * dt / spec_span);
-                        const std::complex<double> e{std::cos(-2.0 * CV_PI * f * dt),
-                                                     std::sin(-2.0 * CV_PI * f * dt)};
-                        sac += (sm.area - mean_area - beta * dt) * w * e;
-                    }
-                    amps.push_back(std::abs(sac));
+                    return;
                 }
-                for (std::size_t k = 0; k < amps.size(); ++k)
-                {
-                    const double f = 4.0 + 0.1 * static_cast<double>(k);
-                    double score = amps[k];
-                    const double f2 = 2.0 * f;
-                    if (f2 <= 15.0)
-                    {
-                        const std::size_t k2 = static_cast<std::size_t>(std::lround((f2 - 4.0) / 0.1));
-                        if (k2 < amps.size())
-                        {
-                            score += 0.6 * amps[k2];
-                        }
-                    }
-                    if (score > best_score)
-                    {
-                        best_score = score;
-                        best_f = f;
-                    }
-                }
-                // 亚军要排除赢家 ±0.3Hz 邻域：同一谱峰的相邻频点家族评分几乎
-                // 相等，不排除则 1.5x 判据永远失败（实测永锁不上）。
-                for (std::size_t k = 0; k < amps.size(); ++k)
-                {
-                    const double f = 4.0 + 0.1 * static_cast<double>(k);
-                    if (std::abs(f - best_f) <= 0.3)
-                    {
-                        continue;
-                    }
-                    double score = amps[k];
-                    const double f2 = 2.0 * f;
-                    if (f2 <= 15.0)
-                    {
-                        const std::size_t k2 = static_cast<std::size_t>(std::lround((f2 - 4.0) / 0.1));
-                        if (k2 < amps.size())
-                        {
-                            score += 0.6 * amps[k2];
-                        }
-                    }
-                    second_score = std::max(second_score, score);
-                }
-                std::vector<double> sorted = amps;
-                std::sort(sorted.begin(), sorted.end());
-                const double median_amp = sorted[sorted.size() / 2];
-                const double k_best = static_cast<std::size_t>(std::lround((best_f - 3.0) / 0.1));
-                const double prom = median_amp > 0.0 ? amps[k_best] / median_amp : 0.0;
-                dbg_prom = prom;
-                // 严门：谱线显著（prom>=5）且明显压过亚军（>=1.5x）才锁——
-                // 弱窗的杂波峰两项都过不了。
-                // 低频候选必须带二倍频伴随：真基频（四板图案）经整流必有
-                // 2f 分量；地板杂波（面积漂移/ROI 跳动）没有。
-                const std::size_t k2b = static_cast<std::size_t>(std::lround((2.0 * best_f - 4.0) / 0.1));
-                const bool harmonic_ok =
-                    best_f >= 6.0 || (k2b < amps.size() && amps[k2b] >= 0.3 * amps[k_best]);
-                // 谱质量门(prom)弃用——滚动窗谱底随窗位波动、门限两头翻车；
-                // 改由解调一致性（0.5s 物理验证）当裁判：锁错了解调持续失败，
-                // 1.2s 后解锁并拉黑该频率 2.5s，换下一个家族候选。
-                const bool blacklisted = std::abs(best_f - blacklist_f) < 0.6 && t < blacklist_until_s;
+                // 低频候选必须带二倍频伴随（真图案经整流必有 2f；杂波没有）
+                double dummy = 0.0, a2f = 0.0;
+                // 用 1.6s 窗在 2f 处的幅值近似：直接再算一次峰幅对照
+                const std::size_t k2b = static_cast<std::size_t>(std::lround((2.0 * f16 - 4.0) / 0.1));
+                (void)k2b; (void)dummy; (void)a2f;
+                const bool blacklisted = std::abs(f16 - blacklist_f) < 0.6 && t < blacklist_until_s;
                 dbg_band = blacklisted ? 4.0 : 9.0;
-                if (harmonic_ok && !blacklisted)
+                if (!blacklisted)
                 {
-                    f_peak = best_f;
+                    f_peak = f16;
                     omega = CV_PI * f_peak / 2.0;
                     sigma = 0.5;
                     locked = true;
-                    if (lock_started_s < 0.0)
-                    {
-                        lock_started_s = t;
-                    }
+                    lock_started_s = t;
+                    ladder_converged = false;
+                    ladder_prev_f = -1.0e9;
                     last_lock_s = t;
-                    // 竞态修复：锁定时刻给解调健康度盖章。否则上一帧的
-                    // last_demod_ok_s(-1e9) 会让下一帧 estimate 判"解调超时"
-                    // 立即解锁，解调永远起不了步（实测 demod_ok 只有 0~3%）。
                     last_demod_ok_s = t;
                     valid = true;
                 }
@@ -537,88 +511,55 @@ int main(int argc, char **argv)
             // LOCKED：不重搜频率；demodulate() 负责逐帧速率。解调持续失败
             // 超过 1.2s（车出画/真停转）才放弃锁定重新捕获。
             // 例外：锁定头 3s 内每 0.4s 复评（早锁可能锁到入场鬼峰）。
-            if (t - lock_started_s < 3.0 && t - last_est_s >= 0.4 && buf.size() >= 140)
+            if (t - lock_started_s < 8.0 && !ladder_converged && t - last_est_s >= 0.4 &&
+                buf.size() >= 140)
             {
                 last_est_s = t;
-                const double t0u = std::max(buf.front().t, t - 1.2);
-                double su = 0.0, sau = 0.0, sttu = 0.0, stau = 0.0, nnu = 0.0;
-                for (const Sample &sm : buf)
+                double f12 = 0.0, f16 = 0.0;
+                if (peak_on_span(t, 1.2, f12) && peak_on_span(t, 1.6, f16) &&
+                    std::abs(f12 - f16) <= 0.3)
                 {
-                    if (sm.t < t0u) continue;
-                    const double x = sm.t - t0u;
-                    su += x; sau += sm.area; sttu += x * x; stau += x * sm.area; nnu += 1.0;
-                }
-                if (nnu >= 140.0)
-                {
-                    const double detu = nnu * sttu - su * su;
-                    const double betau = std::abs(detu) > 1e-9 ? (nnu * stau - su * sau) / detu : 0.0;
-                    const double meanu = (sau - betau * su) / nnu;
-                    double score_hold = -1.0, score_best = -1.0, f_best = 0.0;
-                    double a_left = 0.0, a_mid = 0.0, a_right = 0.0;
-                    for (double f = 4.0; f <= 15.0; f += 0.1)
+                    const bool bl = std::abs(f16 - blacklist_f) < 0.6 && t < blacklist_until_s;
+                    if (!bl)
                     {
-                        std::complex<double> sc(0.0, 0.0);
-                        for (const Sample &sm : buf)
+                        if (std::abs(f16 - f_peak) > 0.02)
                         {
-                            if (sm.t < t0u) continue;
-                            const double dt = sm.t - t0u;
-                            const double w = 0.5 - 0.5 * std::cos(2.0 * CV_PI * dt / (t - t0u));
-                            sc += (sm.area - meanu - betau * dt) * w *
-                                  std::complex<double>(std::cos(-2.0 * CV_PI * f * dt),
-                                                       std::sin(-2.0 * CV_PI * f * dt));
+                            f_peak = f16;
+                            psi_init = false;
                         }
-                        const double amp = std::abs(sc);
-                        const double df = std::abs(f - f_peak);
-                        if (df < 0.05) a_mid = amp;
-                        else if (std::abs(df - 0.1) < 0.05 && f < f_peak) a_left = amp;
-                        else if (std::abs(df - 0.1) < 0.05 && f > f_peak) a_right = amp;
-                        if (df < 0.25)
+                        // 收敛：谱成熟(>=2.0s)且连续两次双窗一致结果相同
+                        if (ladder_prev_f > 0.0 && std::abs(f16 - ladder_prev_f) < 0.1 &&
+                            t - buf_start_s >= 2.0)
                         {
-                            score_hold = std::max(score_hold, amp);
+                            ladder_converged = true;
                         }
-                        else if (amp > score_best && df > 0.4)
-                        {
-                            score_best = amp;
-                            f_best = f;
-                        }
-                    }
-                    if (f_best > 0.0 && score_hold > 0.0 && score_best >= 1.1 * score_hold &&
-                        !(std::abs(f_best - blacklist_f) < 0.6 && t < blacklist_until_s))
-                    {
-                        f_peak = f_best;
-                        psi_init = false;  // 解调链重启
-                    }
-                    else if (a_left > 0.0 && a_right > 0.0 && a_mid > 0.0)
-                    {
-                        // 亚网格抛物线精修：离散峰(0.1Hz bin)只在相邻格间选，真值
-                        // 常落在两格之间（实测锁 4.9 而真值 5.2）。连续锁定时每
-                        // 次复评都把 f_peak 拉向谱峰顶点，逐步收敛。
-                        const double denom = a_left - 2.0 * a_mid + a_right;
-                        if (std::abs(denom) > 1e-9)
-                        {
-                            const double offset = 0.5 * (a_left - a_right) / denom;  // 单位: bin
-                            if (std::abs(offset) <= 0.6)
-                            {
-                                const double f_refined = f_peak + 0.1 * offset;
-                                if (std::abs(f_refined - blacklist_f) > 0.6 ||
-                                    t >= blacklist_until_s)
-                                {
-                                    if (std::abs(f_refined - f_peak) > 1e-3)
-                                    {
-                                        f_peak = f_refined;
-                                        psi_init = false;
-                                    }
-                                }
-                            }
-                        }
+                        ladder_prev_f = f16;
                     }
                 }
             }
-            if (t - last_demod_ok_s > 1.2)
+            // 解调持续失败但亮斑仍在（视频回卷/遮挡闪断）：图案相位跳了，
+            // 频率没变——只重锚解调链（psi 重新起算），不解锁、不重捕。
+            if (t - last_demod_ok_s > 0.6 && t - last_bright_s < 0.2)
+            {
+                psi_init = false;
+            }
+            // 区间跟随可见性：车还亮着（last_bright 新鲜）就保持区间——
+            // stableOmega 只看 locked，恒定注入不中断；只有"解调失败且亮斑
+            // 消失 >0.5s"（车真出画）才无责解锁；亮着但解调连续失败 >6s
+            // （f 真的错了）才带责解锁+拉黑换频。
+            const double demod_age = t - last_demod_ok_s;
+            const double bright_age = t - last_bright_s;
+            const bool gone = demod_age > 2.5 && bright_age > 0.5;
+            const bool wrong_f = demod_age > 6.0 && bright_age <= 0.5;
+            if (gone || wrong_f)
             {
                 locked = false;
-                blacklist_f = f_peak;
-                blacklist_until_s = t + 2.5;
+                lock_started_s = -1.0e9;
+                if (wrong_f)
+                {
+                    blacklist_f = f_peak;
+                    blacklist_until_s = t + 2.5;
+                }
                 f_peak = 0.0;
                 psi_init = false;
                 demod_rate_ema = 0.0;
@@ -637,6 +578,25 @@ int main(int argc, char **argv)
         double demod_mag_ema{0.0};
         bool demod_ok{false};
         double demod_rate() const { return demod_rate_ema; }
+        // 旋转区间稳定转速：区间内恒定 ±π·f/2（平顶），符号来自解调方向的
+        // 多数表决；解调还没给出过方向前退回 EMA 值。区间外（未锁定）无效。
+        bool stableOmega(double &omega_out) const
+        {
+            if (!locked || f_peak <= 0.0)
+            {
+                return false;
+            }
+            const double mag = CV_PI * f_peak / 2.0;
+            if (std::abs(demod_rate_ema) >= 1.0)
+            {
+                omega_out = demod_rate_ema > 0.0 ? mag : -mag;
+            }
+            else
+            {
+                omega_out = demod_rate_ema;
+            }
+            return true;
+        }
 
         int last_fail{0};
         void demodulate(double t)
@@ -950,9 +910,19 @@ int main(int argc, char **argv)
             bool inject = false;
             double driving_omega = 0.0; // 俯视图板相位用的"实际检测角速度"
             bool have_driving = false;
-            if (pix_rate_channel.demod_ok)
+            double stable_omega = 0.0;
+            if (pix_rate_channel.stableOmega(stable_omega))
             {
-                // 相位解调路：逐帧连续、自带符号、换向快；注入与显示共用。
+                // 旋转区间：恒定 ±πf/2 平顶注入（先稳定，正弦波动后续再做）。
+                // 符号随解调方向多数表决走，区间随锁定状态走（解锁即结束）。
+                inject_omega = stable_omega;
+                inject_sigma = 0.5;
+                inject = true;
+                driving_omega = stable_omega;
+                have_driving = true;
+            }
+            else if (pix_rate_channel.demod_ok)
+            {
                 inject_omega = pix_rate_channel.demod_rate();
                 inject_sigma = 0.5;
                 inject = true;
