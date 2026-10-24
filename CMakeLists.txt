@@ -275,6 +275,15 @@ target_link_libraries(test_camera_live PRIVATE training_core topdown_view camera
 add_executable(test_camera_system tests/test_camera_system.cpp)
 target_link_libraries(test_camera_system PRIVATE training_core camera_overlay system_view
                       ${OpenCV_LIBS})
+# 正弦小陀螺 ω(t)=A·sin(Ωt+φ)+b 在线拟合（Ceres，参考用户 task2_fit 项目）。
+# 找不到 Ceres 时静默跳过（在线拟合改走无 Ceres 的粗扫+线性 LS 降级路径）。
+find_package(Ceres QUIET)
+if(Ceres_FOUND)
+    target_link_libraries(test_camera_system PRIVATE ${CERES_LIBRARIES})
+    target_include_directories(test_camera_system PRIVATE ${CERES_INCLUDE_DIRS})
+    target_compile_definitions(test_camera_system PRIVATE HAVE_CERES=1)
+    message(STATUS "test_camera_system: Ceres ${Ceres_VERSION} 已链接（正弦拟合可用）")
+endif()
 if(ENABLE_WEB_SYSTEM)
     target_link_libraries(test_camera_system PRIVATE system_web)
 endif()

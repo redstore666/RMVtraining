@@ -44,6 +44,22 @@
 #include "SystemWebLogger.hpp"
 #include "CameraOverlay.hpp"
 
+#ifdef HAVE_CERES
+#include <ceres/ceres.h>
+// 正弦残差（局部类不允许成员模板，放到文件作用域；参考 task2_fit）
+struct SinOmegaResidual
+{
+    double t, w;
+    SinOmegaResidual(double tt, double ww) : t(tt), w(ww) {}
+    template <typename T>
+    bool operator()(const T *const p, T *r) const
+    {
+        r[0] = w - (p[1] + p[0] * ceres::sin(p[2] * t + p[3]));
+        return true;
+    }
+};
+#endif
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -843,6 +859,9 @@ int main(int argc, char **argv)
                 rate_lp_init_ = false;
                 rate_lp_ = 0.0;
                 dir_conviction_ = 0.0;
+                rate_hist_.clear();
+                sin_valid_ = false;
+                sin_last_fit_s_ = -1.0e9;
             }
         }
 
@@ -868,6 +887,105 @@ int main(int argc, char **argv)
         // 正弦包络：低通后的解调速率（真转速波动），时间常数 0.4s
         double rate_lp_{0.0};
         bool rate_lp_init_{false};
+
+        // ===== 正弦小陀螺结构化拟合（Ceres，参考 task2_fit）=====
+        // ω(t) = A·sin(Ωt+φ)+b。锁定区间内积累解调速率样本（≤6s），每 0.5s
+        // 重拟合一次；有效判定：A<=0.95b（波谷非负——单向自转）、Ω∈[0.2,6.28]
+        // （周期 1~31s）、b∈[2,12]、RMS<0.8。有效时注入结构化 ω(t) 并输出
+        // 预测 ω(t+0.3s)；无效（如 v4 的缓变加速——粗扫退化到 A>b）回退包络。
+        std::deque<std::pair<double, double>> rate_hist_;
+        double sin_last_fit_s_{-1.0e9};
+        double sin_A_{0.0}, sin_b_{0.0}, sin_om_{0.0}, sin_phi_{0.0};
+        bool sin_valid_{false};
+        double sin_rms_{1.0e9};
+        double t_now_{0.0};
+
+        // 粗扫 Ω + （有 Ceres 时）AutoDiff 精修。返回是否得到有效拟合。
+        bool refitSin(double t)
+        {
+            if (rate_hist_.size() < 120 || t - sin_last_fit_s_ < 0.5)
+                return sin_valid_;
+            sin_last_fit_s_ = t;
+            const double t0 = rate_hist_.front().first;
+
+            // —— 第一步：粗扫（线性 LS 解 sin/cos 基底，等价 A/φ 线性化）——
+            double best_cost = 1e30, best_om = 0.0, c_s = 0.0, c_c = 0.0, c_b = 0.0;
+            for (double om = 0.2; om <= 6.281; om += 0.02)
+            {
+                double ss = 0, sc = 0, s0 = 0, ssq = 0, scq = 0, s0q = 0, sw = 0;
+                double sws = 0, swc = 0;
+                for (const auto &q : rate_hist_)
+                {
+                    const double x = q.first - t0;
+                    const double S = std::sin(om * x), C = std::cos(om * x), w = q.second;
+                    ss += S; sc += C; s0 += 1; sw += w;
+                    ssq += S * S; scq += C * C; s0q += 1;
+                    sws += S * w; swc += C * w;
+                }
+                // 3x3 正规方程 [S*C 0 求解]（sc=0：sin/cos 正交但采样不等距，
+                // 老老实实解 3x3）
+                Eigen::Matrix3d M;
+                M << ssq, 0.0, ss,
+                     0.0, scq, sc,
+                     ss, sc, s0q;
+                const Eigen::Vector3d r(sws, swc, sw);
+                const Eigen::Vector3d sol = M.colPivHouseholderQr().solve(r);
+                double cost = 0;
+                for (const auto &q : rate_hist_)
+                {
+                    const double x = q.first - t0;
+                    const double e = q.second - (sol[0] * std::sin(om * x) + sol[1] * std::cos(om * x) + sol[2]);
+                    cost += e * e;
+                }
+                if (cost < best_cost)
+                {
+                    best_cost = cost;
+                    best_om = om;
+                    c_s = sol[0]; c_c = sol[1]; c_b = sol[2];
+                }
+            }
+            sin_A_ = std::hypot(c_s, c_c);
+            sin_phi_ = std::atan2(c_c, c_s);
+            sin_b_ = c_b;
+            sin_om_ = best_om;
+
+#ifdef HAVE_CERES
+            // —— 第二步：Ceres AutoDiff 精修 [A, b, Ω, φ] ——
+            {
+                double params[4] = {sin_A_, sin_b_, sin_om_, sin_phi_};
+                ceres::Problem problem;
+                for (const auto &q : rate_hist_)
+                {
+                    problem.AddResidualBlock(
+                        new ceres::AutoDiffCostFunction<SinOmegaResidual, 1, 4>(
+                            new SinOmegaResidual(q.first - t0, q.second)),
+                        nullptr, params);
+                }
+                ceres::Solver::Options opts;
+                opts.linear_solver_type = ceres::DENSE_QR;
+                opts.max_num_iterations = 20;
+                opts.minimizer_progress_to_stdout = false;
+                ceres::Solver::Summary summ;
+                ceres::Solve(opts, &problem, &summ);
+                if (summ.IsSolutionUsable() && params[1] > 0.5 && params[2] > 0.15)
+                {
+                    sin_A_ = params[0]; sin_b_ = params[1];
+                    sin_om_ = params[2]; sin_phi_ = params[3];
+                }
+            }
+#endif
+            sin_rms_ = std::sqrt(best_cost / static_cast<double>(rate_hist_.size()));
+            sin_valid_ = sin_A_ <= 0.95 * sin_b_ && sin_om_ >= 0.2 && sin_om_ <= 6.281 &&
+                         sin_b_ >= 3.0 && sin_b_ <= 11.0 && sin_rms_ < 0.8;
+            return sin_valid_;
+        }
+
+        // 结构化 ω(t)（拟合有效时）
+        double sinOmegaAt(double t) const
+        {
+            const double t0 = rate_hist_.empty() ? 0.0 : rate_hist_.front().first;
+            return sin_b_ + sin_A_ * std::sin(sin_om_ * (t - t0) + sin_phi_);
+        }
 
         bool stableOmega(double &omega_out)
         {
@@ -895,6 +1013,13 @@ int main(int argc, char **argv)
             if (rate_lp_init_ && std::abs(rate_lp_) > 0.4 * mag && std::abs(rate_lp_) < 1.6 * mag)
             {
                 mag_used = std::abs(rate_lp_);
+            }
+            // 正弦拟合有效：结构化 ω(t) 优先（波峰波谷由模型给出，且可预测）
+            if (sin_valid_)
+            {
+                const double w_fit = sinOmegaAt(t_now_);
+                if (w_fit > 0.55 * mag && w_fit < 1.35 * mag)  // 波峰波谷带宽：b±A 物理上不可能超出 mean±35% 太多
+                    mag_used = w_fit;
             }
             omega_out = dir * mag_used;
             return demod_rate_ema != 0.0 || rate_lp_init_;
@@ -990,6 +1115,10 @@ int main(int argc, char **argv)
             }
             demod_ok = true;
             last_demod_ok_s = t;
+            rate_hist_.push_back({t, rate});
+            while (!rate_hist_.empty() && t - rate_hist_.front().first > 6.0)
+                rate_hist_.pop_front();
+            refitSin(t);
         }
 
         // 惯性滑行：谱估计断续（车出画/谱弱）时，锁定后 1s 内按上次 ω 注入，
@@ -1332,7 +1461,18 @@ int main(int argc, char **argv)
                         ? z_m / (f_px * r_m)
                         : 0.0;
             }
+            pix_rate_channel.t_now_ = time_s;
             SYSTEM_LOG("sweep_prior", pix_rate_channel.sweep_omega);
+            SYSTEM_LOG("sin_valid", pix_rate_channel.sin_valid_ ? 1.0 : 0.0);
+            SYSTEM_LOG("sin_A", pix_rate_channel.sin_A_);
+            SYSTEM_LOG("sin_b", pix_rate_channel.sin_b_);
+            SYSTEM_LOG("sin_f", pix_rate_channel.sin_om_);
+            SYSTEM_LOG("sin_rms", pix_rate_channel.sin_rms_);
+            if (pix_rate_channel.sin_valid_)
+            {
+                SYSTEM_LOG("omega_pred",
+                           pix_rate_channel.sinOmegaAt(time_s + 0.3));  // 弹丸到达预测
+            }
             double inject_omega = 0.0, inject_sigma = 0.0;
             bool inject = false;
             double driving_omega = 0.0; // 俯视图板相位用的"实际检测角速度"
