@@ -504,6 +504,8 @@ int main(int argc, char **argv)
                 {
                     f_peak = f16;
                     omega = CV_PI * f_peak / 2.0;
+                    rate_lp_ = omega;
+                    rate_lp_init_ = true;
                     sigma = 0.5;
                     locked = true;
                     lock_started_s = t;
@@ -532,8 +534,12 @@ int main(int argc, char **argv)
             {
                 last_est_s = t;
                 double f12 = 0.0, f16 = 0.0;
+                // 一致容差 0.6：1.2s 窗在谱未熟时读低（泄漏），0.3 的容差让
+                // 双窗常年不一致、只能靠 ±0.06Hz/步的抛物线步行——4.0->5.2
+                // 要 8 秒（用户'转速跟不上'的机制）。放宽到 0.6 并跳向长窗值
+                // （更接近真值），成熟后两窗自然收敛。
                 if (peak_on_span(t, 1.2, f12) && peak_on_span(t, 1.6, f16) &&
-                    std::abs(f12 - f16) <= 0.3)
+                    std::abs(f12 - f16) <= 0.6)
                 {
                     const bool bl = std::abs(f16 - blacklist_f) < 0.6 && t < blacklist_until_s;
                     if (!bl)
@@ -542,6 +548,11 @@ int main(int argc, char **argv)
                         {
                             f_peak = f16;
                             psi_init = false;
+                            // 换频即换期望转速：rate_lp 从新频期望值出发，否则
+                            // 揣着旧频的值要磨好几秒（实测 f 已 5.2、ω 还在
+                            // 5.15 爬 5 秒）。
+                            rate_lp_ = CV_PI * f16 / 2.0;
+                            demod_rate_ema = rate_lp_;
                         }
                         // 收敛：谱成熟(>=2.0s)且连续两次双窗一致结果相同
                         // 收敛三条件：谱成熟(>=2s) + 连续两次一致 + 已离开杂波
@@ -583,6 +594,9 @@ int main(int argc, char **argv)
                 f_peak = 0.0;
                 psi_init = false;
                 demod_rate_ema = 0.0;
+                rate_lp_init_ = false;
+                rate_lp_ = 0.0;
+                dir_conviction_ = 0.0;
             }
         }
 
@@ -600,28 +614,44 @@ int main(int argc, char **argv)
         double demod_rate() const { return demod_rate_ema; }
         // 旋转区间稳定转速：区间内恒定 ±π·f/2（平顶），符号来自解调方向的
         // 多数表决；解调还没给出过方向前退回 EMA 值。区间外（未锁定）无效。
-        bool stableOmega(double &omega_out) const
+        // ===== 方向迟滞 + 正弦转速 =====
+        // 方向一旦确立（连续同号证据累积够），要翻转需要压倒性的反证——
+        // 错频拍频/内容跳变会让单帧解调符号抖动，用户实测看到"方向转反"
+        // 的一段。换向（司机反转）应只发生在重锁/强反证时。
+        double dir_conviction_{0.0};   // 方向确信度：±，|v|>=1 才允许翻转
+        // 正弦包络：低通后的解调速率（真转速波动），时间常数 0.4s
+        double rate_lp_{0.0};
+        bool rate_lp_init_{false};
+
+        bool stableOmega(double &omega_out)
         {
             if (!locked || f_peak <= 0.0)
             {
                 return false;
             }
             const double mag = CV_PI * f_peak / 2.0;
-            // 只要解调给过方向就输出 ±πf/2：|ema|<1 时回退 ema 会输出 ≈0
-            // （新锁的符号预热期把"已锁定"变成"静止"，实测 8.0s 锁定却 0）。
-            if (demod_rate_ema > 0.0)
+            double sign = 0.0;
+            if (demod_rate_ema > 0.5)
+                sign = 1.0;
+            else if (demod_rate_ema < -0.5)
+                sign = -1.0;
+            // 方向确信度积累：同号 +1、反号 -1，EMA 半衰 0.5s
+            if (sign != 0.0)
             {
-                omega_out = mag;
+                const double a = 0.06;
+                dir_conviction_ = (1.0 - a) * dir_conviction_ + a * sign * 3.0;
+                dir_conviction_ = std::clamp(dir_conviction_, -2.0, 2.0);
             }
-            else if (demod_rate_ema < 0.0)
+            const double dir = dir_conviction_ >= 0.0 ? 1.0 : -1.0;
+            // ===== 正弦转速：优先用低通后的解调速率（含真实波动）， =====
+            // 恒定 πf/2 只作兜底（解调从未成功/偏离锁频太远时）。
+            double mag_used = mag;
+            if (rate_lp_init_ && std::abs(rate_lp_) > 0.4 * mag && std::abs(rate_lp_) < 1.6 * mag)
             {
-                omega_out = -mag;
+                mag_used = std::abs(rate_lp_);
             }
-            else
-            {
-                omega_out = demod_rate_ema;  // 从未解调过（极短暂）
-            }
-            return true;
+            omega_out = dir * mag_used;
+            return demod_rate_ema != 0.0 || rate_lp_init_;
         }
 
         int last_fail{0};
@@ -695,12 +725,23 @@ int main(int argc, char **argv)
             // 一致性门：锁对 f 时 ψ̇/4 = ±π·f/2。偏离 30% 以上说明解调已失锁
             // （f_peak 被弱窗拖走/图案消失），此时不更新、不置 ok。
             const double expect = CV_PI * f_peak / 2.0;
-            if (std::abs(std::abs(rate) - expect) > 0.12 * expect)
+            if (std::abs(std::abs(rate) - expect) > 0.18 * expect)
             {
                 return;
             }
             const double a = std::min(1.0, dt / 0.12);
             demod_rate_ema += a * (rate - demod_rate_ema);
+            // 正弦包络：0.4s 低通保留真实转速波动（RM 正弦小陀螺 ~1-2Hz）
+            const double alp = std::min(1.0, dt / 0.4);
+            if (!rate_lp_init_)
+            {
+                rate_lp_ = rate;
+                rate_lp_init_ = true;
+            }
+            else
+            {
+                rate_lp_ += alp * (rate - rate_lp_);
+            }
             demod_ok = true;
             last_demod_ok_s = t;
         }
