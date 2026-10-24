@@ -864,6 +864,152 @@ namespace
         return result;
     }
 
+    // ===== optimize_yaw（移植自 sp_vision_25 solver.cpp 的 optimize_yaw，保真版）=====
+    // PnP 的平移解很稳（深度由板的竖直边约束），朝向 yaw 却在斜视角下病态：
+    // 4 点共面歧义 + IPPE 双解的欧拉分解噪声，是实拍法向 ±20~45° 抖动的主要
+    // 来源。做法：保持 PnP 的平移**和它自己的俯仰/横滚**不动，在云台系里绕
+    // 竖轴穷举 yaw（原始 yaw ±70°、1° 步长，最优附近 0.1° 抛光），取四角
+    // 重投影误差最小的解——把"噪声分解"变成"一维几何拟合"。
+    // 参考实现在固定俯仰上硬编码 15°（RM 实车装甲的标准安装角）；我们的
+    // 合成测试板是竖直的（pitch=0），固定 15° 会把合成场景搬歪（3m 处
+    // ~100px），因此默认保留量测俯仰。OPTIMIZE_YAW_PITCH=deg 可强制固定
+    // 俯仰做实验；OPTIMIZE_YAW=0 整体关闭。
+    struct YawBasis
+    {
+        cv::Vec3d n;   // 板面外法向（云台系）
+        cv::Vec3d u;   // 物体系 y 轴（板面内"上"方向，云台系）
+        double pitch;  // 量测俯仰（或强制值）
+        double yaw0;   // 原始 yaw
+    };
+
+    double yawSweepReprojectionError(const std::vector<cv::Point3f> &object_points,
+                                     const std::vector<cv::Point2f> &image_points,
+                                     const cv::Mat &camera_matrix,
+                                     const cv::Mat &distortion_coefficients,
+                                     const cv::Mat &R_c2g, const cv::Mat &tvec,
+                                     const YawBasis &basis, double yaw)
+    {
+        // n' = 绕竖轴转到 yaw（保持俯仰角 φ）
+        const double st = std::sin(yaw), ct = std::cos(yaw);
+        const double sp = std::sin(basis.pitch), cp = std::cos(basis.pitch);
+        cv::Vec3d n(ct * cp, st * cp, -sp);
+        // u' = Rz(Δθ)·u，再投影到与 n' 垂直的平面内（保持横滚）
+        const double dth = yaw - basis.yaw0;
+        const double cd = std::cos(dth), sd = std::sin(dth);
+        cv::Vec3d u(cd * basis.u[0] - sd * basis.u[1],
+                    sd * basis.u[0] + cd * basis.u[1],
+                    basis.u[2]);
+        u = u - n * (u.dot(n));
+        const double un = std::sqrt(u.dot(u));
+        if (un < 1e-9)
+            return std::numeric_limits<double>::infinity();
+        u = u * (1.0 / un);
+        const cv::Vec3d r = u.cross(n);
+        cv::Matx33d R_obj2g;
+        R_obj2g(0, 0) = r[0]; R_obj2g(1, 0) = r[1]; R_obj2g(2, 0) = r[2];
+        R_obj2g(0, 1) = u[0]; R_obj2g(1, 1) = u[1]; R_obj2g(2, 1) = u[2];
+        R_obj2g(0, 2) = n[0]; R_obj2g(1, 2) = n[1]; R_obj2g(2, 2) = n[2];
+        // R_obj2cam = R_c2g^T · R_obj2g
+        const cv::Mat R_obj2cam = R_c2g.t() * cv::Mat(R_obj2g);
+        cv::Mat rvec;
+        cv::Rodrigues(R_obj2cam, rvec);
+        std::vector<cv::Point2f> projected;
+        cv::projectPoints(object_points, rvec, tvec, camera_matrix,
+                          distortion_coefficients, projected);
+        double err = 0.0;
+        for (std::size_t k = 0; k < projected.size(); ++k)
+            err += cv::norm(projected[k] - image_points[k]);
+        return err / std::max<std::size_t>(projected.size(), 1);
+    }
+
+    // 就地精修 rvec（tvec 不动）。失败（数值异常）时保持原值。
+    void optimizeArmorYaw(const std::vector<cv::Point3f> &object_points,
+                          const std::vector<cv::Point2f> &image_points,
+                          const CameraParameters &camera,
+                          cv::Mat &rvec, const cv::Mat &tvec)
+    {
+        static const char *pitch_env = std::getenv("OPTIMIZE_YAW_PITCH");
+        static const bool force_pitch = pitch_env != nullptr;
+        static const double forced_pitch =
+            (force_pitch ? std::atof(pitch_env) : 0.0) * CV_PI / 180.0;
+        static const bool debug = std::getenv("OPTIMIZE_YAW_DEBUG") != nullptr;
+
+        const cv::Mat R_c2g = rotationCameraToGimbal(camera);
+        cv::Mat R_obj2cam0;
+        cv::Rodrigues(rvec, R_obj2cam0);
+        const cv::Mat R_obj2g0 = R_c2g * R_obj2cam0;
+        YawBasis basis;
+        basis.n = cv::Vec3d(R_obj2g0.at<double>(0, 2), R_obj2g0.at<double>(1, 2),
+                            R_obj2g0.at<double>(2, 2));
+        basis.u = cv::Vec3d(R_obj2g0.at<double>(0, 1), R_obj2g0.at<double>(1, 1),
+                            R_obj2g0.at<double>(2, 1));
+        basis.yaw0 = std::atan2(basis.n[1], basis.n[0]);
+        basis.pitch = force_pitch ? forced_pitch : std::asin(std::clamp(-basis.n[2], -1.0, 1.0));
+
+        double best_yaw = basis.yaw0;
+        double best_err = yawSweepReprojectionError(object_points, image_points,
+                                                    camera.camera_matrix,
+                                                    camera.distortion_coefficients,
+                                                    R_c2g, tvec, basis, basis.yaw0);
+        for (int i = -70; i <= 70; ++i)
+        {
+            const double yaw = basis.yaw0 + i * CV_PI / 180.0;
+            const double err = yawSweepReprojectionError(
+                object_points, image_points, camera.camera_matrix,
+                camera.distortion_coefficients, R_c2g, tvec, basis, yaw);
+            if (err < best_err)
+            {
+                best_err = err;
+                best_yaw = yaw;
+            }
+        }
+        for (int j = -5; j <= 5; ++j)
+        {
+            const double yaw = best_yaw + j * 0.1 * CV_PI / 180.0;
+            const double err = yawSweepReprojectionError(
+                object_points, image_points, camera.camera_matrix,
+                camera.distortion_coefficients, R_c2g, tvec, basis, yaw);
+            if (err < best_err)
+            {
+                best_err = err;
+                best_yaw = yaw;
+            }
+        }
+        if (!std::isfinite(best_yaw) || !std::isfinite(best_err))
+            return;
+
+        // 用精修后的 yaw 重建 rvec，让下游重投影自检/法向计算都基于精修姿态。
+        const double err_unused = yawSweepReprojectionError(
+            object_points, image_points, camera.camera_matrix,
+            camera.distortion_coefficients, R_c2g, tvec, basis, best_yaw);
+        (void)err_unused;
+        const double st = std::sin(best_yaw), ct = std::cos(best_yaw);
+        const double sp = std::sin(basis.pitch), cp = std::cos(basis.pitch);
+        cv::Vec3d n(ct * cp, st * cp, -sp);
+        const double dth = best_yaw - basis.yaw0;
+        const double cd = std::cos(dth), sd = std::sin(dth);
+        cv::Vec3d u(cd * basis.u[0] - sd * basis.u[1],
+                    sd * basis.u[0] + cd * basis.u[1], basis.u[2]);
+        u = u - n * (u.dot(n));
+        u = u * (1.0 / std::sqrt(u.dot(u)));
+        const cv::Vec3d r = u.cross(n);
+        cv::Matx33d R_obj2g;
+        R_obj2g(0, 0) = r[0]; R_obj2g(1, 0) = r[1]; R_obj2g(2, 0) = r[2];
+        R_obj2g(0, 1) = u[0]; R_obj2g(1, 1) = u[1]; R_obj2g(2, 1) = u[2];
+        R_obj2g(0, 2) = n[0]; R_obj2g(1, 2) = n[1]; R_obj2g(2, 2) = n[2];
+        cv::Rodrigues(R_c2g.t() * cv::Mat(R_obj2g), rvec);
+
+        if (debug)
+        {
+            double wrap = best_yaw - basis.yaw0;
+            while (wrap > CV_PI) wrap -= 2 * CV_PI;
+            while (wrap < -CV_PI) wrap += 2 * CV_PI;
+            std::fprintf(stderr, "[oyaw] yaw %.1f -> %.1f (Δ%+.1f°) err=%.2fpx\n",
+                         basis.yaw0 * 180.0 / CV_PI, best_yaw * 180.0 / CV_PI,
+                         wrap * 180.0 / CV_PI, best_err);
+        }
+    }
+
 } // namespace
 
 cv::Vec3d gimbalToCameraPoint(const CameraParameters &camera, const cv::Vec3d &p_gimbal)
@@ -1006,6 +1152,14 @@ std::vector<ArmorPose> armor_solve(const std::vector<ArmorDetection> &detections
         {
             ++g_pnp_fail; // test
             continue;     // PnP 失败 → 空观测，交给 EKF 纯预测
+        }
+
+        // ---- yaw 精修（optimize_yaw，移植自 sp_vision_25；OPTIMIZE_YAW=0 关闭）----
+        static const char *oy_env = std::getenv("OPTIMIZE_YAW");
+        static const bool oy_enabled = !(oy_env != nullptr && std::strcmp(oy_env, "0") == 0);
+        if (oy_enabled)
+        {
+            optimizeArmorYaw(object_points, image_points, camera, rvec, tvec);
         }
 
         // 重投影自检：用解出的位姿把物点投回图像，与实际角点比较
