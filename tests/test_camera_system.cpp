@@ -971,14 +971,14 @@ int main(int argc, char **argv)
             // 一致性门：锁对 f 时 ψ̇/4 = ±π·f/2。偏离 30% 以上说明解调已失锁
             // （f_peak 被弱窗拖走/图案消失），此时不更新、不置 ok。
             const double expect = CV_PI * f_peak / 2.0;
-            if (std::abs(std::abs(rate) - expect) > 0.18 * expect)
+            if (std::abs(std::abs(rate) - expect) > 0.45 * expect)
             {
                 return;
             }
             const double a = std::min(1.0, dt / 0.12);
             demod_rate_ema += a * (rate - demod_rate_ema);
             // 正弦包络：0.4s 低通保留真实转速波动（RM 正弦小陀螺 ~1-2Hz）
-            const double alp = std::min(1.0, dt / 0.4);
+            const double alp = std::min(1.0, dt / 0.2);
             if (!rate_lp_init_)
             {
                 rate_lp_ = rate;
