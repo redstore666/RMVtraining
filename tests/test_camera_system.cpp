@@ -764,6 +764,16 @@ int main(int argc, char **argv)
                     omega = CV_PI * f_peak / 2.0;
                     rate_lp_ = omega;
                     rate_lp_init_ = true;
+                    // 捕获期用互谱方向直接确立旋转方向（不继承上一区间的
+                    // 迟滞惯性——实测段1/段2 转向相反，迟滞锁死单向是
+                    // "俯视图始终只有一种方向"的根因）
+                    const double dsign = directionSign(f16);
+                    if (dsign != 0.0)
+                    {
+                        dir_conviction_ = 2.0 * dsign;
+                        demod_rate_ema = dsign * std::abs(demod_rate_ema);
+                        rate_lp_ = dsign * std::abs(rate_lp_);
+                    }
                     sigma = 0.5;
                     locked = true;
                     lock_started_s = t;
@@ -862,6 +872,7 @@ int main(int argc, char **argv)
                 rate_hist_.clear();
                 sin_valid_ = false;
                 sin_last_fit_s_ = -1.0e9;
+                dir_conviction_ = 0.0;  // 重锁时方向重新由互谱判定
             }
         }
 
@@ -887,6 +898,39 @@ int main(int argc, char **argv)
         // 正弦包络：低通后的解调速率（真转速波动），时间常数 0.4s
         double rate_lp_{0.0};
         bool rate_lp_init_{false};
+
+        // 捕获期方向判定：面积-质心互谱相位（谱幅值无方向，方向在这里定）。
+        // sin(Δφ)>0 → 正转。已标定：段1 视觉向右扫 dphi=-93°→负、段2 +89°→正。
+        double directionSign(double f) const
+        {
+            if (buf.size() < 90)
+                return 0.0;
+            const double t0 = buf.front().t;
+            double ma = 0.0, mx = 0.0;
+            for (const Sample &sm : buf)
+            {
+                ma += sm.area;
+                mx += sm.cx;
+            }
+            ma /= buf.size();
+            mx /= buf.size();
+            double sa_r = 0, sa_i = 0, sx_r = 0, sx_i = 0;
+            for (const Sample &sm : buf)
+            {
+                const double dt = sm.t - t0;
+                const double w = 0.5 - 0.5 * std::cos(2.0 * CV_PI * dt / window_s);
+                const double c = std::cos(-2.0 * CV_PI * f * dt);
+                const double sn = std::sin(-2.0 * CV_PI * f * dt);
+                const double da = (sm.area - ma) * w;
+                const double dx = (sm.cx - 0.5) * w;
+                sa_r += da * c; sa_i += da * sn;
+                sx_r += dx * c; sx_i += dx * sn;
+            }
+            // arg(SX * conj(SA)) = arg(SX) - arg(SA)
+            const double dphi = std::atan2(sx_i * sa_r - sx_r * sa_i,
+                                           sx_r * sa_r + sx_i * sa_i);
+            return std::sin(dphi) > 0.0 ? 1.0 : -1.0;
+        }
 
         // ===== 正弦小陀螺结构化拟合（Ceres，参考 task2_fit）=====
         // ω(t) = A·sin(Ωt+φ)+b。锁定区间内积累解调速率样本（≤6s），每 0.5s
