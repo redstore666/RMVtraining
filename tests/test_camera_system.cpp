@@ -817,6 +817,26 @@ int main(int argc, char **argv)
                              t, buf.size(), f_peak, ladder_converged ? 1 : 0,
                              ok12 ? "" : "X", d12, ok16 ? "" : "X", d16);
             }
+            // 收敛后仍每 2s 做一次双窗慢精修：梯式可能在瞬态处提前收敛
+            // （f 锁 3.06 而成熟窗值 3.19 → ω 差 ±5% 的运行间漂移来源）。
+            // 慢精修同样要求双窗一致 + 非黑名单，f 只在被证实才动。
+            if (ladder_converged && t - last_est_s >= 2.0 && buf.size() >= 140)
+            {
+                last_est_s = t;
+                double f12s = 0.0, f16s = 0.0;
+                if (peak_on_span(t, 1.2, f12s) && peak_on_span(t, 1.6, f16s) &&
+                    std::abs(f12s - f16s) <= 0.6)
+                {
+                    const bool bl_s = std::abs(f16s - blacklist_f) < 0.6 && t < blacklist_until_s;
+                    if (!bl_s && std::abs(f16s - f_peak) > 0.02)
+                    {
+                        f_peak = f16s;
+                        psi_init = false;
+                        rate_lp_ = CV_PI * f16s / 2.0;
+                        demod_rate_ema = rate_lp_;
+                    }
+                }
+            }
             if (t - lock_started_s < 8.0 && !ladder_converged && t - last_est_s >= 0.4 &&
                 buf.size() >= 140)
             {
@@ -2027,6 +2047,15 @@ int main(int argc, char **argv)
             fps_loop_ema = (fps_loop_ema <= 0.0) ? f : 0.9 * fps_loop_ema + 0.1 * f;
         }
         ++frame_cnt;
+
+        static const char *slow_sim_env = std::getenv("SLOW_SIM_MS");
+        if (slow_sim_env != nullptr)
+        {
+            // 模拟 --show-camera 的每帧 GUI 开销（imshow+waitKey ~15ms），
+            // 用于离线复现"带 live 窗口 omega 变低"的墙钟泄漏。
+            const int ms = std::atoi(slow_sim_env);
+            std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+        }
         if (++stat_cnt >= 150)
         {
             stat_cnt = 0;
