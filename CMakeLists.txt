@@ -275,6 +275,10 @@ target_link_libraries(test_camera_live PRIVATE training_core topdown_view camera
 add_executable(test_camera_system tests/test_camera_system.cpp)
 target_link_libraries(test_camera_system PRIVATE training_core camera_overlay system_view
                       ${OpenCV_LIBS})
+# MVS SDK 的 ConvertPixelType 内部 dlopen libFormatConversion.so：dlopen 只认
+# 老式 DT_RPATH（RUNPATH 不认）——没有它就报 0x8000000C"像素转换失败"
+# （test_camera_live 有 RPATH 所以能跑，本 target 曾漏配）。与 rmv_training 同修。
+target_link_options(test_camera_system PRIVATE "-Wl,--disable-new-dtags")
 # 正弦小陀螺 ω(t)=A·sin(Ωt+φ)+b 在线拟合（Ceres，参考用户 task2_fit 项目）。
 # 找不到 Ceres 时静默跳过（在线拟合改走无 Ceres 的粗扫+线性 LS 降级路径）。
 find_package(Ceres QUIET)
