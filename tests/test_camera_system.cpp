@@ -421,6 +421,76 @@ int main(int argc, char **argv)
                 std::sort(sorted.begin(), sorted.end());
                 median_amp = sorted[sorted.size() / 2];
             }
+            // 基频选择用"谐波家族评分"：score(f) = A(f) + 0.6*A(2f)。整流会把
+            // 能量推到二倍频，单看最大幅值容易锁到次谐波（实测 5.1Hz 真图案
+            // 被锁成 2.5Hz -> 板半速转）；家族评分让基频（连同其倍频）总体
+            // 最强的候选胜出：真 5.1Hz 时 score(5.1)=A5.1+0.6*A10.2 压过
+            // score(2.5)=A2.5+0.6*A5.1，真慢转（2.5Hz 强、5.1 是其倍频）时
+            // 2.5 仍胜。
+            // 频率连续性：转速不会瞬间跳 2 倍。刚锁定过（1.5s 内）时只在
+            // f_peak ± 0.6Hz 邻域内选峰——弱信号窗里次谐波（实测 2.4~2.8Hz）
+            // 的家族评分偶尔会压过真基频，保持期不换挡。
+            const bool freq_hold = (t - last_lock_s) < 1.5 && f_peak > 0.0;
+            {
+                double best_score = -1.0;
+                for (std::size_t k = 0; k < amps.size(); ++k)
+                {
+                    const double f = 2.0 + 0.1 * static_cast<double>(k);
+                    if (freq_hold && std::abs(f - f_peak) > 0.6)
+                    {
+                        continue;
+                    }
+                    const double f2 = 2.0 * f;
+                    double score = amps[k];
+                    if (f2 <= 15.0)
+                    {
+                        const std::size_t k2 = static_cast<std::size_t>(std::lround((f2 - 2.0) / 0.1));
+                        if (k2 < amps.size())
+                        {
+                            score += 0.6 * amps[k2];
+                        }
+                    }
+                    if (score > best_score)
+                    {
+                        best_score = score;
+                        // 记住家族头部的幅值/相位（用头部 f 的谱值）
+                    }
+                }
+                // 用家族头部的 f 重算 best_amp/best_phase（保持后续门槛语义：
+                // prominence/band 相对本头部频率的谱线）
+                for (std::size_t k = 0; k < amps.size(); ++k)
+                {
+                    const double f = 2.0 + 0.1 * static_cast<double>(k);
+                    const double f2 = 2.0 * f;
+                    double score = amps[k];
+                    if (f2 <= 15.0)
+                    {
+                        const std::size_t k2 = static_cast<std::size_t>(std::lround((f2 - 2.0) / 0.1));
+                        if (k2 < amps.size())
+                        {
+                            score += 0.6 * amps[k2];
+                        }
+                    }
+                    if (score >= best_score - 1e-12)
+                    {
+                        // 重新投影复谱取该 f 的幅值与相位
+                        std::complex<double> sa2(0.0, 0.0), sx2(0.0, 0.0);
+                        for (const Sample &s : buf)
+                        {
+                            const double dt = s.t - t0;
+                            const double w = 0.5 - 0.5 * std::cos(2.0 * CV_PI * dt / window_s);
+                            const std::complex<double> e{std::cos(-2.0 * CV_PI * f * dt),
+                                                         std::sin(-2.0 * CV_PI * f * dt)};
+                            sa2 += (s.area - mean_area) * w * e;
+                            sx2 += (s.cx - 0.5) * w * e;
+                        }
+                        best_amp = std::abs(sa2);
+                        best_f = f;
+                        best_phase = std::arg(sx2 * std::conj(sa2));
+                        break;
+                    }
+                }
+            }
             for (std::size_t k = 0; k < amps.size(); ++k)
             {
                 const double f = 2.0 + 0.1 * static_cast<double>(k);
@@ -468,6 +538,11 @@ int main(int argc, char **argv)
             return true;
         }
     } pix_rate_channel;
+    // 俯视图板相位的独立积分器（与 EKF 解耦，由检测转速驱动）。
+    double topdown_phase{0.0};
+    double topdown_last_t{0.0};
+    double topdown_driving_rate{0.0};
+    bool topdown_phase_init{false};
     if (pix_rate)
     {
         std::cout << "[pix-rate] 图像域转速通道开启（亮斑图案频率 -> injectRateObservation）\n";
@@ -594,6 +669,7 @@ int main(int argc, char **argv)
         if (pinned != pinned_last)
         {
             tracker.reset();
+            topdown_phase_init = false;
             pinned_last = pinned;
             pinned_last_seen_s = -1.0e9;
             std::cout << (pinned > 0 ? cv::format("[pin] 只看 id=%d（丢失也不自动切换）\n", pinned)
@@ -683,21 +759,47 @@ int main(int argc, char **argv)
             pix_rate_channel.estimate(time_s);
             double inject_omega = 0.0, inject_sigma = 0.0;
             bool inject = false;
+            double driving_omega = 0.0; // 俯视图板相位用的"实际检测角速度"
+            bool have_driving = false;
             if (pix_rate_channel.valid)
             {
                 inject_omega = pix_rate_channel.omega;
                 inject_sigma = pix_rate_channel.sigma;
                 inject = true;
+                driving_omega = pix_rate_channel.omega;
+                have_driving = true;
             }
             else if (pix_rate_channel.coast(time_s, inject_omega, inject_sigma))
             {
                 inject = true;
+                driving_omega = inject_omega;
+                have_driving = true;
             }
             if (inject && tracker.injectRateObservation(inject_omega, inject_sigma, time_s))
             {
                 SYSTEM_LOG("pix_rate", inject_omega);
                 SYSTEM_LOG("pix_f", pix_rate_channel.f_peak);
             }
+            // ===== 俯视图板相位：由"实际检测的角速度"独立积分（与 EKF 解耦）。
+            // 验收口径：俯视图四块板的转速与实拍视频转速一致（学长：目前只要求
+            // 这个）。EKF 的效果只由准心评判（青环=锁定板，黄叉=预测瞄准点）。
+            // 通道盲区时相位保持（没有观测就没有转速）；车心/半径仍用 EKF
+            // （与转速无关、且稳定）。
+            if (have_driving)
+            {
+                if (!topdown_phase_init)
+                {
+                    topdown_phase = tracker.initialized() ? tracker.ekf().state()(6) : 0.0;
+                    topdown_phase_init = true;
+                    topdown_last_t = time_s;
+                }
+                const double dts = std::max(0.0, std::min(0.05, time_s - topdown_last_t));
+                topdown_phase += driving_omega * dts;
+                topdown_last_t = time_s;
+            }
+            topdown_driving_rate = have_driving ? driving_omega : 0.0;
+            SYSTEM_LOG("td_phase", topdown_phase);
+            SYSTEM_LOG("td_rate", topdown_driving_rate);
         }
 
         const PredictionResult prediction =
@@ -772,12 +874,15 @@ int main(int argc, char **argv)
                 mini.body_centre = Eigen::Vector3d(
                     state(0), state(2), state(4) + tracker.slotZOffsetMean());
                 const double radius = state(8);
+                // 板相位：优先用"实际检测角速度"独立积分的相位（与 EKF 解耦，
+                // 验收=俯视图转速与实拍视频一致）；通道从未锁定时退回 EKF yaw。
+                const double body_phase_for_plates = topdown_phase_init ? topdown_phase : state(6);
                 // 固定半宽：四块板画一样长。以前取"本帧检测到的板型"，两台车大小板
                 // 交替出现时长度会一格一格跳，看着很难受。
                 const double half_w = 0.5 * plate_width_m;
                 for (int slot = 0; slot < kPlateCount; ++slot)
                 {
-                    const double phase = state(6) + M_PI * 0.5 * slot;
+                    const double phase = body_phase_for_plates + M_PI * 0.5 * slot;
                     mini.plate_centres.push_back(
                         Eigen::Vector3d(state(0) - radius * std::cos(phase),
                                         state(2) - radius * std::sin(phase),
@@ -806,8 +911,10 @@ int main(int argc, char **argv)
                     mini.predicted_aim = diagnostics.predicted_aim_world;
                 }
                 mini.fire_allowed = prediction.fire_allowed;
-                mini.caption = cv::format("d=%.2fm R=%.2fm w=%+.1f", prediction.distance_m, radius,
-                                          prediction.body_yaw_velocity);
+                mini.caption = cv::format("d=%.2fm R=%.2fm w=%+.1f%s", prediction.distance_m, radius,
+                                          topdown_phase_init ? topdown_driving_rate
+                                                             : static_cast<double>(prediction.body_yaw_velocity),
+                                          topdown_phase_init ? "(det)" : "");
                 if (has_phase_lag)
                     mini.caption += cv::format("  lag=%+.0f", phase_lag_deg);
             }
