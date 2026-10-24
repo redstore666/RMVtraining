@@ -710,6 +710,17 @@ int main(int argc, char **argv)
                 }
                 ++nsp;
             }
+            // 谱显著度门：停转的车面积恒定，谱上只剩噪声（prom ~1-2），
+            // 不加门会锁噪声峰。转动窗实测 prom 6~30，门 3.0 安全。
+            {
+                std::vector<double> sorted_amps = sp_amps;
+                std::sort(sorted_amps.begin(), sorted_amps.end());
+                const double med_amp = sorted_amps[sorted_amps.size() / 2];
+                if (med_amp > 0.0 && best / med_amp < 3.0)
+                {
+                    return false;
+                }
+            }
             double f = 1.0 + 0.1 * static_cast<double>(bk);
             if (bk >= 1 && bk + 1 < nsp)
             {
@@ -905,7 +916,13 @@ int main(int argc, char **argv)
             const double bright_age = t - last_bright_s;
             const bool gone = demod_age > 2.5 && bright_age > 0.5;
             const bool wrong_f = demod_age > 6.0 && bright_age <= 0.5;
-            if (gone || wrong_f)
+            // 停转解锁：车亮着但解调持续失败且失败原因是无振荡（深度/幅值
+            // 门）——图案振荡停止=车不转了，解锁归零（不拉黑频率，车再转
+            // 时同频快速重锁）。moveandrotate 实测：可见停转段被锁死、
+            // 俯视图一直转的根因。
+            const bool stopped_spinning =
+                demod_age > 2.5 && bright_age <= 0.5 && (last_fail == 4 || last_fail == 5);
+            if (gone || wrong_f || stopped_spinning)
             {
                 locked = false;
                 lock_started_s = -1.0e9;
@@ -1265,6 +1282,33 @@ int main(int argc, char **argv)
             {
                 last_fail = 4;
                 return;
+            }
+            // 振荡深度门（物理判据）：调制深度 d = 2|C|/(mean·N)。转动的板
+            // 面积波动至少 ~20%（板进出的可见性变化），d<0.1 = 面积根本
+            // 没在振荡——车停转了。此前只有自适应 EMA 门：它会随幅值衰减
+            // 自适应放过噪声，"伪成功解调"让锁永远活着（moveandrotate
+            // 停转段俯视图还在转的根因）。
+            {
+                double mean_a = 0.0;
+                int na = 0;
+                const double t_lo = t - demod_window_s;
+                for (const Sample &sm : buf)
+                {
+                    if (sm.t >= t_lo)
+                    {
+                        mean_a += sm.area;
+                        ++na;
+                    }
+                }
+                if (na > 0 && mean_a > 0.0)
+                {
+                    const double depth = 2.0 * mag / (mean_a * static_cast<double>(na));
+                    if (depth < 0.10)
+                    {
+                        last_fail = 5;  // 无振荡：车停转
+                        return;
+                    }
+                }
             }
             const double psi = std::arg(c);
             if (!psi_init)
