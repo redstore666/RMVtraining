@@ -72,6 +72,107 @@ constexpr int kPlateCount = 4;
 
 } // namespace
 
+// ===== 斜视角旁路检测（--no-oblique 关闭）=====
+// NN 只出正对板框（v4 实测降置信度无效），转速因此在观测流里不存在。
+// 用传统 HSV 灯条配对的宽松几何版找斜视角板：配对门放宽（间距下限
+// 0.35*h、错位上限 0.7*h——斜视角下投影宽度按 cos 收缩），角点取灯条
+// 外缘四边形，target_id 标为被选车（数字斜视角不可读）。NN 已覆盖的
+// 区域不重复；重投影门(6px)+NIS 过滤坏角点。
+struct ObliqueBar
+{
+    cv::Point2f top;
+    cv::Point2f bottom;
+    double height;
+};
+
+std::vector<ArmorDetection> detectObliqueArmors(const cv::Mat &bgr, TeamColor color,
+                                                const std::vector<ArmorDetection> &existing)
+{
+    std::vector<ArmorDetection> out;
+    cv::Mat hsv;
+    cv::cvtColor(bgr, hsv, cv::COLOR_BGR2HSV);
+    cv::Mat mask;
+    if (color == TeamColor::Red)
+    {
+        cv::Mat low, high;
+        cv::inRange(hsv, cv::Scalar(0, 110, 140), cv::Scalar(14, 255, 255), low);
+        cv::inRange(hsv, cv::Scalar(166, 110, 140), cv::Scalar(180, 255, 255), high);
+        cv::bitwise_or(low, high, mask);
+    }
+    else
+    {
+        cv::inRange(hsv, cv::Scalar(95, 110, 140), cv::Scalar(135, 255, 255), mask);
+    }
+    cv::Mat labels, stats, centroids;
+    const int n = cv::connectedComponentsWithStats(mask, labels, stats, centroids, 8);
+    std::vector<ObliqueBar> bars;
+    for (int i = 1; i < n; ++i)
+    {
+        const int area = stats.at<int>(i, cv::CC_STAT_AREA);
+        const int w = stats.at<int>(i, cv::CC_STAT_WIDTH);
+        const int h = stats.at<int>(i, cv::CC_STAT_HEIGHT);
+        if (area < 12 || h < 5 || w < 1)
+            continue;
+        const double long_side = std::max(w, h);
+        if (long_side / std::max(1.0, static_cast<double>(std::min(w, h))) < 1.6)
+            continue;
+        ObliqueBar bar;
+        const double cx = centroids.at<double>(i, 0);
+        const double cy = centroids.at<double>(i, 1);
+        bar.top = cv::Point2f(static_cast<float>(cx), static_cast<float>(cy - 0.5 * h));
+        bar.bottom = cv::Point2f(static_cast<float>(cx), static_cast<float>(cy + 0.5 * h));
+        bar.height = h;
+        bars.push_back(bar);
+    }
+    for (std::size_t a = 0; a < bars.size(); ++a)
+    {
+        for (std::size_t b = a + 1; b < bars.size(); ++b)
+        {
+            const double hmax = std::max(bars[a].height, bars[b].height);
+            if (std::abs(bars[a].height - bars[b].height) > 0.45 * hmax || hmax < 8.0)
+                continue;
+            const double gap = std::abs(bars[a].top.x - bars[b].top.x);
+            if (gap < 0.35 * hmax || gap > 6.5 * hmax)
+                continue;
+            const double dy = std::abs((bars[a].top.y + bars[a].bottom.y) -
+                                       (bars[b].top.y + bars[b].bottom.y)) / 2.0;
+            if (dy > 0.7 * hmax)
+                continue;
+            const ObliqueBar &lb = bars[a].top.x <= bars[b].top.x ? bars[a] : bars[b];
+            const ObliqueBar &rb = bars[a].top.x <= bars[b].top.x ? bars[b] : bars[a];
+            ArmorDetection det;
+            const float wob = static_cast<float>(0.5 * lb.height / 8.0);
+            det.corners = {cv::Point2f(lb.top.x - wob, lb.top.y),
+                           cv::Point2f(rb.top.x + wob, rb.top.y),
+                           cv::Point2f(rb.bottom.x + wob, rb.bottom.y),
+                           cv::Point2f(lb.bottom.x - wob, lb.bottom.y)};
+            det.size = ArmorSize::Small;
+            det.target_id = 0;
+            det.confidence = 0.25F;
+            const cv::Point2f c(0.25F * (det.corners[0].x + det.corners[1].x +
+                                         det.corners[2].x + det.corners[3].x),
+                                0.25F * (det.corners[0].y + det.corners[1].y +
+                                         det.corners[2].y + det.corners[3].y));
+            bool dup = false;
+            for (const ArmorDetection &e : existing)
+            {
+                cv::Point2f ec(0, 0);
+                for (const cv::Point2f &q : e.corners)
+                    ec += q * 0.25F;
+                if (cv::norm(c - ec) < 0.6 * gap)
+                {
+                    dup = true;
+                    break;
+                }
+            }
+            if (!dup)
+                out.push_back(det);
+        }
+    }
+    return out;
+}
+
+
 int main(int argc, char **argv)
 {
     bool enemy_red = true;
@@ -89,6 +190,7 @@ int main(int argc, char **argv)
     bool rate_pll = false;        // --rate-pll：打开残差 PLL 的转速量测（库默认关）
     bool rate_tracklet = false;   // --rate-tracklet：打开 Tracklet 单板角速度（库默认关）
     bool pix_rate = true;         // 图像域转速通道（默认开；--no-pix-rate 关闭）。检测只出正对板框时转速在观测量里不存在，这是 v4 实拍 omega 稳定的唯一来源
+    bool oblique_fallback = false; // 斜视角旁路检测（--oblique 开启）。默认关：斜板亮度会改变面积谱的周期性（实测锁 6.09Hz 错频），面积谱通道需重新设计后再默认开
     double pair_phase_err = -1.0; // --pair-phase-err RAD：覆盖双板解的相位差门限（默认 -1=用库值 0.35）
 
     for (int i = 1; i < argc; ++i)
@@ -147,6 +249,10 @@ int main(int argc, char **argv)
         else if (arg == "--no-pix-rate")
         {
             pix_rate = false;
+        }
+        else if (arg == "--oblique")
+        {
+            oblique_fallback = true;
         }
         else if (arg == "--pair-body")
         {
@@ -282,6 +388,7 @@ int main(int argc, char **argv)
     // 互谱相位的 sin（图案扫过方向锁定旋转方向），以量测形式经
     // tracker.injectRateObservation 喂给 EKF——不是硬写状态，σ 由谱峰显著
     // 性决定，滤波器自己加权。
+
     struct PixRateChannel
     {
         struct Sample
@@ -873,7 +980,23 @@ int main(int argc, char **argv)
         }
         const int64_t t1 = cv::getTickCount();
 
-        const auto dets = armor_detect(frame, enemy_red ? TeamColor::Red : TeamColor::Blue);
+        auto dets = armor_detect(frame, enemy_red ? TeamColor::Red : TeamColor::Blue);
+        int oblique_added = 0;
+        if (oblique_fallback)
+        {
+            const int pin = SYSTEM_TARGET();
+            if (pin > 0)
+            {
+                for (ArmorDetection &fb : detectObliqueArmors(
+                         frame, enemy_red ? TeamColor::Red : TeamColor::Blue, dets))
+                {
+                    fb.target_id = pin;
+                    dets.push_back(fb);
+                    ++oblique_added;
+                }
+            }
+            SYSTEM_LOG("oblique_added", static_cast<double>(oblique_added));
+        }
         const int64_t t2 = cv::getTickCount();
         const auto poses = armor_solve(dets, camera, gimbal);
         const int64_t t3 = cv::getTickCount();
