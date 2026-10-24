@@ -787,6 +787,7 @@ int main(int argc, char **argv)
             }
             // LOCKED：不重搜频率；demodulate() 负责逐帧速率。解调持续失败
             // 超过 1.2s（车出画/真停转）才放弃锁定重新捕获。
+            superviseDirection(t);
             // 例外：锁定头 3s 内每 0.4s 复评（早锁可能锁到入场鬼峰）。
             if (std::getenv("LADDER_DEBUG") && t - last_est_s >= 0.4)
             {
@@ -873,6 +874,8 @@ int main(int argc, char **argv)
                 sin_valid_ = false;
                 sin_last_fit_s_ = -1.0e9;
                 dir_conviction_ = 0.0;  // 重锁时方向重新由互谱判定
+                cosign_win_.clear();
+                cosign_last_t_ = -1.0e9;
             }
         }
 
@@ -895,15 +898,69 @@ int main(int argc, char **argv)
         // 错频拍频/内容跳变会让单帧解调符号抖动，用户实测看到"方向转反"
         // 的一段。换向（司机反转）应只发生在重锁/强反证时。
         double dir_conviction_{0.0};   // 方向确信度：±，|v|>=1 才允许翻转
+        // 互谱方向监督：与迟滞方向连续相反超 1.0s → 真换向，翻转迟滞
+        std::deque<std::pair<double, double>> cosign_win_;  // (t, 互谱方向±1/0)
+        double cosign_last_t_{-1.0e9};
+        double cosign_last_raw_{0.0};  // 最近一次互谱方向（诊断）
         // 正弦包络：低通后的解调速率（真转速波动），时间常数 0.4s
         double rate_lp_{0.0};
         bool rate_lp_init_{false};
 
         // 捕获期方向判定：面积-质心互谱相位（谱幅值无方向，方向在这里定）。
         // sin(Δφ)>0 → 正转。已标定：段1 视觉向右扫 dphi=-93°→负、段2 +89°→正。
+        // LOCKED 期间的互谱方向监督：解调符号在拍频/闪烁下抖，迟滞抗抖但
+        // 也抗真换向——用互谱（几何量，不经过解调状态机）当第二意见。
+        // 连续反向 >1.0s 且占比>70% → 翻转迟滞方向与所有符号状态。
+        void superviseDirection(double t)
+        {
+            if (!locked || f_peak <= 0.0)
+                return;
+            // 车不可见（>0.3s 无亮斑）时暂停监督并清窗：buf 里是出画前的
+            // 旧样本，会拿旧方向触发误翻转（实测 8~9s 的一次假切换）。
+            if (t - last_bright_s > 0.3)
+            {
+                cosign_win_.clear();
+                return;
+            }
+            if (t - cosign_last_t_ < 0.1)
+                return;
+            cosign_last_t_ = t;
+            const double sgn = directionSign(f_peak);
+            cosign_last_raw_ = sgn;
+            if (sgn == 0.0)
+                return;
+            cosign_win_.push_back({t, sgn});
+            while (!cosign_win_.empty() && t - cosign_win_.front().first > 1.5)
+                cosign_win_.pop_front();
+            if (cosign_win_.size() < 8)
+                return;
+            const double hyst_dir = dir_conviction_ >= 0.0 ? 1.0 : -1.0;
+            int opp = 0;
+            for (const auto &q : cosign_win_)
+            {
+                if (q.second == -hyst_dir)
+                    ++opp;
+            }
+            const double span = cosign_win_.back().first - cosign_win_.front().first;
+            static const bool dbg = std::getenv("DIR_DEBUG") != nullptr;
+            if (dbg && cosign_win_.size() % 10 == 0)
+                std::fprintf(stderr, "[dir] t=%.2f hyst=%+.0f opp=%d/%zu span=%.2f\n",
+                             t, hyst_dir, opp, cosign_win_.size(), span);
+            if (span >= 1.0 &&
+                opp >= 0.7 * static_cast<double>(cosign_win_.size()))
+            {
+                // 真换向：翻转迟滞方向与符号状态
+                dir_conviction_ = -dir_conviction_;
+                demod_rate_ema = -demod_rate_ema;
+                rate_lp_ = -rate_lp_;
+                psi_init = false;  // 相位链重启
+                cosign_win_.clear();
+            }
+        }
+
         double directionSign(double f) const
         {
-            if (buf.size() < 90)
+            if (buf.size() < 55)  // 闪烁实测填充率 ~57%（1.6s 窗 ~94 样本波动大）
                 return 0.0;
             const double t0 = buf.front().t;
             double ma = 0.0, mx = 0.0;
@@ -1305,8 +1362,10 @@ int main(int argc, char **argv)
             std::cout << "[--video] 循环播放中（--video-loop）\n";
     }
 
-    // 迷你俯视图 30 Hz 渲染门（检测/滤波照常全速跑）。
-    const double mini_interval_ticks = 1.0 / 30.0 * cv::getTickFrequency();
+    // 迷你俯视图 60 Hz 渲染门（检测/滤波照常全速跑；166fps 视频下每 2~3
+    // 帧渲染一次，JPEG+SSE 增量 ~1ms/帧可忽略。原 30Hz 会把 5Hz 图案频率
+    // 的换板节奏混叠成 2.5Hz 的视觉错觉——自转看慢一倍的来源之一）。
+    const double mini_interval_ticks = 1.0 / 60.0 * cv::getTickFrequency();
     const double show_interval_ticks = 1.0 / 30.0 * cv::getTickFrequency();
 
     if (initial_pin > 0)
@@ -1548,6 +1607,8 @@ int main(int argc, char **argv)
             pix_rate_channel.t_now_ = time_s;
             SYSTEM_LOG("sweep_prior", pix_rate_channel.sweep_omega);
             SYSTEM_LOG("sin_valid", pix_rate_channel.sin_valid_ ? 1.0 : 0.0);
+            SYSTEM_LOG("dir_conviction", pix_rate_channel.dir_conviction_);
+            SYSTEM_LOG("cosign", pix_rate_channel.cosign_last_raw_);
             SYSTEM_LOG("sin_A", pix_rate_channel.sin_A_);
             SYSTEM_LOG("sin_b", pix_rate_channel.sin_b_);
             SYSTEM_LOG("sin_f", pix_rate_channel.sin_om_);
@@ -1714,7 +1775,7 @@ int main(int argc, char **argv)
             last_frame_time_s > 0.0 ? (time_s - last_frame_time_s) * 1000.0 : 0.0;
         last_frame_time_s = time_s;
 
-        // ===== 迷你俯视图：30 Hz 渲染 + JPEG + 推给网页 =====
+        // ===== 迷你俯视图：60 Hz 渲染 + JPEG + 推给网页 =====
         // 网页通道独立于窗口：--no-display 也照推（只是不开本地窗口）。
         cv::Mat mini_canvas;
         if (cv::getTickCount() - last_mini_tick >= mini_interval_ticks)
