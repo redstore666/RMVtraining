@@ -207,6 +207,7 @@ int main(int argc, char **argv)
     bool rate_tracklet = false;   // --rate-tracklet：打开 Tracklet 单板角速度（库默认关）
     bool pix_rate = true;         // 图像域转速通道（默认开；--no-pix-rate 关闭）。检测只出正对板框时转速在观测量里不存在，这是 v4 实拍 omega 稳定的唯一来源
     bool oblique_fallback = false; // 斜视角旁路检测（--oblique 开启）。默认关：斜板亮度会改变面积谱的周期性（实测锁 6.09Hz 错频），面积谱通道需重新设计后再默认开
+    bool cam2 = false;            // --cam2：二号机（台架）内参 + 平移清零（直接相机）
     double pair_phase_err = -1.0; // --pair-phase-err RAD：覆盖双板解的相位差门限（默认 -1=用库值 0.35）
 
     for (int i = 1; i < argc; ++i)
@@ -269,6 +270,10 @@ int main(int argc, char **argv)
         else if (arg == "--oblique")
         {
             oblique_fallback = true;
+        }
+        else if (arg == "--cam2")
+        {
+            cam2 = true;
         }
         else if (arg == "--pair-body")
         {
@@ -375,6 +380,22 @@ int main(int argc, char **argv)
         // 外参未标定：单位旋转 + 零平移（与 test_camera_live 一致）。
         camera.rotation_camera_to_gimbal = cv::Mat::eye(3, 3, CV_64F);
         camera.translation_camera_to_gimbal = cv::Mat::zeros(3, 1, CV_64F);
+        // --cam2：二号机（台架）内参 + 平移清零。台架实拍（tests/resources 的
+        // 三个新视频）直接用相机、不经云台，云台 T[6.7cm,0,5.2cm] 不适用；
+        // R 仍是占位（代码侧补 90° 光学系→云台系轴重排，与车上同约定）。
+        // 2 号机标定：30 张有效视图、RMS 0.07 px（config/camera.yaml 注释）。
+        if (cam2)
+        {
+            camera.camera_matrix = (cv::Mat_<double>(3, 3) <<
+                1806.2, 0, 738.8,
+                0, 1804.7, 526.3,
+                0, 0, 1);
+            camera.distortion_coefficients = (cv::Mat_<double>(1, 5) <<
+                -7.61e-02, 1.522e-01, 0., 0., 0.);
+            camera.translation_camera_to_gimbal = cv::Mat::zeros(3, 1, CV_64F);
+            std::cout << "[cam2] 二号机内参已加载（fx=1806.2 fy=1804.7 cx=738.8 cy=526.3），"
+                         "平移清零（直接相机）\n";
+        }
     }
 
     GimbalState gimbal{};
@@ -427,6 +448,7 @@ int main(int argc, char **argv)
         cv::Rect roi_fixed;
         bool roi_valid{false};
         double last_bright_s{-1.0e9};
+        bool enemy_red{true};  // 颜色选择掩模用（接线层设）
         // ===== 逐灯条扫动先验：消首锁延迟 =====
         // 面积谱的入场爬坡鬼峰（4.0~4.8Hz）与真峰在 1.6s 窗内不可分，首锁
         // 要等 ~4s 谱成熟。而每根灯条过境时的横向扫速 |vx| = f·R·ω/Z 直接
@@ -516,62 +538,60 @@ int main(int argc, char **argv)
             {
                 const double cx = roi_raw.x + 0.5 * roi_raw.width;
                 const int new_x = cvRound(cx - 360);
-                const bool moved = roi_valid && std::abs(new_x - roi_fixed.x) > 100;
                 roi_fixed = cv::Rect(0, 0, 720, bgr.rows);
                 roi_fixed.x = new_x;
                 roi_fixed &= cv::Rect(0, 0, bgr.cols, bgr.rows);
                 roi_valid = true;
-                if (moved && !buf.empty())
-                {
-                    buf.clear();  // 只有框真的挪了才作废旧序列（原地重锚不清，
-                                  // 否则暗窗反复清缓冲、永远攒不够样本）
-                    psi_init = false;
-                }
+                // 重锚不清 buf：颜色掩模下背景贡献≈0，面积序列跨重锚仍然
+                // 连续（车移动/检测框跳动会频繁触发重锚，清一次丢 0.5s 数据，
+                // 实测 buf 永远攒不到 70）。断档清窗由 gap>0.15s 逻辑负责。
             }
             if (!roi_valid)
             {
                 return;
             }
-            cv::Mat gray;
-            cv::cvtColor(bgr(roi_fixed), gray, cv::COLOR_BGR2GRAY);
-            // 全分辨率 + 阈值 170（按视频亮度直方图定标：两个可见窗 100%
-            // 覆盖、中位 322/394 亮像素；150 会放进背景杂波压低 prom，
-            // 200 只剩一半帧有信号，下采样则毁掉 2~3px 的细亮条）。
-            const double thr = 170.0;
-            double area = 0.0;
-            double sx = 0.0;
-            for (int y = 0; y < gray.rows; ++y)
-            {
-                const uint8_t *row = gray.ptr<uint8_t>(y);
-                for (int x = 0; x < gray.cols; ++x)
-                {
-                    if (row[x] > thr)
-                    {
-                        area += 1.0;
-                        sx += x;
-                    }
-                }
+            cv::Mat roi_bgr = bgr(roi_fixed);
+            // 颜色选择掩模（按敌方颜色）：灰度阈值会把白色反光/背景灯算进
+            // 面积序列——highspeed 实测 3s 窗谱峰 3.0Hz（真值 5.5），蓝掩模
+            // 5.6Hz 干净（prom 6+）。全向量化（split/compare/moments/reduce）。
+            cv::Mat ch[3];
+            cv::split(roi_bgr, ch);
+            const int main_c = enemy_red ? 2 : 0;    // R 或 B 通道下标
+            const int c1 = enemy_red ? 1 : 1;        // G
+            const int c2 = enemy_red ? 0 : 2;        // 另一颜色
+            cv::Mat m_main, m_g, m_o, mask;
+            cv::compare(ch[main_c], 150, m_main, cv::CMP_GT);
+            cv::Mat th1, th2;
+            cv::add(ch[c1], 40, th1);
+            cv::compare(ch[main_c], th1, m_g, cv::CMP_GT);
+            cv::add(ch[c2], 40, th2);
+            cv::compare(ch[main_c], th2, m_o, cv::CMP_GT);
+            cv::bitwise_and(m_main, m_g, mask);
+            cv::bitwise_and(mask, m_o, mask);
+            const cv::Moments mo = cv::moments(mask, true);
+            const double area = mo.m00;
+            const double sx = mo.m10;
+            static double meas_dbg_cnt = 0;
+            if (std::getenv("ACQ_DEBUG") && static_cast<long long>(++meas_dbg_cnt) % 100 == 1)
+                std::fprintf(stderr, "[meas] n=%.0f enemy_red=%d area=%.0f\n",
+                             meas_dbg_cnt, enemy_red ? 1 : 0, area);
+            if (area < 4.0)  // 入口段车小、亮斑少；门太高会让缓冲填充慢、
+            {                 // 首锁推迟
+                return;
             }
-            // 逐灯条提取（扫动先验用）：亮像素按行游程聚成条（列聚类简化版
-            // ——对细长竖条足够：每行的亮段中心投票到 x 直方图再取峰）。
+            // 逐灯条提取（扫动先验用）：列票直方图（向量化 reduce）+ 游程。
             gray_bars.clear();
             {
-                std::vector<int> xhist(gray.cols, 0);
-                for (int y = 0; y < gray.rows; ++y)
-                {
-                    const uint8_t *row = gray.ptr<uint8_t>(y);
-                    for (int x = 0; x < gray.cols; ++x)
-                    {
-                        if (row[x] > thr)
-                            xhist[x]++;
-                    }
-                }
-                const int bar_min_votes = std::max(4, gray.rows / 200);  // 实测列票只有 15~21（远处小板），按 rows/40=27 会全拒
+                cv::Mat colsum;
+                cv::reduce(mask, colsum, 0, cv::REDUCE_SUM, CV_32S);
+                const int cols = colsum.cols;
+                const int *hist = colsum.ptr<int>(0);
+                const int bar_min_votes = std::max(4, roi_bgr.rows / 200);
                 int run = 0;
                 long long run_sum = 0, run_w = 0;
-                for (int x = 0; x <= gray.cols; ++x)
+                for (int x = 0; x <= cols; ++x)
                 {
-                    const int v = x < gray.cols ? xhist[x] : 0;
+                    const int v = x < cols ? hist[x] : 0;
                     if (v > 0)
                     {
                         run_sum += static_cast<long long>(x) * v;
@@ -594,36 +614,26 @@ int main(int argc, char **argv)
                     }
                 }
             }
-            if (area < 4.0)  // 入口段车小、亮斑少；门太高会让缓冲填充慢、
-                            // 首锁推迟（实测可见 2.0s、锁到 4.0s）
-            {
-                return;
-            }
-            last_bright_s = t;
             updateSweepPrior(t);
             // 断档感知：时间缺口 >0.15s（车出画/丢检）后旧样本与新的不相干，
-            // 拼进同一个 1.6s 谱窗会把频谱涂抹掉（实测 prom 从 5+ 掉到 1~2，
-            // 这正是跨断档捕获全部失败的原因）。
-            if (buf.empty() || (!buf.empty() && t - buf.back().t > 0.15))
+            // 拼进同一个 1.6s 谱窗会把频谱涂抹掉。
+            if (!buf.empty() && t - buf.back().t > 0.15)
             {
-                if (buf.empty())
-                {
-                    buf_start_s = t;
-                }
-                else
-                {
-                    buf.clear();
-                    buf_start_s = t;
-                    psi_init = false;
-                }
+                buf.clear();
+                buf_start_s = t;
+                psi_init = false;
+            }
+            if (buf.empty())
+            {
+                buf_start_s = t;
             }
             static FILE *pix_dump = std::getenv("PIX_DUMP") ? std::fopen("tmp/pixdump.csv", "w") : nullptr;
             if (pix_dump)
             {
-                std::fprintf(pix_dump, "%.6f %.1f %.4f\n", t, area, sx / area / std::max(1, gray.cols));
+                std::fprintf(pix_dump, "%.6f %.1f %.4f\n", t, area, sx / area / std::max(1, roi_bgr.cols));
                 std::fflush(pix_dump);  // 无缓冲：kill 截断曾两次骗过诊断
             }
-            buf.push_back({t, area, sx / area / std::max(1, gray.cols)});
+            buf.push_back({t, area, sx / area / std::max(1, roi_bgr.cols)});
             while (!buf.empty() && t - buf.front().t > window_s)
             {
                 buf.pop_front();
@@ -671,9 +681,9 @@ int main(int argc, char **argv)
             const double mean = (sa - beta * st) / nn;
             const double wspan = t - t0;
             double best = -1.0; std::size_t bk = 0;
-            std::vector<double> sp_amps(static_cast<std::size_t>((15.0 - 4.0) / 0.1) + 1, 0.0);
+            std::vector<double> sp_amps(static_cast<std::size_t>((15.0 - 1.0) / 0.1) + 1, 0.0);
             std::size_t nsp = 0;
-            for (double f = 4.0; f <= 15.0; f += 0.1)
+            for (double f = 1.0; f <= 15.0; f += 0.1)
             {
                 std::complex<double> sc(0.0, 0.0);
                 for (const Sample &sm : buf)
@@ -693,7 +703,7 @@ int main(int argc, char **argv)
                 }
                 ++nsp;
             }
-            double f = 4.0 + 0.1 * static_cast<double>(bk);
+            double f = 1.0 + 0.1 * static_cast<double>(bk);
             if (bk >= 1 && bk + 1 < nsp)
             {
                 const double al = sp_amps[bk - 1], am = sp_amps[bk], ar = sp_amps[bk + 1];
@@ -726,16 +736,23 @@ int main(int argc, char **argv)
                 // 报 0。先锁个大概（可能落在泄漏鬼峰 4.5~4.8 -> 7.2 rad/s，
                 // 板立刻转起来），梯式（双窗一致 + 谱成熟收敛）在 ~1s 内修正
                 // 到真值；错锁由黑名单 + 断档解锁兜底。
+                static const bool acq_dbg = std::getenv("ACQ_DEBUG") != nullptr;
                 if (buf.size() < 70 || t - last_est_s < 0.15)
                 {
+                    if (acq_dbg)
+                        std::fprintf(stderr, "[acq] t=%.2f buf=%zu攒样本\n", t, buf.size());
                     return;
                 }
                 last_est_s = t;
                 double f12 = 0.0;
                 if (!peak_on_span(t, 0.6, f12))
                 {
+                    if (acq_dbg)
+                        std::fprintf(stderr, "[acq] t=%.2f buf=%zu peak拒\n", t, buf.size());
                     return;
                 }
+                if (acq_dbg)
+                    std::fprintf(stderr, "[acq] t=%.2f buf=%zu 候选f=%.2f\n", t, buf.size(), f12);
                 // 扫速先验：|ω_sw| 与峰的 πf/2 差在 35% 内 → 采纳（否则维持
                 // 原峰）。入场鬼峰(4.0~4.8Hz->6.3~7.5)与真峰(5.2->8.17)差
                 // ~23%，35% 窗只收真峰……实际鬼峰差 (8.17-6.9)/8.17=15.6%，
@@ -754,7 +771,7 @@ int main(int argc, char **argv)
                 // 低频候选必须带二倍频伴随（真图案经整流必有 2f；杂波没有）
                 double dummy = 0.0, a2f = 0.0;
                 // 用 1.6s 窗在 2f 处的幅值近似：直接再算一次峰幅对照
-                const std::size_t k2b = static_cast<std::size_t>(std::lround((2.0 * f16 - 4.0) / 0.1));
+                const std::size_t k2b = static_cast<std::size_t>(std::lround((2.0 * f16 - 1.0) / 0.1));
                 (void)k2b; (void)dummy; (void)a2f;
                 const bool blacklisted = std::abs(f16 - blacklist_f) < 0.6 && t < blacklist_until_s;
                 dbg_band = blacklisted ? 4.0 : 9.0;
@@ -1159,7 +1176,13 @@ int main(int argc, char **argv)
             // 包络×迟滞方向。
             if (sin_valid_)
             {
-                omega_out = sinOmegaAt(t_now_);
+                // 近恒速（A 相对 b 很小）：锁定频率值 πf/2 比拟合均值更准
+                // （解调速率均值含差拍噪声，实测把 8.69 拖到 7.25）；真正弦
+                // （A 与 b 同量级或更大）才用模型值。
+                if (sin_A_ < 0.5 * std::abs(sin_b_) + 0.5)
+                    omega_out = dir * mag;
+                else
+                    omega_out = sinOmegaAt(t_now_);
                 return true;
             }
             omega_out = dir * mag_used;
@@ -1574,7 +1597,9 @@ int main(int argc, char **argv)
             bool has_roi = false;
             for (const ArmorPose &pose : poses)
             {
-                if (pose.detection.target_id != pinned || pinned <= 0)
+                // 未选车（pinned<=0，自动模式）时锚定第一个检测——否则通道
+                // ROI 永不建立、buf 永远空（新视频运行没传 --id 的教训）。
+                if (pinned > 0 && pose.detection.target_id != pinned)
                 {
                     continue;
                 }
@@ -1610,6 +1635,7 @@ int main(int argc, char **argv)
                         ? z_m / (f_px * r_m)
                         : 0.0;
             }
+            pix_rate_channel.enemy_red = enemy_red;
             pix_rate_channel.t_now_ = time_s;
             SYSTEM_LOG("sweep_prior", pix_rate_channel.sweep_omega);
             SYSTEM_LOG("sin_valid", pix_rate_channel.sin_valid_ ? 1.0 : 0.0);
