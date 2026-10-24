@@ -256,6 +256,30 @@ bool RotatingArmorTracker::applyPhaseMeasurement(double world_yaw_rad, double si
     return true;
 }
 
+bool RotatingArmorTracker::injectRateObservation(double omega_rad_s, double sigma_rad_s,
+                                                 double timestamp_s)
+{
+    if (!ekf_.initialized() || !std::isfinite(omega_rad_s) || !(sigma_rad_s > 0.0))
+    {
+        return false;
+    }
+    // 滤波器可能对 omega 过度自信（P 塌缩）：先抬到量测信息量的 2 倍再更新，
+    // 保证注入增益 ≥ 2/3。
+    ekf_.inflateOmegaCovariance(2.0 * sigma_rad_s * sigma_rad_s);
+    if (!ekf_.updateYawRate(omega_rad_s, sigma_rad_s))
+    {
+        return false;
+    }
+    // 与窗口证据同一套记账：成功后盖章，缺席衰减块才会让路。
+    last_rate_update_s_ = timestamp_s;
+    // 强证据有效期：窗口路在这段时间里让路（它在这种场景下读 ≈0 是"看不见"）。
+    injected_rate_until_s_ = timestamp_s + 0.35;
+    diagnostics_.rate_obs_used = true;
+    diagnostics_.rate_obs_rad_s = omega_rad_s;
+    diagnostics_.rate_obs_sigma_rad_s = sigma_rad_s;
+    return true;
+}
+
 void RotatingArmorTracker::reset()
 {
     ekf_.reset();
@@ -1490,6 +1514,7 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
                     std::fprintf(stderr, "[cleargap] ts=%.3f back=%.3f n=%zu\n", timestamp_s,
                                  rate_samples_.back().timestamp_s, rate_samples_.size());
                 rate_samples_.clear();
+                chord_samples_.clear();
                 last_rate_update_s_ = -1.0e9;
             }
             return;
@@ -1510,6 +1535,7 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
             std::fprintf(stderr, "[cleargap2] ts=%.3f back=%.3f n=%zu\n", timestamp_s,
                          rate_samples_.back().timestamp_s, rate_samples_.size());
         rate_samples_.clear();
+        chord_samples_.clear();
         last_rate_update_s_ = -1.0e9;
     }
 
@@ -1556,7 +1582,69 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
         rate_samples_.pop_front();
     }
 
+    // 原始法向采样：每帧所有同号板的法向都收（不挑选、不解缠），3f 逐对折叠。
+    if (config_.rate_from_raw_normal_enabled)
+    {
+        for (const WorldObservation &obs : world)
+        {
+            if (obs.target_id == target_id_ && obs.has_yaw && std::isfinite(obs.yaw))
+            {
+                raw_normal_samples_.push_back({timestamp_s, obs.yaw});
+            }
+        }
+        while (!raw_normal_samples_.empty() &&
+               timestamp_s - raw_normal_samples_.front().timestamp_s > config_.rate_raw_window_s)
+        {
+            raw_normal_samples_.pop_front();
+        }
+    }
+
+    // 弦向证据采样：同帧两块同号板的弦方向，存原始角（不解缠）。板序互换
+    // 翻 180°、可见板对每 90° 换一对跳 90°——都在斜率计算时逐对折叠/当离群
+    // 对处理（见 3c'），这里只按弦长过滤。
+    if (config_.rate_from_chord_enabled)
+    {
+        const WorldObservation *pa = nullptr;
+        const WorldObservation *pb = nullptr;
+        for (const WorldObservation &obs : world)
+        {
+            if (obs.target_id != target_id_)
+            {
+                continue;
+            }
+            if (pa == nullptr)
+            {
+                pa = &obs;
+            }
+            else
+            {
+                pb = &obs;
+                break;
+            }
+        }
+        if (pa != nullptr && pb != nullptr)
+        {
+            const double dx = pb->position.x() - pa->position.x();
+            const double dy = pb->position.y() - pa->position.y();
+            const double chord = std::hypot(dx, dy);
+            if (chord >= config_.rate_chord_min_m && chord <= config_.rate_chord_max_m)
+            {
+                chord_samples_.push_back({timestamp_s, std::atan2(dy, dx), chord});
+            }
+        }
+        while (!chord_samples_.empty() &&
+               timestamp_s - chord_samples_.front().timestamp_s > config_.rate_window_s)
+        {
+            chord_samples_.pop_front();
+        }
+    }
+
     // 3) Theil-Sen 斜率：只用"时间跨度 >= 半个窗口"的点对。
+    //    图像域注入的强证据有效期内让路（样本照常收集，只跳过估计更新）。
+    if (timestamp_s < injected_rate_until_s_)
+    {
+        return;
+    }
     //
     //    法向不是白噪声，而是"每帧翻面/抖动"的野值序列，最小二乘会被单帧
     //    野值带飞（实测 v4 静态目标上 LS 给出 16 rad/s）。取点对斜率的**中位数**
@@ -1612,13 +1700,20 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
         }
     }
     if ((radius_now < config_.radius_plausible_min_m ||
-        radius_now > config_.radius_plausible_max_m || off_circle * 2 > count))
+         radius_now > config_.radius_plausible_max_m || off_circle * 2 > count))
     {
         if (trackDebugEnabled())
             std::fprintf(stderr, "[evskip] n=%d R=%.3f bad=%d/%d (R/极点不可信)\n",
                          count, radius_now, off_circle, count);
-        return;
+        // 弦向证据不依赖极点，几何坏时仍然可用；没有弦向就整窗放弃（原行为）。
+        if (chord_samples_.size() < 8)
+        {
+            return;
+        }
     }
+    const bool bearing_geom_ok = !(radius_now < config_.radius_plausible_min_m ||
+                                   radius_now > config_.radius_plausible_max_m ||
+                                   off_circle * 2 > count);
 
     // 非自转 + 车心在移动：方位角路整条不收集。纯平移下真方位角是常数，
     // 斜率只可能来自车心估计误差的漂移（与车速同源，H3 实测稳定 +0.4~+0.7），
@@ -1626,8 +1721,9 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
     // 不需要这道闸。
     const double centre_speed = std::hypot(ekf_.state()(1), ekf_.state()(3));
     const bool bearing_trusted =
-        spinning_now ||
-        centre_speed <= config_.rate_bearing_max_centre_speed_m_s;
+        bearing_geom_ok &&
+        (spinning_now ||
+         centre_speed <= config_.rate_bearing_max_centre_speed_m_s);
     // 方位角序列只收"位置连续的同一块板"的样本（见 RateSample::continuous）。
     std::vector<double> bearing_times;
     std::vector<double> bearing_values;
@@ -1736,6 +1832,145 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
             used_sigma = std::sqrt(1.0 / (w_n + w_b));
         }
     }
+
+    // 3c') 弦向证据：不依赖极点/车心，可用时与上面结果整合。
+    //
+    //     v4 实拍 7.85 rad/s 自转车上的自举死锁：omega 卡 0 → spinning_now=false
+    //     → 方位角只能用逐帧抖动的伪极点 → 斜率 ±27 被物理闸门拒掉 → omega
+    //     永远起不来。弦方向随车体严格同转，是唯一不需要先知道车心就能干净
+    //     测转速的证据。斜率用**逐对折叠**（fold(Δdir, π)/Δt）而不是维护解缠
+    //     链：板序互换（π）被折叠掉；可见板对每 90° 换一对造成的 ±π/2 污染对
+    //     只占少数，Theil-Sen 中位数免疫。折叠周期 π 限死配对时距上限
+    //     |ω·Δt| < π/2，按物理闸门上限反推 Δt ≤ 0.8·(π/2)/rate_max_abs_rad_s。
+    //     整合策略：一致时逆方差加权（瘦 sigma）；分歧时取弦向——分歧的另一路
+    //     多半站在伪极点上。
+    double chord_mad = 0.0;
+    double chord_slope = std::numeric_limits<double>::quiet_NaN();
+    if (config_.rate_from_chord_enabled && chord_samples_.size() >= 8)
+    {
+        const double chord_dt_max =
+            0.8 * 0.5 * kPi / std::max(config_.rate_max_abs_rad_s, 1.0);
+        std::vector<double> chord_pair_slopes;
+        for (std::size_t i = 0; i + 1 < chord_samples_.size(); ++i)
+        {
+            for (std::size_t j = i + 1; j < chord_samples_.size(); ++j)
+            {
+                const double dt = chord_samples_[j].timestamp_s - chord_samples_[i].timestamp_s;
+                if (dt < 0.02 || dt > chord_dt_max)
+                {
+                    continue;
+                }
+                chord_pair_slopes.push_back(
+                    foldPeriod(chord_samples_[j].dir - chord_samples_[i].dir, kPi) / dt);
+            }
+        }
+        if (chord_pair_slopes.size() >= 12)
+        {
+            std::sort(chord_pair_slopes.begin(), chord_pair_slopes.end());
+            const std::size_t mid = chord_pair_slopes.size() / 2;
+            chord_slope = chord_pair_slopes.size() % 2
+                              ? chord_pair_slopes[mid]
+                              : 0.5 * (chord_pair_slopes[mid - 1] + chord_pair_slopes[mid]);
+            std::vector<double> devs;
+            devs.reserve(chord_pair_slopes.size());
+            for (double s : chord_pair_slopes)
+            {
+                devs.push_back(std::abs(s - chord_slope));
+            }
+            std::sort(devs.begin(), devs.end());
+            chord_mad = devs[devs.size() / 2];
+        }
+    }
+    if (std::isfinite(chord_slope))
+    {
+        const double chord_sigma = std::max(1.4826 * chord_mad, config_.rate_sigma_floor_rad_s);
+        if (trackDebugEnabled())
+            std::fprintf(stderr, "[chord] n=%zu slope=%+.2f(%.2f)\n",
+                         chord_samples_.size(), chord_slope, chord_mad);
+        const bool agree =
+            std::isfinite(used_slope) &&
+            std::fabs(used_slope - chord_slope) <=
+                std::max(config_.rate_agreement_rad_s, 0.5 * std::fabs(chord_slope));
+        if (agree && used_sigma > 0.0)
+        {
+            const double w_u = 1.0 / (used_sigma * used_sigma);
+            const double w_c = 1.0 / (chord_sigma * chord_sigma);
+            used_slope = (w_u * used_slope + w_c * chord_slope) / (w_u + w_c);
+            used_sigma = std::sqrt(1.0 / (w_u + w_c));
+        }
+        else
+        {
+            used_slope = chord_slope;
+            used_sigma = chord_sigma;
+        }
+    }
+    // 3f) 原始法向斜率：全部同号板法向、跨帧全配对、逐对折叠 Theil-Sen
+    //     （不解缠、不需要极点）。同板对给出 ≈ω 的斜率；换板对折叠后是
+    //     ±period/dt 的离群对，中位数免疫。配对时距上限由折叠周期 2π 反推
+    //     （|ω·Δt| < π），按物理闸门上限取 Δt ≤ 0.7·π/rate_max_abs_rad_s。
+    //     这是前向区检测（检测只在板正对附近触发，位置/弦向/方位角全部读
+    //     ≈0）时唯一稳定的转速来源。整合：一致时逆方差加权；分歧且本路
+    //     sigma 足够小（<2）时以它为准（其它路此时读出的 ≈0 是"看不见"，
+    //     不是"没转"）。
+    if (config_.rate_from_raw_normal_enabled && raw_normal_samples_.size() >= 8)
+    {
+        const double raw_dt_max = 0.7 * kPi / std::max(config_.rate_max_abs_rad_s, 1.0);
+        std::vector<double> raw_pair_slopes;
+        for (std::size_t i = 0; i + 1 < raw_normal_samples_.size(); ++i)
+        {
+            for (std::size_t j = i + 1; j < raw_normal_samples_.size(); ++j)
+            {
+                const double dt = raw_normal_samples_[j].timestamp_s - raw_normal_samples_[i].timestamp_s;
+                if (dt < 0.03 || dt > raw_dt_max)
+                {
+                    continue;
+                }
+                raw_pair_slopes.push_back(
+                    foldPeriod(raw_normal_samples_[j].yaw - raw_normal_samples_[i].yaw,
+                               2.0 * kPi) / dt);
+            }
+        }
+        if (raw_pair_slopes.size() >= 12)
+        {
+            std::sort(raw_pair_slopes.begin(), raw_pair_slopes.end());
+            const std::size_t mid = raw_pair_slopes.size() / 2;
+            const double raw_slope =
+                raw_pair_slopes.size() % 2
+                    ? raw_pair_slopes[mid]
+                    : 0.5 * (raw_pair_slopes[mid - 1] + raw_pair_slopes[mid]);
+            std::vector<double> raw_devs;
+            raw_devs.reserve(raw_pair_slopes.size());
+            for (double s : raw_pair_slopes)
+            {
+                raw_devs.push_back(std::abs(s - raw_slope));
+            }
+            std::sort(raw_devs.begin(), raw_devs.end());
+            const double raw_mad = raw_devs[raw_devs.size() / 2];
+            const double raw_sigma =
+                std::max(1.4826 * raw_mad, config_.rate_sigma_floor_rad_s);
+            if (trackDebugEnabled())
+                std::fprintf(stderr, "[evraw] n=%zu pairs=%zu slope=%+.2f(%.2f)\n",
+                             raw_normal_samples_.size(), raw_pair_slopes.size(), raw_slope,
+                             raw_mad);
+            const bool agree =
+                std::isfinite(used_slope) &&
+                std::fabs(used_slope - raw_slope) <=
+                    std::max(config_.rate_agreement_rad_s, 0.5 * std::fabs(raw_slope));
+            if (agree && used_sigma > 0.0)
+            {
+                const double w_u = 1.0 / (used_sigma * used_sigma);
+                const double w_r = 1.0 / (raw_sigma * raw_sigma);
+                used_slope = (w_u * used_slope + w_r * raw_slope) / (w_u + w_r);
+                used_sigma = std::sqrt(1.0 / (w_u + w_r));
+            }
+            else if (raw_sigma < 2.0)
+            {
+                used_slope = raw_slope;
+                used_sigma = raw_sigma;
+            }
+        }
+    }
+
     // 3d) 物理闸门。
     //
     //     上面那套"以位置相位为主证据"在实拍里仍然会被喂进伪转速：v4 左车

@@ -96,6 +96,20 @@ struct TrackerConfig
     // 两路证据（法向斜率 vs 板相对车心的方位角斜率）允许的差；超过就当
     // "这一窗说法向不可信"，直接不更新。
     double rate_agreement_rad_s{1.50};
+    // 弦向转速证据：同帧两块同号板的"弦方向"随车体严格同转，不依赖极点/车心、
+    // 不受平移影响（v4 实拍 7.85 rad/s 自转车：209 个双板帧、弦长稳定 0.40m、
+    // 0.35s 窗内斜率干净）。它是打破自举死锁的钥匙：omega 卡在 0 时
+    // spinning_now=false，方位角路只能用逐帧抖动的伪极点，斜率是垃圾且被
+    // 物理闸门拒掉，omega 永远起不来。板序互换造成的 180° 翻转按 π 折叠消除。
+    bool rate_from_chord_enabled{true};
+    double rate_chord_min_m{0.15};
+    double rate_chord_max_m{0.65};
+    // 原始法向路线（3f）：全部同号板法向、跨帧全配对、逐对折叠（fold ±π）
+    // Theil-Sen。mod-90° 折叠把板间推进抹成 0、链式解缠被噪声随机游走——
+    // 逐对折叠没有这两类失效。前向区检测（位置/弦向/方位角全部读 ≈0）时
+    // 唯一稳定的转速来源。窗口比转速窗口长：法向噪声大，靠配对数量压方差。
+    bool rate_from_raw_normal_enabled{true};
+    double rate_raw_window_s{0.70};
     // 转速自检：板心到极点的距离与当前半径 R 差超过它的样本过半，或 R 本身
     // 掉出 [radius_plausible_min_m, radius_plausible_max_m] 时，这一窗的方位角
     // 斜率必然是伪值（实测 R 崩到 0.152 时 bearing 斜率冲到 +8~+10，全靠物理
@@ -641,6 +655,12 @@ public:
     // 是否把中心反锚、让瞄准板保持原位。
     bool applyPhaseMeasurement(double world_yaw_rad, double sigma_rad);
 
+    // 图像域转速量测注入（系统视图层用）：亮斑图案频率通道等"不经过
+    // WorldObservation"的转速证据走这里。与窗口证据同一套记账（成功后
+    // 盖章，衰减块让路）。检测只出正对板框时（v4 实拍：位置/法向/弦向
+    // 全部读 ≈0，真实 8 rad/s 自转不可观测），这是唯一能立起 omega 的路。
+    bool injectRateObservation(double omega_rad_s, double sigma_rad_s, double timestamp_s);
+
 
     // 与 ekf_predict 同签名：喂进本帧的全部装甲板位姿，返回本帧应该发出去的结果。
     // 没有目标、时间戳非法或跟踪失效时返回默认的 NoTarget 结果。
@@ -838,6 +858,10 @@ private:
     // 上一帧真正被接受的更新数；重锚要求"连续更新不进去"，单帧离群不行。
     int last_updates_{0};
     double last_rate_update_s_{-1.0e9};
+    // 图像域注入的有效期：注入是强证据（σ 小），窗口路在这种场景下读出的
+    // ≈0 是"看不见"不是"没转"（v4 实拍 8 rad/s 不可观测），两路不能对打——
+    // 注入后这短时间内窗口证据让路（样本照常收集）。
+    double injected_rate_until_s_{-1.0e9};
     struct RateSample
     {
         double timestamp_s{0.0};
@@ -855,7 +879,30 @@ private:
     std::deque<RateSample> rate_samples_{};
     void updateYawRateFromWindow(const std::vector<WorldObservation>& world,
                                  double timestamp_s);
-    void resetRateWindow() { rate_samples_.clear(); }
+    void resetRateWindow()
+    {
+        rate_samples_.clear();
+        chord_samples_.clear();
+        raw_normal_samples_.clear();
+    }
+    // 同帧双板弦方向样本：dir 已按 π 周期解缠（板序无关）。
+    struct ChordSample
+    {
+        double timestamp_s{0.0};
+        double dir{0.0};
+        double chord{0.0};
+    };
+    std::deque<ChordSample> chord_samples_;
+    // 全部同号板的原始法向样本（每帧每板一条，不挑选）：四块板的法向都以 ω
+    // 推进，跨帧全配对后同板对给出 ≈ω 的斜率、换板对是 ±90°/dt 的离群对，
+    // Theil-Sen 中位数恰好落在信号上。只用 chosen 的话，chosen 链频繁换板，
+    // 同板对太少（v4 实测 median ≈0）。
+    struct RawNormalSample
+    {
+        double timestamp_s{0.0};
+        double yaw{0.0};
+    };
+    std::deque<RawNormalSample> raw_normal_samples_;
 
     // 把某个 slot 的法向 yaw 记入历史（用于检查"转/不转"的声明是否被数据反驳）。
     void pushNormalHistory(int plate_slot, double timestamp_s, double world_yaw_rad);

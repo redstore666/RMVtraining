@@ -237,6 +237,15 @@ public:
     // 由多秒窗口批处理直接给定转速：窗口拟合的 ω 比逐帧差分稳得多。
     void setRate(double omega) { state_(7) = omega; }
 
+    // 外部强量测注入前的协方差地板：长序列的衰减伪量测/窗口弱证据会把
+    // omega 的方差压得过小（滤波器过度自信，新量测吃不进去——实测注入
+    // 增益只剩 0.05，5 次 -8 rad/s 只把 ω 挪了 -0.95）。注入通道用它把
+    // P(7,7) 抬到量测信息量的量级再做量测更新。
+    void inflateOmegaCovariance(double variance_floor)
+    {
+        covariance_(7, 7) = std::max(covariance_(7, 7), variance_floor);
+    }
+
     // 角速度量测（EKF 的第 5 维量测）：只有 yaw_rate 这一维参与，H = e7。
     // 与 updatePhase 同样用 Joseph 形式，保证协方差仍然半正定。
     // 用它而不是 setRate()：setRate 是硬写，会把 omega 的不确定度信息丢掉，
