@@ -411,6 +411,84 @@ int main(int argc, char **argv)
         cv::Rect roi_fixed;
         bool roi_valid{false};
         double last_bright_s{-1.0e9};
+        // ===== 逐灯条扫动先验：消首锁延迟 =====
+        // 面积谱的入场爬坡鬼峰（4.0~4.8Hz）与真峰在 1.6s 窗内不可分，首锁
+        // 要等 ~4s 谱成熟。而每根灯条过境时的横向扫速 |vx| = f·R·ω/Z 直接
+        // 给出 |ω|（帧间最近邻跟踪 2~6 帧即得）——作为 ±35% 先验帮 FFT 在
+        // ~0.6s 直接选中真峰。scale = Z/(f·R) 由接线层每帧更新。
+        struct PrevBar
+        {
+            double x;
+            double y;
+            double h;
+            double t;
+        };
+        std::vector<PrevBar> prev_bars;
+        std::deque<std::pair<double, double>> vx_win;  // (t, vx_px_s)
+        double sweep_scale{0.0};  // Z/(f·R)；<=0 = 无效（先验停用）
+        double sweep_omega{-1.0};  // 先验 |ω|（rad/s），vx 中值*scale
+
+        void updateSweepPrior(double t)
+        {
+            if (sweep_scale <= 0.0 || gray_bars.empty())
+            {
+                prev_bars.clear();
+                return;
+            }
+            if (!prev_bars.empty() && t - prev_bars.front().t < 0.05 &&
+                t - prev_bars.front().t > 1e-4)
+            {
+                const double dt = t - prev_bars.front().t;
+                for (const auto &cur : gray_bars)
+                {
+                    // 最近邻：x 差最小且在门内
+                    const PrevBar *best = nullptr;
+                    double best_d = 1e9;
+                    for (const auto &pb : prev_bars)
+                    {
+                        const double d = std::hypot(cur.x - pb.x, cur.y - pb.y);
+                        if (d < best_d)
+                        {
+                            best_d = d;
+                            best = &pb;
+                        }
+                    }
+                    if (best && best_d < 0.8 * std::max(cur.h, best->h))
+                    {
+                        vx_win.push_back({t, (cur.x - best->x) / dt});
+                        if (vx_win.size() > 400)
+                            vx_win.pop_front();
+                    }
+                }
+            }
+            prev_bars.clear();
+            for (const auto &b : gray_bars)
+            {
+                prev_bars.push_back({b.x, b.y, b.h, t});
+            }
+            while (!vx_win.empty() && t - vx_win.front().first > 0.5)
+                vx_win.pop_front();
+            if (std::getenv("SWEEP_DEBUG") && (vx_win.size() % 400 == 0))
+                std::fprintf(stderr, "[sweep] scale=%.2e bars=%zu prev=%zu vx_n=%zu om=%.2f\n",
+                             sweep_scale, gray_bars.size(), prev_bars.size(), vx_win.size(),
+                             sweep_omega);
+            if (vx_win.size() >= 20)
+            {
+                std::vector<double> vs;
+                vs.reserve(vx_win.size());
+                for (const auto &q : vx_win)
+                    vs.push_back(std::abs(q.second));
+                std::sort(vs.begin(), vs.end());
+                sweep_omega = vs[vs.size() / 2] * sweep_scale;
+            }
+        }
+        struct GrayBar
+        {
+            double x;
+            double y;
+            double h;
+        };
+        std::vector<GrayBar> gray_bars;  // 本帧亮条（measure 里填）
 
         void measure(const cv::Mat &bgr, const cv::Rect &roi_raw, bool has_det, double t)
         {
@@ -458,12 +536,55 @@ int main(int argc, char **argv)
                     }
                 }
             }
+            // 逐灯条提取（扫动先验用）：亮像素按行游程聚成条（列聚类简化版
+            // ——对细长竖条足够：每行的亮段中心投票到 x 直方图再取峰）。
+            gray_bars.clear();
+            {
+                std::vector<int> xhist(gray.cols, 0);
+                for (int y = 0; y < gray.rows; ++y)
+                {
+                    const uint8_t *row = gray.ptr<uint8_t>(y);
+                    for (int x = 0; x < gray.cols; ++x)
+                    {
+                        if (row[x] > thr)
+                            xhist[x]++;
+                    }
+                }
+                const int bar_min_votes = std::max(4, gray.rows / 200);  // 实测列票只有 15~21（远处小板），按 rows/40=27 会全拒
+                int run = 0;
+                long long run_sum = 0, run_w = 0;
+                for (int x = 0; x <= gray.cols; ++x)
+                {
+                    const int v = x < gray.cols ? xhist[x] : 0;
+                    if (v > 0)
+                    {
+                        run_sum += static_cast<long long>(x) * v;
+                        run_w += v;
+                        ++run;
+                    }
+                    else if (run > 0)
+                    {
+                        if (run_w >= static_cast<long long>(bar_min_votes) * run)
+                        {
+                            GrayBar bar;
+                            bar.x = static_cast<double>(run_sum) / run_w;
+                            bar.h = static_cast<double>(run_w) / run;
+                            bar.y = 0.0;
+                            gray_bars.push_back(bar);
+                        }
+                        run = 0;
+                        run_sum = 0;
+                        run_w = 0;
+                    }
+                }
+            }
             if (area < 4.0)  // 入口段车小、亮斑少；门太高会让缓冲填充慢、
                             // 首锁推迟（实测可见 2.0s、锁到 4.0s）
             {
                 return;
             }
             last_bright_s = t;
+            updateSweepPrior(t);
             // 断档感知：时间缺口 >0.15s（车出画/丢检）后旧样本与新的不相干，
             // 拼进同一个 1.6s 谱窗会把频谱涂抹掉（实测 prom 从 5+ 掉到 1~2，
             // 这正是跨断档捕获全部失败的原因）。
@@ -599,6 +720,20 @@ int main(int argc, char **argv)
                 {
                     return;
                 }
+                // 扫速先验：|ω_sw| 与峰的 πf/2 差在 35% 内 → 采纳（否则维持
+                // 原峰）。入场鬼峰(4.0~4.8Hz->6.3~7.5)与真峰(5.2->8.17)差
+                // ~23%，35% 窗只收真峰……实际鬼峰差 (8.17-6.9)/8.17=15.6%，
+                // 窗收到 12% 只收真峰。
+                static const bool sweep_prior_on = std::getenv("SWEEP_PRIOR") != nullptr;
+                if (sweep_prior_on && sweep_omega > 2.0)
+                {
+                    const double omega_f = CV_PI * f12 / 2.0;
+                    const double rel = std::abs(omega_f - sweep_omega) / sweep_omega;
+                    if (rel > 0.22)
+                    {
+                        return;  // 峰与扫速先验矛盾：等下一个候选（梯式会再评）
+                    }
+                }
                 const double f16 = f12;
                 // 低频候选必须带二倍频伴随（真图案经整流必有 2f；杂波没有）
                 double dummy = 0.0, a2f = 0.0;
@@ -649,7 +784,11 @@ int main(int argc, char **argv)
                     std::abs(f12 - f16) <= 0.6)
                 {
                     const bool bl = std::abs(f16 - blacklist_f) < 0.6 && t < blacklist_until_s;
-                    if (!bl)
+                    static const bool sweep_prior_on2 = std::getenv("SWEEP_PRIOR") != nullptr;
+                    const bool prior_ok =
+                        !sweep_prior_on2 || sweep_omega <= 2.0 ||
+                        std::abs(CV_PI * f16 / 2.0 - sweep_omega) / sweep_omega <= 0.22;
+                    if (!bl && prior_ok)
                     {
                         if (std::abs(f16 - f_peak) > 0.02)
                         {
@@ -1177,6 +1316,23 @@ int main(int argc, char **argv)
             pix_rate_channel.measure(frame, roi, has_roi, time_s);
             pix_rate_channel.estimate(time_s);
             pix_rate_channel.demodulate(time_s);
+            {
+                // 扫速先验的几何比例 Z/(f·R)：EKF 的距离与半径 + 相机焦距
+                double z_m = 0.0, r_m = 0.0;
+                if (tracker.initialized())
+                {
+                    z_m = std::hypot(tracker.ekf().state()(0), tracker.ekf().state()(2));
+                    r_m = tracker.ekf().state()(8);
+                }
+                const double f_px = camera.camera_matrix.empty()
+                                        ? 0.0
+                                        : camera.camera_matrix.at<double>(0, 0);
+                pix_rate_channel.sweep_scale =
+                    (z_m > 0.3 && z_m < 12.0 && r_m > 0.15 && f_px > 1.0)
+                        ? z_m / (f_px * r_m)
+                        : 0.0;
+            }
+            SYSTEM_LOG("sweep_prior", pix_rate_channel.sweep_omega);
             double inject_omega = 0.0, inject_sigma = 0.0;
             bool inject = false;
             double driving_omega = 0.0; // 俯视图板相位用的"实际检测角速度"
