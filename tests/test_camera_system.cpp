@@ -773,6 +773,8 @@ int main(int argc, char **argv)
                         dir_conviction_ = 2.0 * dsign;
                         demod_rate_ema = dsign * std::abs(demod_rate_ema);
                         rate_lp_ = dsign * std::abs(rate_lp_);
+                        rate_hist_.clear();  // 方向可能换：旧历史作废
+                        sin_valid_ = false;
                     }
                     sigma = 0.5;
                     locked = true;
@@ -954,6 +956,8 @@ int main(int argc, char **argv)
                 demod_rate_ema = -demod_rate_ema;
                 rate_lp_ = -rate_lp_;
                 psi_init = false;  // 相位链重启
+                rate_hist_.clear();  // 新方向重新积累（旧历史混着反向样本）
+                sin_valid_ = false;
                 cosign_win_.clear();
             }
         }
@@ -986,7 +990,13 @@ int main(int argc, char **argv)
             // arg(SX * conj(SA)) = arg(SX) - arg(SA)
             const double dphi = std::atan2(sx_i * sa_r - sx_r * sa_i,
                                            sx_r * sa_r + sx_i * sa_i);
-            return std::sin(dphi) > 0.0 ? 1.0 : -1.0;
+            // 符号链推导（端到端，2026-10-24 修正——此前约定反了）：
+            //   φ̇>0 → 正对板速度 = r·φ̇·(0,−1)（云台 y=左 → −y=图像右）
+            //        → 视频里正对板向右扫 → 面积峰时 cx 正穿越中心
+            //        → cx 相对面积超前 +90° → dphi = arg(SX)−arg(SA) = −90°。
+            //   所以 dphi<0（sin<0）对应 φ̇>0 = 正 ω。渲染轴：屏幕右=+x、
+            //   上=+y，φ 增加时近相机板向屏幕下移动=与视频向右扫一致。
+            return std::sin(dphi) < 0.0 ? 1.0 : -1.0;
         }
 
         // ===== 正弦小陀螺结构化拟合（Ceres，参考 task2_fit）=====
@@ -1135,18 +1145,7 @@ int main(int argc, char **argv)
                 return false;
             }
             const double mag = CV_PI * f_peak / 2.0;
-            double sign = 0.0;
-            if (demod_rate_ema > 0.5)
-                sign = 1.0;
-            else if (demod_rate_ema < -0.5)
-                sign = -1.0;
-            // 方向确信度积累：同号 +1、反号 -1，EMA 半衰 0.5s
-            if (sign != 0.0)
-            {
-                const double a = 0.06;
-                dir_conviction_ = (1.0 - a) * dir_conviction_ + a * sign * 3.0;
-                dir_conviction_ = std::clamp(dir_conviction_, -2.0, 2.0);
-            }
+            // 方向（dir_conviction_）只由互谱管理：捕获时确立、监督器翻转。
             const double dir = dir_conviction_ >= 0.0 ? 1.0 : -1.0;
             // ===== 正弦转速：优先用低通后的解调速率（含真实波动）， =====
             // 恒定 πf/2 只作兜底（解调从未成功/偏离锁频太远时）。
@@ -1155,12 +1154,13 @@ int main(int argc, char **argv)
             {
                 mag_used = std::abs(rate_lp_);
             }
-            // 正弦拟合有效：结构化 ω(t) 优先（波峰波谷由模型给出，且可预测）
+            // 正弦拟合有效：结构化 ω(t) 直接输出（符号含在模型里——纯正弦
+            // 模型每半周期自然换向，方向迟滞不参与）；拟合无效才回退
+            // 包络×迟滞方向。
             if (sin_valid_)
             {
-                const double w_fit = sinOmegaAt(t_now_);
-                if (w_fit > 0.55 * mag && w_fit < 1.35 * mag)  // 波峰波谷带宽：b±A 物理上不可能超出 mean±35% 太多
-                    mag_used = w_fit;
+                omega_out = sinOmegaAt(t_now_);
+                return true;
             }
             omega_out = dir * mag_used;
             return demod_rate_ema != 0.0 || rate_lp_init_;
@@ -1232,8 +1232,14 @@ int main(int argc, char **argv)
             while (dpsi < -CV_PI) dpsi += 2.0 * CV_PI;
             psi_prev = psi;
             psi_t_prev = t;
-            // 相位差分噪声大（单帧 0.19 rad 信号 vs 噪声同量级），EMA 0.12s 平滑
-            const double rate = dpsi / dt / 4.0;
+            // **方向不在解调里**：对实值振荡，psi 的漂移速率 = 真实图案频率
+            // 与解调频率的差拍（可正可负，与转向无关）。解调只提供幅值；
+            // 方向由互谱（capture + supervise）唯一决定，这里按当前迟滞
+            // 方向定号。（此前用解调符号更新 conviction——"始终一个方向"
+            // 的最终根因。）
+            const double rate_mag = std::abs(dpsi) / dt / 4.0;
+            const double hyst_dir_now = dir_conviction_ >= 0.0 ? 1.0 : -1.0;
+            const double rate = rate_mag * hyst_dir_now;
             // 一致性门：锁对 f 时 ψ̇/4 = ±π·f/2。偏离 30% 以上说明解调已失锁
             // （f_peak 被弱窗拖走/图案消失），此时不更新、不置 ok。
             const double expect = CV_PI * f_peak / 2.0;
