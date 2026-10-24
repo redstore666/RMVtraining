@@ -208,6 +208,7 @@ int main(int argc, char **argv)
     bool pix_rate = true;         // 图像域转速通道（默认开；--no-pix-rate 关闭）。检测只出正对板框时转速在观测量里不存在，这是 v4 实拍 omega 稳定的唯一来源
     bool oblique_fallback = false; // 斜视角旁路检测（--oblique 开启）。默认关：斜板亮度会改变面积谱的周期性（实测锁 6.09Hz 错频），面积谱通道需重新设计后再默认开
     bool cam2 = false;            // --cam2：二号机（台架）内参 + 平移清零（直接相机）
+    bool no_realtime = false;     // --no-realtime：关闭视频实时节拍（离线吞吐测试用）
     double pair_phase_err = -1.0; // --pair-phase-err RAD：覆盖双板解的相位差门限（默认 -1=用库值 0.35）
 
     for (int i = 1; i < argc; ++i)
@@ -274,6 +275,10 @@ int main(int argc, char **argv)
         else if (arg == "--cam2")
         {
             cam2 = true;
+        }
+        else if (arg == "--no-realtime")
+        {
+            no_realtime = true;
         }
         else if (arg == "--pair-body")
         {
@@ -528,12 +533,10 @@ int main(int argc, char **argv)
         };
         std::vector<GrayBar> gray_bars;  // 本帧亮条（measure 里填）
 
-        void measure(const cv::Mat &bgr, const cv::Rect &roi_raw, bool has_det, double t)
+        // 重锚：检测到车且锚点过期时，把固定框平移到检测处（不清 buf）。
+        void updateAnchor(const cv::Mat &bgr, const cv::Rect &roi_raw, bool has_det,
+                          double t)
         {
-            // 固定框（离线分析的几何）：首检锚定 720 宽、全高，之后**不动**——
-            // 移动框（哪怕慢速 EMA）都会用车在框内的漂移调制面积序列，抬高
-            // 谱底（实测 prom 从离线 4.3~6.4 掉到 1.5~2.5）。车出框且持续无亮
-            // 斑 1.5s 后，在新检测处重锚。
             if (has_det && (!roi_valid || t - last_bright_s > 1.5))
             {
                 const double cx = roi_raw.x + 0.5 * roi_raw.width;
@@ -542,10 +545,14 @@ int main(int argc, char **argv)
                 roi_fixed.x = new_x;
                 roi_fixed &= cv::Rect(0, 0, bgr.cols, bgr.rows);
                 roi_valid = true;
-                // 重锚不清 buf：颜色掩模下背景贡献≈0，面积序列跨重锚仍然
-                // 连续（车移动/检测框跳动会频繁触发重锚，清一次丢 0.5s 数据，
-                // 实测 buf 永远攒不到 70）。断档清窗由 gap>0.15s 逻辑负责。
             }
+        }
+
+        // 每一 grabbed 帧都调（含被节拍跳过的帧）：采样率=相机帧率，谱才不被
+        // LED 频闪×跳帧的混叠污染（实测跳帧欠采样让 middlespeed 锁 6.3=
+        // 2×3.15 谐波）。只做掩模+moments（~2ms），不做重处理。
+        void measureCurrent(const cv::Mat &bgr, double t)
+        {
             if (!roi_valid)
             {
                 return;
@@ -672,7 +679,7 @@ int main(int argc, char **argv)
             // 窗必须真的有 >=90% 跨度：缓冲不足时 t0 会被钳到缓冲头，
             // "1.6s 窗"退化成短窗——双窗判据变成两个相似短窗，鬼峰轻松一致
             // （实测首锁 4.4 的直接原因）。
-            if (nn < span * 110.0 || t - t0 < 0.9 * span)
+            if (nn < span * 70.0 || t - t0 < 0.9 * span)  // 密度门按闪烁填充率 ~57% 校准（110/s 让 0.6s 窗永远拒算）
             {
                 return false;
             }
@@ -744,8 +751,12 @@ int main(int argc, char **argv)
                     return;
                 }
                 last_est_s = t;
+                // 1.5s 成熟窗采集：实时节拍后每窗样本减半，0.6s 临时窗只有
+                // ~49 样本、谱噪到错锁（实测 middlespeed 锁 6.09/真值 3.15）。
+                // 新视频可见期 15s+，等 1.5s 数据再锁更稳；v4 短可见期场景
+                // 由 0.9×跨度门兜底（攒不满就不锁）。
                 double f12 = 0.0;
-                if (!peak_on_span(t, 0.6, f12))
+                if (!peak_on_span(t, 1.5, f12))
                 {
                     if (acq_dbg)
                         std::fprintf(stderr, "[acq] t=%.2f buf=%zu peak拒\n", t, buf.size());
@@ -1420,11 +1431,68 @@ int main(int argc, char **argv)
     if (initial_pin > 0)
         SYSTEM_TARGET_SET(initial_pin);
 
+    // ===== 视频实时节拍（--no-realtime 关闭）=====
+    // 处理管线 ~78fps 追不上 165fps 的视频：不节拍时整段内容（含俯视图）
+    // 以 ~0.47× 慢放——用户拿手机（1× 实时）对照会看到"俯视图慢一半"。
+    // 节拍 = 以墙钟为基准跳帧：落后就丢弃中间帧（不解码不处理），保证
+    // 视频按真实速度播放、俯视图与真实转速一致。omega 数值不受影响
+    // （rad/s 是真实旋转速率）。
+    bool realtime_playback = !no_realtime;
+    std::chrono::steady_clock::time_point playback_start{};
+    bool playback_start_set{false};
+
     while (true)
     {
         const int64_t t0 = cv::getTickCount();
         if (!video_path.empty())
         {
+            // 实时节拍：按墙钟算"此刻应该播到第几帧"，落后就跳。
+            if (realtime_playback)
+            {
+                const auto now = std::chrono::steady_clock::now();
+                if (!playback_start_set)
+                {
+                    playback_start = now;
+                    playback_start_set = true;
+                }
+                const double elapsed =
+                    std::chrono::duration<double>(now - playback_start).count();
+                const double total_frames_d =
+                    video_duration_s > 0.0 ? video_duration_s * video_fps : 0.0;
+                long long expected = 0;
+                if (total_frames_d > 0.0)
+                {
+                    const long long loop_n = static_cast<long long>(elapsed / video_duration_s);
+                    expected = static_cast<long long>(elapsed * video_fps) -
+                               loop_n * static_cast<long long>(total_frames_d);
+                }
+                else
+                {
+                    expected = static_cast<long long>(elapsed * video_fps);
+                }
+                // 落后超过 2 帧：丢弃到expected（保留当前帧为目标帧）
+                int skipped = 0;
+                while (video_frame_index + 1 < expected && skipped < 2000)
+                {
+                    if (!video_capture.grab())
+                    {
+                        // grab 失败：循环回绕由下方 read 分支处理
+                        break;
+                    }
+                    ++video_frame_index;
+                    ++skipped;
+                    // 被跳过的帧也喂通道：采样率=相机帧率（重处理跳过，
+                    // 测量不跳——否则 LED 频闪×跳帧混叠毁掉频谱）
+                    if (pix_rate && video_capture.retrieve(frame) && !frame.empty())
+                    {
+                        const double skipped_t = video_time_offset_s +
+                            static_cast<double>(video_frame_index - 1) / video_fps;
+                        pix_rate_channel.measureCurrent(frame, skipped_t);
+                    }
+                }
+                if (skipped > 0)
+                    SYSTEM_LOG("frames_skipped", static_cast<double>(skipped));
+            }
             bool got = video_capture.read(frame) && !frame.empty();
             if (!got && video_loop)
             {
@@ -1636,7 +1704,8 @@ int main(int argc, char **argv)
                     }
                 }
             }
-            pix_rate_channel.measure(frame, roi, has_roi, time_s);
+            // 主路径帧同样喂通道（一次性采样；ROI 锚定更新在下方 pix 块）
+            pix_rate_channel.measureCurrent(frame, time_s);
             pix_rate_channel.estimate(time_s);
             pix_rate_channel.demodulate(time_s);
             {
@@ -1655,6 +1724,7 @@ int main(int argc, char **argv)
                         ? z_m / (f_px * r_m)
                         : 0.0;
             }
+            pix_rate_channel.updateAnchor(frame, roi, has_roi, time_s);
             pix_rate_channel.enemy_red = enemy_red;
             pix_rate_channel.t_now_ = time_s;
             SYSTEM_LOG("sweep_prior", pix_rate_channel.sweep_omega);
