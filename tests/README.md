@@ -134,6 +134,10 @@ P50≈8），不是拍脑袋。
 "误差小者"独立选，亚像素噪声就能让朝向来回翻。显示端已用时域一致消歧
 （`solveArmorPoseDisambiguated`：误差差 >3px 以误差为准，否则取与上一帧法向最近
 的解）；`armor_solve` 的 yaw 观测抖动留给 EKF 阶段处理。
+（2026-10-25 更新：旧显示端函数 `solveArmorPoseDisambiguated` 已删除（无调用点）；
+`armor_solve` 内 `solvePoseForTrack` 的歧义区选解判据同步改为"装甲板上倾安装"
+静态先验——取法向 n_y 更小（更朝上）的解，时域一致/首帧竖直/IPPE_PICK 规则一并
+移除。依据与前提边界见 docs/孪生消歧与转速跟进分析_2026-10-25.md。）
 
 ![帧 20：蓝轴朝上](evidence/problem_4_twin_flip_frame20.jpg)
 ![帧 565：蓝轴朝下](evidence/problem_4_twin_flip_frame565.jpg)

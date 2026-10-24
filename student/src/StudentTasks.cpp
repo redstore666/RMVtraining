@@ -324,64 +324,6 @@ float cameraResultingFps()
 // ==================== 任务 2：装甲板识别 ====================
 // 神经网络四点检测路线（唯一实现）：OpenVINO 推理 + 关键点解码，
 // 输出角点/大小/编号/置信度。接口契约见 StudentTasks.hpp。
-bool solveArmorPoseDisambiguated(const std::vector<cv::Point3f> &object_points,
-                                 const std::vector<cv::Point2f> &image_points,
-                                 const cv::Mat &camera_matrix,
-                                 const cv::Mat &distortion_coefficients,
-                                 cv::Mat &rvec, cv::Mat &tvec)
-{
-    static cv::Vec3d prev_n(0.0, 0.0, 0.0); // 上一帧所选解的法向
-    static bool has_prev = false;
-    std::vector<cv::Mat> rvecs, tvecs;
-    const int n = cv::solvePnPGeneric(object_points, image_points, camera_matrix,
-                                      distortion_coefficients, rvecs, tvecs, false,
-                                      cv::SOLVEPNP_IPPE);
-    if (n <= 0)
-    {
-        return false;
-    }
-    int pick = 0;
-    if (n >= 2)
-    {
-        double err[2] = {0.0, 0.0};               // 各解的重投影平均误差
-        cv::Vec3d n_vec[2] = {cv::Vec3d(0, 0, 1), // 各解法向 n = R·(0,0,1)
-                              cv::Vec3d(0, 0, 1)};
-        for (int i = 0; i < 2; ++i)
-        {
-            std::vector<cv::Point2f> proj;
-            cv::projectPoints(object_points, rvecs[i], tvecs[i], camera_matrix,
-                              distortion_coefficients, proj);
-            double sum = 0.0;
-            for (std::size_t k = 0; k < proj.size(); ++k)
-            {
-                sum += cv::norm(proj[k] - image_points[k]);
-            }
-            err[i] = sum / static_cast<double>(proj.size());
-            cv::Mat R;
-            cv::Rodrigues(rvecs[i], R);
-            n_vec[i] = cv::Vec3d(R.at<double>(0, 2), R.at<double>(1, 2), R.at<double>(2, 2));
-        }
-        if (std::fabs(err[0] - err[1]) > 3.0)
-        {
-            pick = (err[0] <= err[1]) ? 0 : 1; // 误差差距明显：以误差为准
-        }
-        else if (has_prev)
-        {
-            // 时域一致：取法向与上一帧最接近的解（连续帧间真实姿态变化远小于孪生差）
-            pick = (n_vec[0].dot(prev_n) >= n_vec[1].dot(prev_n)) ? 0 : 1;
-        }
-        else
-        {
-            pick = (std::fabs(n_vec[0][1]) <= std::fabs(n_vec[1][1])) ? 0 : 1; // 首帧：更接近竖直
-        }
-        prev_n = n_vec[pick];
-        has_prev = true;
-    }
-    rvec = rvecs[pick].clone();
-    tvec = tvecs[pick].clone();
-    return true;
-}
-
 // 检测置信度硬门槛：默认 0.7，可由 setArmorScoreThreshold() 覆盖。
 static float g_nn_min_confidence = 0.7F;
 
@@ -698,45 +640,16 @@ namespace
         return {TL, TR, BR, BL};
     }
 
-    // 按目标编号和尺寸分别保存平面 PnP 的历史法向，避免不同观测互相污染。
-    // 这只用于消解 IPPE 的双解跳变；连续帧的测量噪声仍应交给后续滤波器处理。
-    struct TrackedPoseHistory
-    {
-        cv::Vec3d normal{0.0, 0.0, 1.0};
-        cv::Point2f image_center{};
-        bool has_normal{false};
-        bool has_center{false};
-        std::chrono::steady_clock::time_point last_seen{};
-        bool has_last_seen{false};
-        // 图像域时间平均：连续帧的角点做 EMA，再解一次 PnP。
-        // 166 fps 下每帧只转 ~1.4°，相邻帧几乎是同一个姿态；逐帧解算的
-        // 2~3 cm 抖动主要来自 4 点共面相位的病态，而不是物体真的动了。
-        std::array<cv::Point2f, 4> smoothed_corners{};
-        bool has_smoothed{false};
-    };
-
+    // 平面 PnP 解算（单板）。IPPE 可能返回两个重投影相近的孪生解，
+    // 歧义区（重投影差 ≤3px）按"装甲板上倾安装"先验选解，见下方 pick 逻辑。
     bool solvePoseForTrack(const std::vector<cv::Point3f> &object_points,
                            const std::vector<cv::Point2f> &image_points,
                            const cv::Mat &camera_matrix,
                            const cv::Mat &distortion_coefficients,
-                           int target_id, ArmorSize size,
+                           int target_id,
                            cv::Mat &rvec, cv::Mat &tvec,
                            double depth_prior = 0.0)
     {
-        using TrackKey = std::pair<int, int>;
-        static std::map<TrackKey, TrackedPoseHistory> history_by_track;
-        TrackedPoseHistory &history = history_by_track[TrackKey{target_id, static_cast<int>(size)}];
-        const auto now = std::chrono::steady_clock::now();
-
-        cv::Point2f center(0.0F, 0.0F);
-        for (const cv::Point2f &point : image_points)
-            center += point * (1.0F / static_cast<float>(image_points.size()));
-        // 同 ID/尺寸的观测若突然跳到画面另一处，避免沿用旧目标的朝向历史。
-        if ((history.has_last_seen &&
-             now - history.last_seen > std::chrono::milliseconds(250)) ||
-            (history.has_center && cv::norm(center - history.image_center) > 120.0))
-            history.has_normal = false;
-
         std::vector<cv::Mat> rvecs, tvecs;
         const int count = cv::solvePnPGeneric(object_points, image_points,
                                               camera_matrix, distortion_coefficients,
@@ -801,17 +714,12 @@ namespace
         else if (count >= 2 && std::isfinite(errors[0]) && std::isfinite(errors[1]) &&
             std::fabs(errors[0] - errors[1]) <= 3.0)
         {
-            const char *mode = std::getenv("IPPE_PICK");
-            if (mode != nullptr && std::strcmp(mode, "0") == 0)
-                pick = 0;
-            else if (mode != nullptr && std::strcmp(mode, "1") == 0)
-                pick = 1;
-            else if (mode != nullptr && std::strcmp(mode, "nohist") == 0)
-                pick = std::fabs(normals[0][1]) <= std::fabs(normals[1][1]) ? 0 : 1;
-            else if (history.has_normal)
-                pick = normals[0].dot(history.normal) >= normals[1].dot(history.normal) ? 0 : 1;
-            else
-                pick = std::fabs(normals[0][1]) <= std::fabs(normals[1][1]) ? 0 : 1;
+            // 上倾先验消歧：实车装甲板朝车外侧斜向上安装（sp_vision_25 参考实现
+            // 硬编码 ~15° 安装角即此前提），孪生对在歧义区表现为法向 n_y 变号——
+            // 相机系 y 朝下，上倾解的 n_y 更小，直接取之，不做时域记忆。
+            // 前提边界：板接近竖直时两侧 n_y 都 ≈0，先验退化；云台大俯仰时
+            // 相机系的"上"偏离重力系，需俯仰补偿后判据才成立。
+            pick = normals[0][1] <= normals[1][1] ? 0 : 1;
             if (!std::isfinite(errors[static_cast<std::size_t>(pick)]))
                 pick = best_error_index;
             if (std::getenv("IPPE_DEBUG") != nullptr)
@@ -826,12 +734,6 @@ namespace
 
         rvec = rvecs[static_cast<std::size_t>(pick)].clone();
         tvec = tvecs[static_cast<std::size_t>(pick)].clone();
-        history.normal = normals[static_cast<std::size_t>(pick)];
-        history.has_normal = true;
-        history.image_center = center;
-        history.has_center = true;
-        history.last_seen = now;
-        history.has_last_seen = true;
         return true;
     }
 
@@ -1185,13 +1087,13 @@ std::vector<ArmorPose> armor_solve(const std::vector<ArmorDetection> &detections
                 depth_prior = fy * plate_h / h_px;
         }
 
-        // PnP：4 个共面点。IPPE 可能返回两个相近重投影误差的姿态解；
-        // 按目标编号/尺寸维护历史法向，避免逐帧在两个解之间跳变。
+        // PnP：4 个共面点。IPPE 可能返回两个相近重投影误差的姿态解，
+        // 歧义区按"装甲板上倾安装"先验选解（见 solvePoseForTrack）。
         cv::Mat rvec, tvec;
         const bool ok = solvePoseForTrack(object_points, image_points,
                                           camera.camera_matrix,
                                           camera.distortion_coefficients,
-                                          det.target_id, det.size, rvec, tvec,
+                                          det.target_id, rvec, tvec,
                                           depth_prior);
         if (!ok)
         {

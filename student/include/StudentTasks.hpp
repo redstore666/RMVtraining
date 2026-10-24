@@ -25,17 +25,6 @@ float cameraResultingFps();
 void drawDetections(cv::Mat &image, const std::vector<ArmorDetection> &detections);
 bool get_pic(cv::Mat &pic);
 
-// 显示用位姿解算（含平面目标孪生解消歧）：平面装甲板的 IPPE 存在"孪生对"
-// （互为镜像倾角/朝向、重投影差常 <0.5px），逐帧独立选择会让坐标轴与 yaw 来回翻。
-// 实测（7 帧）：孪生两解位置差 ≤8.5mm、装甲板 yaw 差 5~50°（典型 10~30°）。
-// 消歧规则：误差差 >3px 以误差为准；否则取法向与上一帧最接近的解（时域一致）；
-// 首帧取更接近竖直者。armor_solve 未使用本函数（其 yaw 观测在 EKF 阶段处理）。
-bool solveArmorPoseDisambiguated(const std::vector<cv::Point3f> &object_points,
-                                 const std::vector<cv::Point2f> &image_points,
-                                 const cv::Mat &camera_matrix,
-                                 const cv::Mat &distortion_coefficients,
-                                 cv::Mat &rvec, cv::Mat &tvec);
-
 // 任务 2：神经网络四点检测（唯一实现）。YOLO 关键点检测模型直接输出
 // 装甲板四角点，并解出颜色（敌方过滤）、编号与大小板类型；每个结果包含
 // 四个按顺时针排列的图像角点、装甲板尺寸、目标编号和置信度。
