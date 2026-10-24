@@ -93,15 +93,15 @@ bool init_camera(void **handle, bool verbose)
     warn(MV_CC_SetFloatValue(*handle, "Gain", 16.0f), "Gain");
     warn(MV_CC_SetFloatValue(*handle, "AcquisitionFrameRate", 160.0f), "AcquisitionFrameRate");
 
-    // PixelFormat 关键：失败就回滚整个 init
+    // PixelFormat：优先 BayerRG8（车上相机格式）。二号机等其它相机可能
+    // 不支持——设置失败**不再回滚**，读出相机当前格式，转换层按实际格式
+    // 处理（实测二号机报"像素转换失败"的根源就是硬编码 BayerRG8）。
     if (MV_CC_SetEnumValue(*handle, "PixelFormat", PixelType_Gvsp_BayerRG8) != MV_OK)
     {
+        MVCC_ENUMVALUE cur{};
+        MV_CC_GetEnumValue(*handle, "PixelFormat", &cur);
         if (verbose)
-            printf("像素格式设置失败，回滚\n");
-        MV_CC_CloseDevice(*handle);
-        MV_CC_DestroyHandle(*handle);
-        *handle = nullptr;
-        return false;
+            printf("[cam] BayerRG8 不支持，沿用相机当前格式 0x%x\n", cur.nCurValue);
     }
 
     ret = MV_CC_StartGrabbing(*handle);
@@ -252,10 +252,55 @@ bool get_pic(cv::Mat &pic)
     cvt.pDstBuffer = bgr_buffer.data();
     cvt.nDstBufferSize = bgr_buffer.size();
 
-    ret = MV_CC_ConvertPixelType(s_handle, &cvt);
-    if (ret != MV_OK)
+    const unsigned int src_pt = frame_info.enPixelType;
+    static unsigned int s_logged_pt = 0xFFFFFFFF;
+    if (s_logged_pt != src_pt)
     {
-        printf("像素转换失败 0x%x\n", ret);
+        printf("[cam] 实际像素格式 0x%x（首次/变更时打印）\n", src_pt);
+        s_logged_pt = src_pt;
+    }
+
+    bool converted = false;
+    if (src_pt == PixelType_Gvsp_BGR8_Packed)
+    {
+        // 已经是 BGR：直接包 Mat
+        memcpy(bgr_buffer.data(), raw_buffer.data(),
+               std::min<size_t>(bgr_buffer.size(), frame_info.nFrameLen));
+        converted = true;
+    }
+    else if (src_pt == PixelType_Gvsp_Mono8)
+    {
+        // 黑白机：灰度 Mat → BGR（颜色掩模会把灰度判成无色——蓝色通道判据
+        // 在灰度图上 B=G=R 不满足 B>G+40，掩模全黑；这里的处理是复制到三
+        // 通道，亮条仍可通过亮度阈值识别——若现场是黑白机需要改掩模判据）
+        cv::Mat gray(frame_info.nHeight, frame_info.nWidth, CV_8UC1, raw_buffer.data());
+        cv::Mat bgr(frame_info.nHeight, frame_info.nWidth, CV_8UC3, bgr_buffer.data());
+        cv::cvtColor(gray, bgr, cv::COLOR_GRAY2BGR);
+        converted = true;
+    }
+    else
+    {
+        // Bayer / 其它：SDK 转换，先 BGR8 再 RGB8（RGB8 成功则再换序）
+        ret = MV_CC_ConvertPixelType(s_handle, &cvt);
+        if (ret == MV_OK)
+        {
+            converted = true;
+        }
+        else
+        {
+            cvt.enDstPixelType = PixelType_Gvsp_RGB8_Packed;
+            ret = MV_CC_ConvertPixelType(s_handle, &cvt);
+            if (ret == MV_OK)
+            {
+                cv::Mat rgb(frame_info.nHeight, frame_info.nWidth, CV_8UC3, bgr_buffer.data());
+                cv::cvtColor(rgb, rgb, cv::COLOR_RGB2BGR);
+                converted = true;
+            }
+        }
+    }
+    if (!converted)
+    {
+        printf("像素转换失败 0x%x（源格式 0x%x）\n", ret, src_pt);
         pic.release();
         return false;
     }
