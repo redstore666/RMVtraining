@@ -134,6 +134,10 @@ P50≈8），不是拍脑袋。
 "误差小者"独立选，亚像素噪声就能让朝向来回翻。显示端已用时域一致消歧
 （`solveArmorPoseDisambiguated`：误差差 >3px 以误差为准，否则取与上一帧法向最近
 的解）；`armor_solve` 的 yaw 观测抖动留给 EKF 阶段处理。
+（2026-10-25 更新：旧显示端函数 `solveArmorPoseDisambiguated` 已删除（无调用点）；
+`armor_solve` 内 `solvePoseForTrack` 的歧义区选解判据同步改为"装甲板上倾安装"
+静态先验——取法向 n_y 更小（更朝上）的解，时域一致/首帧竖直/IPPE_PICK 规则一并
+移除。依据与前提边界见 docs/孪生消歧与转速跟进分析_2026-10-25.md。）
 
 ![帧 20：蓝轴朝上](evidence/problem_4_twin_flip_frame20.jpg)
 ![帧 565：蓝轴朝下](evidence/problem_4_twin_flip_frame565.jpg)
@@ -144,8 +148,9 @@ P50≈8），不是拍脑袋。
 
 - ✅ 相机取流稳定（断线重连、热插拔、退出释放）；
 - ✅ 内参入配置（2 号机，MATLAB，均值误差 0.07px）；⚠️ 外参待提供；
-- ✅ 检测：实拍红蓝各 100% 检出，单帧 18~25ms（640 输入；512 可提速 ~30%，
-  但远处角点抖动增大，已作为 `RMV_DET_SIZE` 选项保留，默认 640）；
+- ✅ 检测：实拍红蓝各 100% 检出，单帧 18~25ms（640x640 输入）；默认已切
+  `640x480`（同比例、计算量 -25%，实拍 5 帧 A/B 距离差 ≤0.8%、角点差 1~4px），
+  `RMV_DET_SIZE=640` 可回到正方形输入；`512x384` 再快 43% 但远距召回明显下降；
 - ✅ PnP：重投影误差 1.6~1.8px，距离帧间抖动 ~1cm；
 - ✅ ctest 8/8 通过（camera_grab 需接相机，本机跳过）；
 - ✅ EKF：见 `docs/EKF设计说明.md` 与 `docs/实验报告.md` §4；
@@ -195,14 +200,138 @@ P50≈8），不是拍脑袋。
 ./build/test_ekf_pipeline                 # 打印 crc 计数与逐帧协议字段
 ```
 
+真数据回放用 `tests/test_camera_playback`（不在 ctest 里，需要视频文件）：
+
+```bash
+./build/test_camera_playback tmp/v4.avi --red --ekf --headless                 # 汇总
+./build/test_camera_playback tmp/v4.avi --red --ekf --headless --only-id 3     # 只看某编号
+./build/test_camera_playback tmp/v4.avi --red --ekf --headless --trace         # 逐帧诊断
+./build/test_camera_playback tmp/v4.avi --red --ekf --csv build/v4.csv         # 导出观测/EKF
+```
+
+俯视图（上帝视角）调试：把 EKF 结果画成一张 800x800 的图（风格见 `tmp/example.jpg`），
+用来一眼看出"状态和实测板对不对得上、瞄准点在哪、开火判据还差多少度"：
+
+```bash
+./build/test_ekf_viewer                                   # 合成旋转目标，窗口实时看
+./build/test_ekf_viewer --no-show --out build/topdown_demo  # 无显示环境：逐帧导出 PNG
+./build/test_ekf_viewer --world --range 1.6 --ppm 200      # 固定原点（云台）视图
+./build/test_camera_playback tmp/v4.avi --red --ekf --topdown            # 真视频 + 俯视图窗口
+./build/test_camera_playback tmp/v4.avi --red --ekf --headless \
+        --topdown-out build/topdown_v4                    # 真视频：俯视图逐帧落盘
+```
+
+图上元素：红点 = EKF 车体中心；四根蓝条 = 用 `body_yaw/R` 推出来的模型装甲板；
+黄边 = 当前瞄准板；绿点/绿条 = 本帧 PnP 实测板心（和蓝条错开就是视觉抖动或状态偏差）；
+品红十字 + 虚线 = 预测瞄准点与从云台原点出发的瞄准射线；灰虚线 = 云台当前光轴，
+两根线的夹角就是 `fire_allowed` 里的 yaw 误差。左上角打印状态机、中心/速度/角速度/R、
+瞄准槽位与距离、观测数/NIS/观测噪声，底部是图例与比例尺（`--world` 固定原点时
+按 `--ppm` 缩放，目标超出视野会自动缩小；跟随模式则按车体大小自动缩放）。
+
+实现上分成两层：`include/TopDownView.hpp` + `src/TopDownView.cpp`（只读
+`TrackerDiagnostics`/`PredictionResult`/`EKF State`，不碰跟踪逻辑，库名 `topdown_view`），
+两个调用方分别是 `tests/test_ekf_viewer.cpp`（合成真值）和 `test_camera_playback --topdown`。
+截图：![跟随模式](../docs/figures/topdown_follow.png)
+![固定原点](../docs/figures/topdown_world.png)
+![真视频回放](../docs/figures/topdown_replay.png)
+![v4 中段（修复后）](../docs/figures/topdown_v4_fixed.png)
+
+坐标映射只有一处：`px = w/2 - (wy-cy)*ppm`、`py = h/2 - (wx-cx)*ppm`，即画布向上 = +x（前方）、
+向左 = +y（左方），车体自转在图上呈逆时针。
+
+### 多目标：同一帧里两台车都跟（`--multi`）
+
+单目标链路只会"锁一辆车"，同场有两台时会一直跟着准星最近的那台。`--multi` 把同一帧的
+观测按几何分给多辆车，每辆各跑一个 `RotatingArmorTracker`，俯视图把人看着的那台画成亮色、
+其它车画成灰紫色（图例里的 `other target`）：
+
+```bash
+./build/test_camera_playback tmp/v4.avi --red --ekf --multi --headless       # 两辆都跟
+./build/test_camera_playback tmp/v4.avi --red --ekf --multi --topdown        # 窗口里同时看
+./build/test_camera_playback tmp/v4.avi --red --ekf --multi --multi-primary 3 # 强制以 3 号板那辆为主
+./build/test_multi_target                                                    # 合成两车用例（ctest: ekf_multi_target）
+```
+
+分组用的是**径向一致性**：已锁定的车，任何一块板都落在半径 R 上，所以用
+`| |p-c| - R |` 当代价——它对目标转到哪个角、omega 估计准不准都不敏感；还没锁定的车只有
+"上次观测到的板位"可用，就用直线距离。新车的建立要连续两帧都解释不了才做，避免单帧野点
+造出幽灵车；两辆车的中心靠得太近（< `merge_gate_m`）会合并成一辆。v4 全量：累计新建 2 辆
+（一辆静止大板 + 一辆在动的小板），中段 `[multi] targets=2`。
+局限：目标长时间离开视野再回来会重新建一辆（`createdTracks()` 会累计），这时俯视图里
+新车的轨迹是空的。
+
+![多目标：两台车同时画](../docs/figures/topdown_multi.png)
+
+连续回放（v4 帧 660–980，两台车同框）：
+[topdown_multi_seq.mp4](../docs/figures/topdown_multi_seq.mp4)。重新生成：
+
+```bash
+./build/test_camera_playback tmp/v4.avi --red --ekf --headless --multi \
+    --start 660 --max-frames 320 --topdown-out build/tdmulti_seq
+ffmpeg -y -pattern_type glob -i 'build/tdmulti_seq/t*.png' -r 30 \
+    -c:v libx264 -pix_fmt yuv420p docs/figures/topdown_multi_seq.mp4
+```
+
+`--trace` 每帧打印 `phase`（0=Idle/1=Collecting/2=Tracking）、锁定编号、累计接收
+更新数、本帧拒绝数、丢帧数、重锁次数、状态量 `omega/R/yaw`、最近 NIS、
+`why`（最近一次拒绝原因）与 `stab`（本帧 `Stable/Unstable` 的判定理由：
+`stable`/`stale`/`few_updates`/`phase`）。调 EKF 时先看 `stability`，
+它比"板残差"更能指出问题在观测还是状态。
+
+几个与实拍相关的默认值（都在 `TrackerConfig`）：`bootstrap_updates=10`（锁定期前
+10 次更新不做 NIS 否决）、`stale_after_s=0.10`（新鲜度按秒判，不按帧数）、
+`contradiction_check=false`（声明反驳在真数据上会误杀，默认关）。
+
+### 转速自判（`omega` 由数据决定，不靠调用方声明）
+
+早期版本要求调用方在 `EkfInitPrior::spin` 里声明 `Static` / `Spinning`，理由是
+"静止目标的 `omega=0` 从数据里学不出来"。实拍证明反例：v4 静态目标上法向在
+±45° 折叠边界附近来回翻，解缠后是每帧 +5° 的锯齿，任何"逐帧微分"都会给出
+假高速旋转（实测最小二乘 16 rad/s、Theil-Sen −10 rad/s），模型整块板跟着转，
+就是"圆心偏了"的观感。现在改成三件事：
+
+1. **窗口斜率**：取最近 `rate_window_s=0.35 s` 的样本，法向按 `2π/N` 折叠解缠，
+   斜率用 Theil-Sen（点对斜率中位数，对 ≤30% 野值免疫），误差用 MAD（不低于
+   `rate_sigma_floor_rad_s=0.15`）。超过 `rate_max_sigma_rad_s=2.0` 直接弃用。
+2. **换板续接**：最近邻关联失败时，若观测与上一采样法向差是 `2π/N` 的整数倍
+   （四块板共享车体朝向），就接上窗口。快速自转（8 rad/s，每 30 帧换一块板）
+   靠这一条保活；v4 的斜置副板法向差 26°，不会被误接。
+3. **双路证据 + 反证据**：同一窗口再算一路"板相对车心的方位角"斜率（每个样本
+   用它自己的车心，平移不产生方位角变化）；两路差超过 `max(1.5, 0.5|slope|)`
+   就当这窗说不清转速、不更新；超过 `rate_decay_after_s=0.6 s` 拿不出斜率，
+   就喂一次 `omega=0` 的弱伪量测（sigma 2.0），把 omega 按住在 0。
+
+`--trace` 里的 `wobs=±n=` 现在写成 `n=本帧斜率样本数/窗口样本数`，`rate_window_samples=0`
+表示这一帧根本没有可续接的观测（不是拟合失败）。`mode=static/trans/spin` 是
+`TrackerDiagnostics::motion`：每帧从状态量读出来的运动类型（`|omega| >= static_rate_rad_s`
+→ spin；否则 `|v| >= motion_translating_speed_m_s` → trans；否则 static），
+俯视图 HUD 第三行也会显示同一个词。它只是"现在认为车在干什么"，说明可信度的是
+`rate_obs_sigma_rad_s`，两者别混。回归测试见
+`test_rotating_armor_tracker` 的 G 组（2/4/6/8 rad/s）与 H 组（静止/平移/慢转/
+云台抖动，判据是"omega 落在真值附近"而不是"命中率"）。H 组最后一个用例把
+`sim::Rig::shake_sigma_rad` 设成 0.03 rad：观测用"真实"云台姿态生成，
+EKF 拿到的却是"报告"姿态，两者之差就是 v1 的手持抖动，要求 omega 仍被压在 0
+（实测 −0.01 rad/s）。顺带验过"用实测法向修相位"不是 v1 的杠杆：`--phase-yaw`
+把预测中位从 0.0807 拉到 0.0961 m（p90 从 0.230 降到 0.199），因为残差来自
+世界系位置本身，不是相位。
+
+**原理边界**：只给图像、不给云台 IMU 时，"镜头被人手晃动"与"目标自转"在世界系里
+是同一个转动，任何估计器都无法区分。v1（手持、近处一台车+远处一台车）实测：
+修前 omega 发散到 10 rad/s，修后稳定在 |omega| ≲ 0.6 rad/s；残差 0.08 m 中位主要
+来自抖动本身，上实车接了云台角就自动消失。真要再压，就得用画面里另一台静止车
+当参照做共模补偿，或直接信 IMU。
+
 三条从这个环节得到的教训（数值见 `docs/实验报告.md` §4.6）：
 
 1. **单帧拟合残差不能判收敛**。板残差 4~8 mm 时车体中心仍可能差 0.3~0.43 m，
    验收指标必须用状态误差和"冻结观测纯外推误差"。
-2. **"转/不转"必须显式声明，且要能被观测反驳**。`omega=0` 冷启动在 8 个种子上
-   只有 5 个能锁对；旋转声明用在静止目标上是静默失败（状态全错、残差正常）。
-3. 声明错了要用**纯外推**暴露，而不是滤波残差：有观测时 yaw 状态会把相位吸收掉，
-   滤波残差看起来同样正常。
+2. **"转/不转"这件事，低帧率下数据本身说了不算**：166 fps 下 `omega=10 rad/s`、
+   `R=0.35 m` 的切向位移只有 2 cm/帧，与观测噪声同量级。要么用窗口证据 + 反证据
+   （现在的做法），要么显式声明；声明错了要靠纯外推暴露，不能看滤波残差——
+   有观测时 yaw 状态会把相位吸收掉，NIS 看起来照样"自洽"（实测 10 rad/s 时 NIS≈2）。
+3. 门限锁死要有出路：连续拒绝 ≥5 帧要能双板重定，单板重锚只在"上一帧一次更新都
+   没进去"时触发（否则单帧离群观测会被当成重锚候选，`test_rotating_armor_tracker`
+   的 D 组就是守这条）。
 
 调试提示：`/tmp` 在不同 `bash` 调用之间不保留，把 heredoc 写文件、编译、运行写在
 同一次调用里；探针文件放 `.workbuddy/`（已被 `.gitignore` 忽略）。

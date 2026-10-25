@@ -60,10 +60,13 @@ Web Debug 在 `http://127.0.0.1:8080`。相机→云台外参尚未标定，`cam
 | `test_batch 目录 --red` | 批量检出率评估（调参/回归用） |
 | `test_solve 图 --red` | 检测→PnP 全链路，打印距离/角度/重投影误差 |
 | `test_camera` | 相机取流自检（ctest camera_grab） |
+| `test_ekf_viewer [--world] [--out DIR]` | EKF 俯视图（上帝视角）演示：红点车心 + 四块模型板 + 绿点实测板 + 瞄准射线；`--no-show --out DIR` 无显示环境导出 PNG |
+| `test_camera_playback v.avi --red --ekf --topdown` | 视频回放 + 俯视图窗口（`--topdown-world` 固定原点、`--topdown-out DIR` 逐帧落盘） |
+| `test_camera_playback v.avi --red --ekf --multi` | 多目标：同一帧里的板按几何分给多辆车，各自跑 EKF（`--multi-primary N` 指定主目标） |
 | `calib_capture` / `calibrate_intrinsics` | 标定采集 / 内参解算 |
 
 常用环境变量（检测器）：`RMV_DET_MODEL=yolo11` 切备选模型；
-`RMV_DET_SIZE=512` 切小输入提速（远处角点抖动增大，默认 640）；
+`RMV_DET_SIZE` 切换推理输入（默认 `640x480`，与 4:3 画面同比例；`640` 回到正方形输入，`512` 再提速但远处角点抖动增大）；
 `RMV_DET_DEVICE=GPU/AUTO` 切推理设备（编译失败自动回退 CPU）。
 
 ## 检测路线
@@ -99,5 +102,5 @@ Web Debug 在 `http://127.0.0.1:8080`。相机→云台外参尚未标定，`cam
 2. EKF 的车体 yaw 只能确定到 `2*pi/N`（N 块板几何全同，属模型固有对称性），
    详见 [EKF 设计说明](docs/EKF设计说明.md)。
 3. EKF 是单半径、等高模型；前哨站交替高度/半径的目标需按槽位扩展状态。
-4. 512 输入在远处（约 2m）角点抖动明显，默认值保持 640。
+4. 推理输入默认 `640x480`（与画面同比例，省掉 25% 无效卷积），`640` 与 `512` 模型都保留；合成素材 `synth_small_1` 的绝对距离与文档预期不符（宽高比不自洽），属素材问题。
 5. 实拍素材目前只有哨兵单目标，多目标场景待补素材回归。

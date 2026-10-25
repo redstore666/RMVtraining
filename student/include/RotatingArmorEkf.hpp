@@ -29,6 +29,10 @@ struct ArmorObservation {
     double sigma_position_m{0.01};
     bool has_world_yaw{false};
     double world_yaw_rad{0.0};
+    // 本帧同一目标一共看到几块板。只看到一块时 radius_diff(l) / height_diff(h)
+    // 完全不可观测（只能观测到 r+l 或 r），此时必须把这两维冻住，否则它们会
+    // 随机游走并把半径误差吸收进去（实测静止真值上 R 漂 3 cm）。
+    int plates_visible{1};
 };
 
 // 角速度先验的声明方式。
@@ -53,6 +57,11 @@ enum class SpinPriorKind : std::uint8_t {
     Static,          // 显式声明目标不转：要求 yaw_rate_prior_rad_s == 0（硬约束：
                      // omega 的初始方差与过程噪声均为 0，目标开始转时必须重新锁定）
     Spinning,        // 显式声明目标在转：要求 yaw_rate_prior_rad_s != 0（含符号）
+    // 不知道转不转：先验按给定的 yaw_rate_prior_rad_s ± yaw_rate_sigma_rad_s 装进去，
+    // 之后由 updateYawRate() 用"窗口化的板面法向斜率"持续修正。这是上层
+    // （RotatingArmorTracker）在实拍里真正使用的模式：转不转由数据说话，
+    // 而不是由初始化那一帧的一句声明决定。
+    Unknown,
 };
 
 // 初始化先验。
@@ -71,6 +80,10 @@ struct EkfInitPrior {
     double yaw_sigma_rad{0.2};         // 仅"有板面法向"时生效；无相位先验时强制为 pi
     double yaw_rate_sigma_rad_s{3.0};  // spin == Spinning 时生效；Static 时强制为 0
     double radius_sigma_m{0.05};
+    // 把半径钉在 radius_m 上：单板观测下 (中心, 半径) 的退化会让位置更新把 R
+    // 一点点拉走（实拍 v4 旋转目标 R 从 0.25 漂到 0.147，中心随之跑 1.4 m），
+    // 所以默认不让位置更新动 R；需要在线估半径时用 updateRadius/pair 更新。
+    bool radius_fixed{false};
 };
 
 enum class EkfInitStatus : std::uint8_t {
@@ -91,6 +104,24 @@ struct EkfConfig {
     // 默认值即 RotatingArmorModel.hpp 里那组经过收敛测试的量级。
     ProcessNoiseConfig process{};
     int plate_count{4};
+    // 是否允许 radius_diff / height_diff 参与更新（消融开关）。
+    bool pair_offset_enabled{true};
+    // 球坐标量测（借鉴 sp_vision_25 target.cpp:187-222）。默认关：见 docs/借鉴sp_vision25.md
+    // 的回归表——打开后 v4 从 90.0 降到 86.1 px，但合成 F/G 与首帧契约的
+    // 静态半径会退化（瞄准点在高速自转下落到相邻板）。
+    bool spherical_measurement_enabled{false};
+    // 机动自适应过程噪声：用新息(NIS)当"机动探测器"。快速平移/自转时 NIS 抬高，
+    // 就把速度/角速度的过程噪声放大（跟得上瞬时变化）；平稳时收回 1.0
+    // （半径和静态中心靠量测平均，不抖）。这是"平均性 vs 瞬时性"的折中。
+    bool adaptive_process_noise{true};
+    double adaptive_nis_floor{9.0}; // 3 维量测时 NIS 的期望值就是 3；取 3 倍才不会被正常噪声trigger   // NIS 到这个量级算"模型跟得上"
+    double adaptive_scale_max{80.0};
+    double adaptive_alpha{0.35};      // 每次更新的 EMA 系数
+    double adaptive_decay{0.990};     // 每帧预测的缓慢回落
+    // 角度量测残差门（updateFaceYawForSlot）：|残差| 超过它判为槽位关联错误
+    // （换板歧义帧），拒收。默认 60°（半槽位 45° 留裕量）。大 Q 下这种残差
+    // 会把 w 拽飞（实测单帧冲 -41 rad/s）。
+    double face_yaw_max_residual_rad{1.05};
 };
 
 class RotatingArmorEkf {
@@ -98,8 +129,16 @@ public:
     RotatingArmorEkf() = default;
     explicit RotatingArmorEkf(const EkfConfig& config);
 
+    // 覆盖配置（过程噪声、板数）。只改后续 predict/update 用的参数，不动当前状态。
+    void setConfig(const EkfConfig &config) { config_ = config; }
+
     // 回到"未初始化"：状态与协方差清零，需要重新 initialize()。
     void reset();
+
+    // 掉线快照续接：把掉线前一刻的状态/协方差原样装回去（跳过重新收集样本）。
+    // 只用于"同一编号、间隔很短又出现"的情形，由上层判定是否该续接。
+    bool restore(const State &state, const Covariance &covariance, bool phase_resolved,
+                 bool spin_pinned);
 
     bool initialized() const { return initialized_; }
 
@@ -107,6 +146,7 @@ public:
     // false 表示走的是降级路径（相位靠 omega 先验 + 后续观测收敛），
     // 此时 yaw 需要多帧才可信，调用方不应据此直接开火。
     bool phase_resolved() const { return phase_resolved_; }
+    bool spinPinned() const { return spin_pinned_; }
 
     // 首帧锁定。成功时状态正好与这一帧观测一致（残差为 0），
     // 因此不需要再补一次 update()。失败时不改变滤波器状态。
@@ -117,10 +157,70 @@ public:
     // 合法的空推进（同一时间戳的重复帧），返回 true。
     bool predict(double dt);
 
+    // 当前机动放大倍数（1.0 = 不放大），只用于诊断。
+    double maneuverScale() const { return maneuver_scale_; }
+
     // 用一帧观测做校正。slot 由调用方给出（本步不做关联）。
     // 输入非法、未初始化、或内部出现非有限值时返回 false；后者会同时 reset()，
     // 让调用方重新锁定，而不是继续把 NaN 传播出去。
     bool update(const ArmorObservation& observation, int plate_slot);
+    // 旧的笛卡尔 3 维量测（球坐标版本的对照实现）。
+    bool updateCartesian(const ArmorObservation& observation, int plate_slot);
+    // 用新息驱动机动自适应过程噪声（见 EkfConfig::adaptive_process_noise）。
+    void noteInnovation(double nis);
+
+    // 用"板面法向的世界朝角"直接观测车体 yaw 的一步更新。
+    //
+    // 四块板的法向相差 2pi/N，所以 yaw 只能确定到 2pi/N（4 板时 90°）；
+    // 这条观测就是把该周期折叠掉的残差 h = fold(theta - psi, 2pi/N) 送进滤波器。
+    // 好处：不依赖"这一帧看到的是哪一块板"——换板时折叠加起来永远是 0，
+    // 所以位置关联出错也不会把相位带歪。sigma_rad 取值见上层配置。
+    bool updatePhase(double measured_world_yaw, double sigma_rad);
+
+    // 按槽位一致的相位更新：调用方已经知道这块板被分到了哪个槽位。
+    //
+    // 与上面折叠版的关键区别：目标相位是 measured_world_yaw + slot * 2pi/N，
+    // **不做 2pi/N 折叠**。折叠版只能修 45° 以内的抖动，永远改不了"哪块板是
+    // slot 0"；而位置更新没有折叠、能把 yaw 推过 45° 边界，于是两者在槽位分配
+    // 上互相拉扯——实拍 tmp/v4.avi 上表现为 yaw 单帧跳 140°~215°
+    // （f=199 -1.62 -> f=200 +2.13），也就是"转一部分就卡回去"。
+    //
+    // 这里是"按槽位一致"的那个写法：位置更新用 best_slot，相位更新也用同一个
+    // best_slot，两者说的是同一件事，不再打架。残差仍做 wrapToPi 折叠到
+    // ±pi（cos/sin 的固有周期），但 90° 的四板歧义由 slot 明确消除。
+    bool updatePhaseForSlot(double measured_world_yaw, double sigma_rad, int plate_slot);
+
+    // 参考实现移植（sp_vision_25 target.cpp:202-222）：朝向角直接量测。
+    // face_world_yaw = 观测到的板外法向 world yaw（= 槽位相位 + pi）；
+    // 残差 = fold(face − pi − slot·(2pi/N) − a, ±pi)，槽位歧义由 plate_slot
+    // 消除、换板不重置。与 updatePhaseForSlot 的区别：换算（−pi、−slot·period）
+    // 收进滤波器，调用方只给观测原始值，不存在槽位奇偶陷阱。
+    bool updateFaceYawForSlot(double face_world_yaw, double sigma_rad, int plate_slot);
+
+    // 车体中心直接量测（同帧两块板的中点）。状态里中心三维在 0/2/4 行，
+    // H = [e0; e2; e4]，与位置量测共用同一份协方差。
+    bool updateCenter(const Eigen::Vector3d& measured_center_m, double sigma_m);
+
+    // 用"一段时间窗口里的板面法向斜率"直接观测车体角速度（H = e7）。
+    //
+    // 为什么单独开这条观测通道：166 fps 下 10 rad/s × R=0.3 m 的切向位移只有
+    // 2 cm/帧，和 PnP 噪声同量级——单帧位置观测里"高速自转"与"静止+抖动"
+    // 不可分辨（实拍 v1 就是这样把静止目标的 omega 推到 10 rad/s 的）。
+    // 但法向序列在 0.3 s 窗口上会累积出 60° 的真实转角，远大于法向噪声；
+    // 把这条斜率当伪量测送进来，角速度就由数据决定，且窗口说"没转"时能把
+    // omega 拉回 0，不需要调用方事先声明。
+    bool updateYawRate(double measured_rad_s, double sigma_rad_s);
+
+    // 用"同一帧两块板的弦长"直接观测半径：相邻两板 |n_i-n_j| = sqrt(2)，
+    // 弦长 = R*|n_i-n_j|，所以 R = chord / |n_i-n_j|，不需要圆拟合。
+    // 静止目标只露一块板时 R 不可辨识（中心会跟着 R 平移，观测依然自洽），
+    // 这条观测是"两块板同时可见"时唯一的 R 来源。
+    bool updateRadius(double measured_radius, double sigma_radius);
+
+    // 几何通道的半径修正：同帧两块板解出的弦长比位置残差可信得多。
+    // freeze_radius 时位置更新每帧都会把 R 拉回 radius_prior_m_，所以这里
+    // 连同先验一起改（之后的 update 才会守住新值）。
+    bool setRadius(double radius_m);
 
     // 该观测在当前先验下的新息平方和（马氏距离）NIS = r' S^-1 r，S = H P H' + R。
     // 上层用它做离群点拒绝：3 维观测下 NIS ~ chi2(3)，99.5% 分位约 11.34。
@@ -129,6 +229,39 @@ public:
                        double& nis) const;
 
     const State& state() const { return state_; }
+
+    // 直接平移车体中心：用于"相位更新后把中心反锚回去"。
+    // 单块板可见时 (center, yaw) 有一个规范自由度（绕着板心转），
+    // 只改 yaw 会把板挪走、再被位置更新拉回来，两个更新互相打架；
+    // 改完 yaw 把中心平移回去、让那块板留在原地，等价于"沿可观方向更新"。
+    // 平移车体中心（瞄准反锚用）。状态排布是 [cx, vx, cy, vy, z, vz, yaw, w, r]，
+    // 中心三维在 0/2/4 行，不是 head<3>()（那会把位移加到 vx 上）。
+    void shiftCenter(const Eigen::Vector3d& delta) {
+        state_(0) += delta.x();
+        state_(2) += delta.y();
+        state_(4) += delta.z();
+    }
+
+    // 把车体相位整体转 delta（换板重绑用）。这是状态空间沿 theta 轴的平移，
+    // 误差坐标不变，所以协方差不用动。
+    void rotatePhase(double delta) { state_(6) = wrapAngle(state_(6) + delta); }
+    // 由多秒窗口批处理直接给定转速：窗口拟合的 ω 比逐帧差分稳得多。
+    void setRate(double omega) { state_(7) = omega; }
+
+    // 外部强量测注入前的协方差地板：长序列的衰减伪量测/窗口弱证据会把
+    // omega 的方差压得过小（滤波器过度自信，新量测吃不进去——实测注入
+    // 增益只剩 0.05，5 次 -8 rad/s 只把 ω 挪了 -0.95）。注入通道用它把
+    // P(7,7) 抬到量测信息量的量级再做量测更新。
+    void inflateOmegaCovariance(double variance_floor)
+    {
+        covariance_(7, 7) = std::max(covariance_(7, 7), variance_floor);
+    }
+
+    // 角速度量测（EKF 的第 5 维量测）：只有 yaw_rate 这一维参与，H = e7。
+    // 与 updatePhase 同样用 Joseph 形式，保证协方差仍然半正定。
+    // 用它而不是 setRate()：setRate 是硬写，会把 omega 的不确定度信息丢掉，
+    // 合成 F/G/H 就是这么失准的。
+    bool updateRate(double measured_rad_s, double sigma_rad_s);
     const Covariance& covariance() const { return covariance_; }
     const EkfConfig& config() const { return config_; }
 
@@ -137,6 +270,11 @@ private:
     State state_{State::Zero()};
     Covariance covariance_{Covariance::Zero()};
     bool initialized_{false};
+    // 半径钉死：位置更新不动 R（见 EkfInitPrior::radius_fixed 的说明）。
+    bool radius_fixed_{true};
+    // 机动放大倍数（adaptive_process_noise 用），跨帧保持。
+    double maneuver_scale_{1.0};
+    double radius_prior_m_{0.0};
     bool phase_resolved_{false};
     // spin == Static 时置位：角速度的初始方差与过程噪声都被钉成 0，使它成为硬约束。
     bool spin_pinned_{false};

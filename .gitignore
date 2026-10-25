@@ -45,3 +45,9 @@ __pycache__/
 
 # 本地备份（tar 快照，勿提交）
 /backups/
+
+# 回放视频备份（tmp/ 可能被清理，这里留一份；体积大不入库）
+data/replay/
+
+# 实拍回放素材（134 MB 六段 avi，回放工具按路径读；不入库，本地各放各的）
+tests/resources/

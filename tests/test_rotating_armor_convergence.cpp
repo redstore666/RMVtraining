@@ -204,6 +204,85 @@ int main() {
         expect(estimate.allFinite(), "末帧状态必须有限");
     }
 
+    // --------------------------------------------------------- 双板交替可见
+    //
+    // 上面所有场景都只喂 kObservedSlot 这一块板。实拍 tmp/v4.avi 不是这样：
+    // 209 帧里同帧检出两块 id=3，两板三维间距中位 0.40 m（p10 0.38 / p90 0.43），
+    // 正好是 R=0.28 的相邻板弦长 √2·R，而且成段（5~19 帧）同时可见——那是同一台
+    // 车上相隔 90° 的两块板，会随时间交替/同时露出来。
+    //
+    // 这一段验证的是"整车建模"最核心的承诺：每帧只看到其中一块、而且不确定是
+    // 哪一块时，共享的 (c, R, ω, phase) 仍然能被观测钉住，两块板的模型位置因此
+    // 永远落在同一个圆、同一个 ω 上（蓝绿同速度同方向同圆心）。
+    printHeader("双板交替可见（每帧喂一块，slot 在 0/1 间按真值挑）");
+    {
+        constexpr double kPairSigma = 0.02; // 比单板场景大：实拍双板帧更抖
+        std::mt19937 rng(20240710u);
+        std::normal_distribution<double> noise(0.0, kPairSigma);
+        std::normal_distribution<double> yaw_noise(0.0, 0.05);
+
+        RotatingArmorEkf ekf;
+        const EkfInitPrior pair_prior = makePrior();
+        const EkfInitStatus status = ekf.initialize(truth.observations.front(), pair_prior);
+        expect(status == EkfInitStatus::Ok, "双板场景 initialize 应成功");
+
+        Error pair_error;
+        for (int k = 1; k < kFrames; ++k) {
+            ekf.predict(kDt);
+            const State& x_truth_k = truth.states[static_cast<std::size_t>(k)];
+            // 相邻两块板（slot 0 与 slot 1）交替可见：隔帧换一块。
+            const int slot = (k / 2) % 2;
+            const Eigen::Vector3d p_true = measurement(x_truth_k, slot, kPlateCount);
+            ArmorObservation obs;
+            obs.position = p_true + Eigen::Vector3d(noise(rng), noise(rng), noise(rng));
+            obs.sigma_position_m = kPairSigma;
+            obs.has_world_yaw = true;
+            obs.world_yaw_rad = wrapAngle(truthWorldYaw(x_truth_k, slot) +
+                                          yaw_noise(rng));
+            expect(ekf.update(obs, slot), "双板场景 update 不应失败（帧 " + std::to_string(k) + "）");
+            if (k % 60 == 0) {
+                pair_error = errorAgainst(ekf.state(), x_truth_k);
+                std::cout << std::setw(6) << k << std::setw(10) << pair_error.cx << std::setw(10)
+                          << pair_error.cy << std::setw(10) << pair_error.z << std::setw(10)
+                          << pair_error.radius << std::setw(10) << pair_error.yaw << std::setw(10)
+                          << pair_error.yaw_rate << std::setw(12) << pair_error.plate << "\n";
+            }
+        }
+        pair_error = errorAgainst(ekf.state(), truth.states.back());
+        printRow("双板交替（断言）", pair_error);
+
+        // 断言的关键点：ω 必须收敛（蓝绿才可能同速），且两块板的模型位置
+        // 都在同一个圆上（同圆心由模型结构保证，这里用 plate 误差兜住）。
+        const bool pair_ok = std::abs(pair_error.yaw_rate) <= 0.35 && pair_error.plate <= 0.06 &&
+                             std::abs(pair_error.radius) <= 0.03;
+        std::cout << "  [断言] 双板交替下 |d_omega|<=0.35rad/s |dR|<=0.03m plate_err<=0.06m -> "
+                  << (pair_ok ? "PASS" : "FAIL") << "\n";
+        if (!pair_ok) {
+            std::cerr << "FAIL[双板交替]: d_omega=" << pair_error.yaw_rate
+                      << " dR=" << pair_error.radius << " plate_err=" << pair_error.plate << "\n";
+            ++failures;
+        }
+
+        // 整车模型的结构性保证（11 维状态版）：
+        //   偶数槽位(0,2) 共用一个半径 r，奇数槽位(1,3) 共用 r + l，
+        //   l 是 sp_vision 的 radius_diff，用来表达"相邻两板到转轴距离不同"。
+        // 所以这里不能再要求四块板严格同半径，而是要求"同一对内部严格相等"，
+        // 且 l 不能大到离谱（本场景真值四块板同半径，l 应停在小值）。
+        const State& est = ekf.state();
+        double radius[4];
+        for (int slot = 0; slot < kPlateCount; ++slot) {
+            const Eigen::Vector3d p = measurement(est, slot, kPlateCount);
+            radius[slot] = std::hypot(p.x() - est(0), p.y() - est(2));
+        }
+        const double pair_gap = std::max(std::abs(radius[0] - radius[2]),
+                                         std::abs(radius[1] - radius[3]));
+        const double l = est(9);
+        std::cout << "  四块模型板到车心距离: " << radius[0] << " / " << radius[1] << " / "
+                  << radius[2] << " / " << radius[3] << "  l=" << l << "\n";
+        expect(pair_gap <= 1e-9, "同一对（0,2 / 1,3）的模型板必须严格共享半径");
+        expect(std::abs(l) <= 0.02, "四块板同半径的真值下 radius_diff 必须收敛到 <=0.02 m");
+    }
+
     if (failures != 0) {
         std::cout << "\n合成真值收敛测试 FAILED（" << failures << " 处）\n";
         return 1;

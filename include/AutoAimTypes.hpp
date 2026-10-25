@@ -101,6 +101,10 @@ struct PredictionResult
     float target_yaw_velocity{0.0F};
     float target_pitch_velocity{0.0F};
     bool fire_allowed{false};
+    // 开火诊断：板面内最大线性脱靶量（米）与实际生效的角度预算（弧度）。
+    // 角度预算被"板半宽/半高 ÷ 距离 × 0.6"压住时，说明限制命中的是板尺寸而不是云台。
+    float fire_miss_m{0.0F};
+    float fire_budget_rad{0.0F};
 };
 
 // 读取 OpenCV YAML，将矩阵统一为 CV_64F，并拒绝占位数据或几何上无效的标定结果。

@@ -177,11 +177,29 @@ struct Rig
     int target_id{7};
     double bias_s{0.0};
     double sigma_position_m{0.01};
+    // 板面法向噪声：实拍小目标（v4 的 0.2 m 板、1.5 m 距离）实测抖到 ±20°，
+    // 默认 0.02 rad 只适合合成场景。转速自我判别的回归测试会把它调大。
+    double sigma_normal_rad{0.02};
+    // 云台姿态"报告值"和"真实值"的差（rad，每帧独立抽样）。实拍里手持抖动就是
+    // 这个：观测是在真实姿态下拍的，而 EKF 拿到的是云台报告姿态，两者差一个
+    // 列向量旋转——v1 的"目标在世界系里乱晃"就是这么来的。0 表示理想 IMU。
+    double shake_sigma_rad{0.0};
     // 传给跟踪器的"本帧视觉处理延迟"，用于验证预测时域包含它。
     double latency_s{0.0};
+    // 最近一帧生成的观测（跟踪器已经消费过）。给俯视图之类的可视化用，
+    // 这样它们不必重造一遍"真值 -> 观测"的流程。
+    std::vector<ArmorPose> last_observations{};
+
+    // 合成场景要验证"半径从坏初值收敛"，所以默认关掉实时跟踪用的半径钉死。
+    static rotating_armor::TrackerConfig defaultConfig()
+    {
+        rotating_armor::TrackerConfig config;
+        config.freeze_radius = false;
+        return config;
+    }
 
     explicit Rig(const rotating_armor::State &initial_truth,
-                 rotating_armor::TrackerConfig config = {})
+                 rotating_armor::TrackerConfig config = defaultConfig())
         : truth(initial_truth), tracker(config)
     {
     }
@@ -195,9 +213,25 @@ struct Rig
         const std::vector<Plate> plates = platesAt(truth, plate_count);
         if (aim_at_truth && !plates.empty())
         {
-            int best = 0;
-            double best_error = 1.0e9;
+            // 云台只能追"朝向自己这一面"的板：背面的板被车体挡住，拿去当云台指向
+            // 会让测试夹具自己瞄错（实测 8rad/s 时一半帧云台在追背面那块）。
+            std::vector<int> visible;
             for (int slot = 0; slot < static_cast<int>(plates.size()); ++slot)
+            {
+                const Eigen::Vector3d &position = plates[static_cast<std::size_t>(slot)].position;
+                const Eigen::Vector3d &normal = plates[static_cast<std::size_t>(slot)].normal;
+                if (normal.dot(-position.normalized()) > 0.3)
+                {
+                    visible.push_back(slot);
+                }
+            }
+            if (visible.empty())
+            {
+                visible.push_back(0);
+            }
+            int best = visible[0];
+            double best_error = 1.0e9;
+            for (int slot : visible)
             {
                 const double error = std::fabs(rotating_armor::wrapToPi(
                     rotating_armor::vectorYaw(plates[static_cast<std::size_t>(slot)].position) -
@@ -211,12 +245,21 @@ struct Rig
             gimbal.snapTo(plates[static_cast<std::size_t>(best)].position);
         }
         const GimbalState gimbal_state = gimbal.state(bias_s);
+        // 观测用"真实"姿态生成，EKF 拿到的是报告姿态；两者之差就是抖动。
+        GimbalState observing_gimbal = gimbal_state;
+        if (shake_sigma_rad > 0.0)
+        {
+            observing_gimbal.yaw += static_cast<float>(gauss(rng, shake_sigma_rad));
+            observing_gimbal.pitch += static_cast<float>(gauss(rng, shake_sigma_rad));
+        }
         const int id = (observation_id >= 0) ? observation_id : target_id;
         std::vector<ArmorPose> observations;
         if (provide_observations)
         {
-            observations = observe(plates, gimbal_state, id, rng, sigma_position_m);
+            observations = observe(plates, observing_gimbal, id, rng, sigma_position_m,
+                                   sigma_normal_rad);
         }
+        last_observations = observations;
         return tracker.step(observations, gimbal_state, time_s, latency_s);
     }
 };

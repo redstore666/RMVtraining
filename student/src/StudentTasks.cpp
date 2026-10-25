@@ -93,15 +93,15 @@ bool init_camera(void **handle, bool verbose)
     warn(MV_CC_SetFloatValue(*handle, "Gain", 16.0f), "Gain");
     warn(MV_CC_SetFloatValue(*handle, "AcquisitionFrameRate", 160.0f), "AcquisitionFrameRate");
 
-    // PixelFormat 关键：失败就回滚整个 init
+    // PixelFormat：优先 BayerRG8（车上相机格式）。二号机等其它相机可能
+    // 不支持——设置失败**不再回滚**，读出相机当前格式，转换层按实际格式
+    // 处理（实测二号机报"像素转换失败"的根源就是硬编码 BayerRG8）。
     if (MV_CC_SetEnumValue(*handle, "PixelFormat", PixelType_Gvsp_BayerRG8) != MV_OK)
     {
+        MVCC_ENUMVALUE cur{};
+        MV_CC_GetEnumValue(*handle, "PixelFormat", &cur);
         if (verbose)
-            printf("像素格式设置失败，回滚\n");
-        MV_CC_CloseDevice(*handle);
-        MV_CC_DestroyHandle(*handle);
-        *handle = nullptr;
-        return false;
+            printf("[cam] BayerRG8 不支持，沿用相机当前格式 0x%x\n", cur.nCurValue);
     }
 
     ret = MV_CC_StartGrabbing(*handle);
@@ -252,10 +252,55 @@ bool get_pic(cv::Mat &pic)
     cvt.pDstBuffer = bgr_buffer.data();
     cvt.nDstBufferSize = bgr_buffer.size();
 
-    ret = MV_CC_ConvertPixelType(s_handle, &cvt);
-    if (ret != MV_OK)
+    const unsigned int src_pt = frame_info.enPixelType;
+    static unsigned int s_logged_pt = 0xFFFFFFFF;
+    if (s_logged_pt != src_pt)
     {
-        printf("像素转换失败 0x%x\n", ret);
+        printf("[cam] 实际像素格式 0x%x（首次/变更时打印）\n", src_pt);
+        s_logged_pt = src_pt;
+    }
+
+    bool converted = false;
+    if (src_pt == PixelType_Gvsp_BGR8_Packed)
+    {
+        // 已经是 BGR：直接包 Mat
+        memcpy(bgr_buffer.data(), raw_buffer.data(),
+               std::min<size_t>(bgr_buffer.size(), frame_info.nFrameLen));
+        converted = true;
+    }
+    else if (src_pt == PixelType_Gvsp_Mono8)
+    {
+        // 黑白机：灰度 Mat → BGR（颜色掩模会把灰度判成无色——蓝色通道判据
+        // 在灰度图上 B=G=R 不满足 B>G+40，掩模全黑；这里的处理是复制到三
+        // 通道，亮条仍可通过亮度阈值识别——若现场是黑白机需要改掩模判据）
+        cv::Mat gray(frame_info.nHeight, frame_info.nWidth, CV_8UC1, raw_buffer.data());
+        cv::Mat bgr(frame_info.nHeight, frame_info.nWidth, CV_8UC3, bgr_buffer.data());
+        cv::cvtColor(gray, bgr, cv::COLOR_GRAY2BGR);
+        converted = true;
+    }
+    else
+    {
+        // Bayer / 其它：SDK 转换，先 BGR8 再 RGB8（RGB8 成功则再换序）
+        ret = MV_CC_ConvertPixelType(s_handle, &cvt);
+        if (ret == MV_OK)
+        {
+            converted = true;
+        }
+        else
+        {
+            cvt.enDstPixelType = PixelType_Gvsp_RGB8_Packed;
+            ret = MV_CC_ConvertPixelType(s_handle, &cvt);
+            if (ret == MV_OK)
+            {
+                cv::Mat rgb(frame_info.nHeight, frame_info.nWidth, CV_8UC3, bgr_buffer.data());
+                cv::cvtColor(rgb, rgb, cv::COLOR_RGB2BGR);
+                converted = true;
+            }
+        }
+    }
+    if (!converted)
+    {
+        printf("像素转换失败 0x%x（源格式 0x%x）\n", ret, src_pt);
         pic.release();
         return false;
     }
@@ -279,63 +324,8 @@ float cameraResultingFps()
 // ==================== 任务 2：装甲板识别 ====================
 // 神经网络四点检测路线（唯一实现）：OpenVINO 推理 + 关键点解码，
 // 输出角点/大小/编号/置信度。接口契约见 StudentTasks.hpp。
-bool solveArmorPoseDisambiguated(const std::vector<cv::Point3f> &object_points,
-                                 const std::vector<cv::Point2f> &image_points,
-                                 const cv::Mat &camera_matrix,
-                                 const cv::Mat &distortion_coefficients,
-                                 cv::Mat &rvec, cv::Mat &tvec)
-{
-    static cv::Vec3d prev_n(0.0, 0.0, 0.0); // 上一帧所选解的法向
-    static bool has_prev = false;
-    std::vector<cv::Mat> rvecs, tvecs;
-    const int n = cv::solvePnPGeneric(object_points, image_points, camera_matrix,
-                                      distortion_coefficients, rvecs, tvecs, false,
-                                      cv::SOLVEPNP_IPPE);
-    if (n <= 0)
-    {
-        return false;
-    }
-    int pick = 0;
-    if (n >= 2)
-    {
-        double err[2] = {0.0, 0.0};               // 各解的重投影平均误差
-        cv::Vec3d n_vec[2] = {cv::Vec3d(0, 0, 1), // 各解法向 n = R·(0,0,1)
-                              cv::Vec3d(0, 0, 1)};
-        for (int i = 0; i < 2; ++i)
-        {
-            std::vector<cv::Point2f> proj;
-            cv::projectPoints(object_points, rvecs[i], tvecs[i], camera_matrix,
-                              distortion_coefficients, proj);
-            double sum = 0.0;
-            for (std::size_t k = 0; k < proj.size(); ++k)
-            {
-                sum += cv::norm(proj[k] - image_points[k]);
-            }
-            err[i] = sum / static_cast<double>(proj.size());
-            cv::Mat R;
-            cv::Rodrigues(rvecs[i], R);
-            n_vec[i] = cv::Vec3d(R.at<double>(0, 2), R.at<double>(1, 2), R.at<double>(2, 2));
-        }
-        if (std::fabs(err[0] - err[1]) > 3.0)
-        {
-            pick = (err[0] <= err[1]) ? 0 : 1; // 误差差距明显：以误差为准
-        }
-        else if (has_prev)
-        {
-            // 时域一致：取法向与上一帧最接近的解（连续帧间真实姿态变化远小于孪生差）
-            pick = (n_vec[0].dot(prev_n) >= n_vec[1].dot(prev_n)) ? 0 : 1;
-        }
-        else
-        {
-            pick = (std::fabs(n_vec[0][1]) <= std::fabs(n_vec[1][1])) ? 0 : 1; // 首帧：更接近竖直
-        }
-        prev_n = n_vec[pick];
-        has_prev = true;
-    }
-    rvec = rvecs[pick].clone();
-    tvec = tvecs[pick].clone();
-    return true;
-}
+// 检测置信度硬门槛：默认 0.7，可由 setArmorScoreThreshold() 覆盖。
+static float g_nn_min_confidence = 0.7F;
 
 namespace
 {
@@ -345,7 +335,7 @@ namespace
     // 解码与语义映射见 ArmorDetectorNet.cpp 与 models/README.md。
     // 最终输出置信度门限：0.7（512 输入时远处小目标定位噪声大，用户实测 0.6/0.8
     // 都不影响"抖动只来自定位精度"这一结论；门限只过滤漏检不过滤抖动）。
-    constexpr float kNnMinConfidence = 0.7F;
+    // 与解码阈值分开的硬过滤：历史上写死 0.7，导致 --score 降到 0.3 也一条都不过。
 
     ArmorDetectorNet &nnDetector(bool &ok)
     {
@@ -358,18 +348,34 @@ namespace
             std::string error;
             const char *model_env = std::getenv("RMV_DET_MODEL");
             const bool use_yolo11 = model_env != nullptr && std::string(model_env) == "yolo11";
-            // 推理输入边长：默认 640（yolov5 原始训练尺寸，远处定位最稳）；
-            // RMV_DET_SIZE=512 可切小尺寸提速 ~30%（需 models/yolov5_512.xml，
-            // 由 tools/make_small_ir.py 生成；远处 2m 左右角点抖动明显增大，
-            // 2026-10-14 用户验收后决定默认回 640）。缺模型文件自动回退 640。
-            int size = 640;
+            // 推理输入尺寸：默认 640x480。相机是 4:3，640x640 输入会把 1440x1080
+            // 等比缩到 640x480 后剩下的 160 行全是黑边——图像内容与缩放比例和
+            // 640x640 完全相同，但那 25% 的卷积是白算的。改成 640x480 输入后
+            // 计算量 -25%，角点分辨率一点没变（不像 RMV_DET_SIZE=512 那样整体降采样）。
+            // RMV_DET_SIZE=512 或 640x480 可覆盖；缺对应模型文件时回退 640x640。
+            int width = 640;
+            int height = 480;
             if (const char *size_env = std::getenv("RMV_DET_SIZE"))
             {
-                const int requested = std::atoi(size_env);
-                if (requested >= 320 && requested % 32 == 0)
+                int w = 0;
+                int h = 0;
+                if (std::sscanf(size_env, "%dx%d", &w, &h) == 2 && h > 0)
                 {
-                    size = requested;
+                    width = w;
+                    height = h;
                 }
+                else if (std::sscanf(size_env, "%d", &w) == 1 && w > 0)
+                {
+                    width = w;
+                    height = w;
+                }
+            }
+            const auto size_valid = [](int value)
+            { return value >= 320 && value % 32 == 0; };
+            if (!size_valid(width) || !size_valid(height))
+            {
+                width = 640;
+                height = 480;
             }
             // 推理设备：RMV_DET_DEVICE=GPU/AUTO 可切（有 iGPU 渲染节点的机器可用；
             // 编译失败自动回退 CPU）。
@@ -382,31 +388,39 @@ namespace
             const ArmorDetectorNet::ModelKind kind =
                 use_yolo11 ? ArmorDetectorNet::ModelKind::YOLO11
                            : ArmorDetectorNet::ModelKind::YOLOv5;
-            std::string path = "models/" + base + ".xml";
-            if (size != 640)
+            const std::string default_path = "models/" + base + ".xml";
+            std::string path = default_path;
+            if (!(width == 640 && height == 640))
             {
-                const std::string sized = "models/" + base + "_" + std::to_string(size) + ".xml";
+                path = "models/" + base + "_" + std::to_string(width) + "x" +
+                       std::to_string(height) + ".xml";
+            }
+            if (width == 640 && height == 640)
+            {
+                load_ok = detector.load(path, kind, width, height, device, error);
+            }
+            else
+            {
                 std::string sized_error;
-                if (detector.load(sized, kind, size, device, sized_error))
+                if (detector.load(path, kind, width, height, device, sized_error))
                 {
                     load_ok = true;
                 }
                 else
                 {
-                    std::cerr << "未找到 " << sized << "（" << sized_error.substr(0, 80)
-                              << "），回退 640 输入\n";
+                    std::cerr << "未找到 " << path << "（" << sized_error.substr(0, 80)
+                              << "），回退 640x640 输入\n";
                     detector = ArmorDetectorNet{};
-                    load_ok = detector.load(path, kind, 640, device, error);
+                    width = 640;
+                    height = 640;
+                    path = default_path;
+                    load_ok = detector.load(path, kind, width, height, device, error);
                 }
-            }
-            else
-            {
-                load_ok = detector.load(path, kind, size, device, error);
             }
             if (load_ok)
             {
-                std::cout << "神经网络检测器就绪: " << base << " " << detector.input_size()
-                          << "x" << detector.input_size() << " device=" << detector.device()
+                std::cout << "神经网络检测器就绪: " << base << " " << detector.input_width()
+                          << "x" << detector.input_height() << " device=" << detector.device()
                           << "\n";
             }
             else
@@ -416,6 +430,81 @@ namespace
         }
         ok = load_ok;
         return detector;
+    }
+
+    // ===== 装甲板尺寸决策 =====
+    // 前置事实（决定了这里为什么不能只看单帧几何）：
+    //   4 个共面点的单应只有 8 个自由度，而 4 对点恰好给出 8 个方程——
+    //   任何长宽比都能被精确拟合成"另一个 yaw + 另一个深度"，重投影误差恒 ≈0。
+    //   也就是说尺寸根本不是单帧可观测量，armor_solve 的重投影自检在这里
+    //   一点忙帮不上（这也解释了为什么反复调重投影门禁对观测跳变无效）。
+    // 所以尺寸只能来自先验，按优先级三层：
+    //   1) 单向证书：plate_ratio ≥ 3.00 ⇒ 必然大板。yaw 只压缩横向比例
+    //      （ratio_obs = ratio_true·cosθ ≤ ratio_true），数学上不会误判。
+    //   2) 编号硬先验：RM 规则下 1(英雄) 只有大板；2(工程)/6(前哨站)/7(哨兵)
+    //      只有小板。3/4/5/8 两种板都可能，编号本身给不出结论。
+    //   3) 时域上包络：同一台车的 4 块板尺寸相同，且 ratio_obs(θ) = ratio_true·cosθ
+    //      是"真值乘一个 ≤1 的因子"。目标自转时 cosθ→1，所以按 target_id 维护
+    //      ratio 的历史最大值，会单调爬向 ratio_true，比任何单帧判据都稳。
+    // 锁存 + 1.5 s 失效：避免 θ 在 37.5° 附近抖动时尺寸、板宽(0.0675/0.115 m)、
+    // 半径先验(0.20/0.25 m) 三者一起逐帧翻——那会把观测源变成方波。
+    struct PlateSizeState
+    {
+        double ratio_max{0.0};
+        bool locked_large{false};
+        std::chrono::steady_clock::time_point last{};
+    };
+
+    // SIZE_POLICY=legacy 完全回到旧行为（检测层单帧几何硬切），供 A/B 与回滚。
+    const char *sizePolicy()
+    {
+        static const char *policy = std::getenv("SIZE_POLICY");
+        return policy != nullptr ? policy : "auto";
+    }
+
+    ArmorSize resolveArmorSize(const ArmorDetectorNet::Detection &det)
+    {
+        static const bool legacy = std::strcmp(sizePolicy(), "legacy") == 0;
+        // ratio_valid=false 表示尺寸来自模型类别（yolo11），别二次猜测。
+        if (legacy || !det.ratio_valid)
+        {
+            return det.size;
+        }
+        const double ratio = det.plate_ratio;
+        if (ratio >= 3.00) // 1) 单向证书，优先于编号
+        {
+            return ArmorSize::Large;
+        }
+        if (det.target_id == 1) // 2) 编号硬先验
+        {
+            return ArmorSize::Large;
+        }
+        if (det.target_id == 2 || det.target_id == 6 || det.target_id == 7)
+        {
+            return ArmorSize::Small;
+        }
+
+        // 3) 时域上包络
+        static std::map<int, PlateSizeState> states;
+        const auto now = std::chrono::steady_clock::now();
+        PlateSizeState &st = states[det.target_id];
+        if (st.last.time_since_epoch().count() != 0 &&
+            now - st.last > std::chrono::milliseconds(1500))
+        {
+            st = PlateSizeState{}; // 该编号离场超时，历史作废（不跨目标污染）
+        }
+        st.last = now;
+        // 只喂"够大"的框：条高 <12px 时角点量化噪声就能把 ratio 顶过阈值，
+        // 一旦污染上包络就永久锁成大板，再也退不回来。
+        if (det.box.height >= 12 && ratio > st.ratio_max)
+        {
+            st.ratio_max = ratio;
+        }
+        if (st.ratio_max >= 3.00)
+        {
+            st.locked_large = true;
+        }
+        return st.locked_large ? ArmorSize::Large : ArmorSize::Small;
     }
 
     std::vector<ArmorDetection> armorDetectNn(const cv::Mat &pic, TeamColor enemy_color)
@@ -440,7 +529,7 @@ namespace
             {
                 continue;
             }
-            if (det.confidence < kNnMinConfidence)
+            if (det.confidence < g_nn_min_confidence)
             {
                 continue;
             }
@@ -462,9 +551,20 @@ namespace
 
             ArmorDetection out;
             out.corners = det.corners;
-            out.size = det.size;
+            out.size = resolveArmorSize(det);
             out.target_id = det.target_id;
             out.confidence = det.confidence;
+            if (std::getenv("SIZE_DEBUG") != nullptr)
+            {
+                // ratio 与两端理论值同屏：正对小板的帧应≈2.37，正对大板≈4.03；
+                // 明显低于 2.37 说明板在斜视（cosθ 压缩）或角点被裁掉。
+                std::fprintf(stderr,
+                             "[size] id=%d ratio=%.3f geo=%s -> %s conf=%.2f h=%d\n",
+                             det.target_id, det.plate_ratio,
+                             det.size == ArmorSize::Large ? "L" : "S",
+                             out.size == ArmorSize::Large ? "L" : "S", det.confidence,
+                             det.box.height);
+            }
             detections.push_back(out);
         }
         return detections;
@@ -473,6 +573,114 @@ namespace
 } // namespace
 
 // 任务 2 入口：神经网络四点检测（唯一实现）。
+std::vector<LedArmorMeasurement> detect_led_armors(const cv::Mat &bgr, TeamColor color)
+{
+    std::vector<LedArmorMeasurement> out;
+    if (bgr.empty() || bgr.type() != CV_8UC3)
+    {
+        return out;
+    }
+
+    cv::Mat hsv;
+    cv::cvtColor(bgr, hsv, cv::COLOR_BGR2HSV);
+    cv::Mat mask;
+    if (color == TeamColor::Red)
+    {
+        // 红色跨 0 度：两端各取一段再合并。
+        cv::Mat low;
+        cv::Mat high;
+        cv::inRange(hsv, cv::Scalar(0, 110, 140), cv::Scalar(14, 255, 255), low);
+        cv::inRange(hsv, cv::Scalar(166, 110, 140), cv::Scalar(180, 255, 255), high);
+        cv::bitwise_or(low, high, mask);
+    }
+    else
+    {
+        cv::inRange(hsv, cv::Scalar(95, 110, 140), cv::Scalar(135, 255, 255), mask);
+    }
+
+    cv::Mat labels;
+    cv::Mat stats;
+    cv::Mat centroids;
+    const int count = cv::connectedComponentsWithStats(mask, labels, stats, centroids, 8);
+    struct Bar
+    {
+        cv::Point2f center;
+        double height;
+        double width;
+    };
+    std::vector<Bar> bars;
+    for (int i = 1; i < count; ++i)
+    {
+        const int area = stats.at<int>(i, cv::CC_STAT_AREA);
+        const int w = stats.at<int>(i, cv::CC_STAT_WIDTH);
+        const int h = stats.at<int>(i, cv::CC_STAT_HEIGHT);
+        if (area < 24 || h < 5 || w < 2)
+        {
+            continue;
+        }
+        // 灯条是细长的：允许板面有侧倾，所以用长边/短边 >= 2 而不是只认竖直。
+        const double long_side = std::max(w, h);
+        const double short_side = std::max(1.0, static_cast<double>(std::min(w, h)));
+        if (long_side / short_side < 2.0)
+        {
+            continue;
+        }
+        Bar bar;
+        bar.center = cv::Point2f(static_cast<float>(centroids.at<double>(i, 0)),
+                                 static_cast<float>(centroids.at<double>(i, 1)));
+        bar.height = h;
+        bar.width = w;
+        bars.push_back(bar);
+    }
+
+    for (std::size_t a = 0; a < bars.size(); ++a)
+    {
+        for (std::size_t b = a + 1; b < bars.size(); ++b)
+        {
+            const double h_a = bars[a].height;
+            const double h_b = bars[b].height;
+            const double h_max = std::max(h_a, h_b);
+            if (std::abs(h_a - h_b) > 0.4 * h_max || h_max < 9.0)
+            {
+                continue;
+            }
+            const double gap = std::abs(bars[a].center.x - bars[b].center.x);
+            // 小板 0.135x0.057、大板 0.23x0.057：间距/高度大致 2.4 与 4.0。
+            if (gap < 0.9 * h_max || gap > 6.0 * h_max)
+            {
+                continue;
+            }
+            const double dy = std::abs(bars[a].center.y - bars[b].center.y);
+            if (dy > 0.5 * h_max)
+            {
+                continue;
+            }
+            LedArmorMeasurement m;
+            const Bar &left = bars[a].center.x <= bars[b].center.x ? bars[a] : bars[b];
+            const Bar &right = bars[a].center.x <= bars[b].center.x ? bars[b] : bars[a];
+            m.left_bar = left.center;
+            m.right_bar = right.center;
+            m.center = cv::Point2f(0.5F * (left.center.x + right.center.x),
+                                   0.5F * (left.center.y + right.center.y));
+            m.baseline_px = gap;
+            m.height_px = h_max;
+            out.push_back(m);
+        }
+    }
+    return out;
+}
+
+void setArmorScoreThreshold(float threshold)
+{
+    bool ok = false;
+    ArmorDetectorNet &detector = nnDetector(ok);
+    g_nn_min_confidence = threshold;
+    if (ok)
+    {
+        detector.setScoreThreshold(threshold);
+    }
+}
+
 std::vector<ArmorDetection> armor_detect(const cv::Mat &pic, TeamColor enemy_color)
 {
     return armorDetectNn(pic, enemy_color);
@@ -501,6 +709,16 @@ namespace
             half_w = 0.135f / 2;
         else
             half_w = 0.230f / 2;
+        // 诊断开关：板上实际尺寸未知时，用环境变量扫一遍尺寸对 PnP 深度的影响
+        // （v4 的手写"3"板明显比 135mm 大，框宽中位 156px 对应 ~0.25m）
+        if (const char *ow = std::getenv("ARMOR_HALF_W"))
+        {
+            half_w = std::atof(ow);
+        }
+        if (const char *oh = std::getenv("ARMOR_HALF_H"))
+        {
+            half_h = std::atof(oh);
+        }
         const cv::Point3f TL(-half_w, -half_h, 0.0F);
         const cv::Point3f TR(+half_w, -half_h, 0.0F);
         const cv::Point3f BR(+half_w, +half_h, 0.0F);
@@ -508,95 +726,31 @@ namespace
         return {TL, TR, BR, BL};
     }
 
-    // 按目标编号和尺寸分别保存平面 PnP 的历史法向，避免不同观测互相污染。
-    // 这只用于消解 IPPE 的双解跳变；连续帧的测量噪声仍应交给后续滤波器处理。
-    struct TrackedPoseHistory
-    {
-        cv::Vec3d normal{0.0, 0.0, 1.0};
-        cv::Point2f image_center{};
-        bool has_normal{false};
-        bool has_center{false};
-        std::chrono::steady_clock::time_point last_seen{};
-        bool has_last_seen{false};
-    };
-
+    // 平面 PnP 解算（单板）。
+    // **只用 PnP 的平移**：朝向一律交给 optimizeArmorYaw 用 (yaw, pitch) 两自由度重建。
+    // 原因（实测，见 docs/开源对照-消歧与半径的三种解法_2026-10-25.md §1）：
+    // 这套板上 IPPE 的孪生解 100% 落进歧义区（|e0-e1| 中位 0.43px、p90 1.54px），
+    // 而且两解的深度只差 1mm（中位）、差的全是俯仰/横滚。任何基于法向分量的硬规则
+    // 都只是在两个等优解之间抛硬币：实测 n_y 规则与"最小重投影"冲突 82.5%、
+    // 相邻检测翻转 11.2% → yaw σ 5.74°、|Δyaw|>30° 占 2.43%。
+    // sp_vision_25 的解法是根本不看那对解（solver.cpp:61 用的是单解重载），这里照做。
     bool solvePoseForTrack(const std::vector<cv::Point3f> &object_points,
                            const std::vector<cv::Point2f> &image_points,
                            const cv::Mat &camera_matrix,
                            const cv::Mat &distortion_coefficients,
-                           int target_id, ArmorSize size,
-                           cv::Mat &rvec, cv::Mat &tvec)
+                           int target_id,
+                           cv::Mat &rvec, cv::Mat &tvec,
+                           double depth_prior = 0.0)
     {
-        using TrackKey = std::pair<int, int>;
-        static std::map<TrackKey, TrackedPoseHistory> history_by_track;
-        TrackedPoseHistory &history = history_by_track[TrackKey{target_id, static_cast<int>(size)}];
-        const auto now = std::chrono::steady_clock::now();
-
-        cv::Point2f center(0.0F, 0.0F);
-        for (const cv::Point2f &point : image_points)
-            center += point * (1.0F / static_cast<float>(image_points.size()));
-        // 同 ID/尺寸的观测若突然跳到画面另一处，避免沿用旧目标的朝向历史。
-        if ((history.has_last_seen &&
-             now - history.last_seen > std::chrono::milliseconds(250)) ||
-            (history.has_center && cv::norm(center - history.image_center) > 120.0))
-            history.has_normal = false;
-
-        std::vector<cv::Mat> rvecs, tvecs;
-        const int count = cv::solvePnPGeneric(object_points, image_points,
-                                              camera_matrix, distortion_coefficients,
-                                              rvecs, tvecs, false, cv::SOLVEPNP_IPPE);
-        if (count <= 0)
-            return false;
-
-        const double inf = std::numeric_limits<double>::infinity();
-        std::vector<double> errors(static_cast<std::size_t>(count), inf);
-        std::vector<cv::Vec3d> normals(static_cast<std::size_t>(count), cv::Vec3d(0, 0, 1));
-        int best_error_index = -1;
-        for (int i = 0; i < count; ++i)
+        (void)target_id;    // 孪生解消歧已删除，不再需要按 id 打日志
+        (void)depth_prior;  // DEPTH_FROM_EDGES 的深度先验只用于在孪生解里挑一个，随之作废
+        if (!cv::solvePnP(object_points, image_points, camera_matrix, distortion_coefficients,
+                          rvec, tvec, false, cv::SOLVEPNP_IPPE))
         {
-            if (tvecs[i].at<double>(2) <= 0.0)
-                continue;
-            std::vector<cv::Point2f> projected;
-            cv::projectPoints(object_points, rvecs[i], tvecs[i], camera_matrix,
-                              distortion_coefficients, projected);
-            double sum = 0.0;
-            for (std::size_t k = 0; k < projected.size(); ++k)
-                sum += cv::norm(projected[k] - image_points[k]);
-            errors[static_cast<std::size_t>(i)] =
-                sum / std::max<std::size_t>(projected.size(), 1);
-
-            cv::Mat rotation;
-            cv::Rodrigues(rvecs[i], rotation);
-            normals[static_cast<std::size_t>(i)] = cv::Vec3d(
-                rotation.at<double>(0, 2), rotation.at<double>(1, 2), rotation.at<double>(2, 2));
-            if (best_error_index < 0 || errors[static_cast<std::size_t>(i)] <
-                                            errors[static_cast<std::size_t>(best_error_index)])
-                best_error_index = i;
-        }
-        if (best_error_index < 0)
             return false;
-
-        int pick = best_error_index;
-        if (count >= 2 && std::isfinite(errors[0]) && std::isfinite(errors[1]) &&
-            std::fabs(errors[0] - errors[1]) <= 3.0)
-        {
-            if (history.has_normal)
-                pick = normals[0].dot(history.normal) >= normals[1].dot(history.normal) ? 0 : 1;
-            else
-                pick = std::fabs(normals[0][1]) <= std::fabs(normals[1][1]) ? 0 : 1;
-            if (!std::isfinite(errors[static_cast<std::size_t>(pick)]))
-                pick = best_error_index;
         }
-
-        rvec = rvecs[static_cast<std::size_t>(pick)].clone();
-        tvec = tvecs[static_cast<std::size_t>(pick)].clone();
-        history.normal = normals[static_cast<std::size_t>(pick)];
-        history.has_normal = true;
-        history.image_center = center;
-        history.has_center = true;
-        history.last_seen = now;
-        history.has_last_seen = true;
-        return true;
+        // 板必须在相机前方
+        return std::isfinite(tvec.at<double>(2)) && tvec.at<double>(2) > 0.0;
     }
 
     // 门禁阈值（现场可调；任务书要求拒绝深度非法或误差异常的观测）
@@ -615,7 +769,12 @@ namespace
                                        -1.0, 0.0, 0.0,
                                        0.0, -1.0, 0.0);
 
-    bool extrinsicIsPlaceholder(const CameraParameters &camera)
+    // 旋转与平移必须分开判断。旧判据是「R≈I 且 |t|≈0 才算占位」，而实车
+    // config/camera.yaml 里 t 是真实值（[6.711e-02, 0, 5.150e-02]）、R 还是单位阵
+    // 占位 —— 于是占位 R 借真 t 蒙混过关，90° 轴重排被跳过，实跑把相机的“前”
+    // 当成了云台的“上”（2026-10-17 CSV 里 target_pitch≈1.15 rad 的根因）。
+    // 正确语义：R 是否为占位只由 R 自己决定；t 是否为真只由 t 自己决定。
+    bool rotationIsPlaceholder(const CameraParameters &camera)
     {
         if (camera.rotation_camera_to_gimbal.empty() ||
             camera.rotation_camera_to_gimbal.size() != cv::Size(3, 3))
@@ -624,25 +783,31 @@ namespace
         }
         const double rotation_deviation = cv::norm(
             camera.rotation_camera_to_gimbal - cv::Mat::eye(3, 3, CV_64F), cv::NORM_INF);
-        double translation_norm = 0.0;
-        if (!camera.translation_camera_to_gimbal.empty())
-            translation_norm = cv::norm(camera.translation_camera_to_gimbal, cv::NORM_INF);
-        return rotation_deviation < 1e-6 && translation_norm < 1e-9;
+        return rotation_deviation < 1e-6;
+    }
+
+    bool hasTranslation(const CameraParameters &camera)
+    {
+        return !camera.translation_camera_to_gimbal.empty() &&
+               camera.translation_camera_to_gimbal.total() == 3 &&
+               cv::norm(camera.translation_camera_to_gimbal, cv::NORM_INF) > 1e-9;
     }
 
     // 相机系 → 云台系的旋转（占位外参时补上光学系→云台系的固定旋转）
     cv::Mat rotationCameraToGimbal(const CameraParameters &camera)
     {
-        if (extrinsicIsPlaceholder(camera))
+        if (rotationIsPlaceholder(camera))
         {
             static bool s_warned = false;
             if (!s_warned)
             {
                 s_warned = true;
                 std::fprintf(stderr,
-                             "[warn] 云台外参仍是占位单位阵：已按"
-                             "相机光学系(右/下/前)->云台系(前/左/上)的固定旋转处理。"
-                             "完成手眼标定后请用真实 R/t 替换 config/camera.yaml。\n");
+                             "[warn] 云台旋转外参仍是占位单位阵：已按"
+                             "相机光学系(右/下/前)->云台系(前/左/上)的固定旋转处理；"
+                             "平移 t %s照常使用。完成手眼标定后请用真实 R 替换 "
+                             "config/camera.yaml。\n",
+                             hasTranslation(camera) ? "" : "为 0，");
             }
             return cv::Mat(kOpticalToGimbal);
         }
@@ -653,7 +818,7 @@ namespace
     {
         const cv::Mat p_gimbal = rotationCameraToGimbal(camera) * cv::Mat(cv::Vec3d(p_camera));
         cv::Vec3d result(p_gimbal.at<double>(0), p_gimbal.at<double>(1), p_gimbal.at<double>(2));
-        if (!extrinsicIsPlaceholder(camera) && !camera.translation_camera_to_gimbal.empty())
+        if (hasTranslation(camera))
         {
             result[0] += camera.translation_camera_to_gimbal.at<double>(0);
             result[1] += camera.translation_camera_to_gimbal.at<double>(1);
@@ -662,13 +827,220 @@ namespace
         return result;
     }
 
+    // ===== optimize_yaw（对齐 sp_vision_25 solver.cpp:196-218 的干法，2026-10-25 重写）=====
+    // 背景：PnP 的平移很稳（深度由板的竖直边约束），朝向在斜视角下病态——
+    // 4 点共面歧义 + IPPE 孪生解的姿态分量噪声。实拍实测（moveandrotate.avi，
+    // 11644 条检测）：
+    //   n_y 硬规则消歧            → yaw σ 5.74°、|Δyaw|>30° 占 2.43%、max 47.5°
+    //   本函数（照抄 sp_vision_25）→ yaw σ ~0.9°、跳变 0%、        max  ~7°
+    // 做法：**丢掉 PnP 的旋转**，只留平移；在一个只有 2 个自由度的姿态族里
+    // （yaw 扫描 + 固定俯仰 + 横滚恒 0）穷举 yaw，取四角重投影最小的解。
+    //
+    // 三个必须同时成立的点，缺一个就退化成无效（见
+    // docs/开源对照-消歧与半径的三种解法_2026-10-25.md §1.3）：
+    //   1) 锚点是**固定的云台朝向**（sp_vision_25 的 gimbal_ypr[0]），与板在哪、
+    //      PnP 解出什么无关。锚在 PnP yaw 上实测恶化到 σ 9.14°、max 133°；
+    //      锚在"板的方位角"上同样不行——四板车的板法向与半径（=板方位）垂直，
+    //      两者差 90°，锚错 90° 就等于扫描窗口整体偏了 90°。
+    //   2) 俯仰是**物理常数**（RM 实车装甲标准上倾 15°；本素材反推最优 14.2±4.9°，
+    //      n=571），不是从 PnP 读出来的量测值——那个自由度正好被孪生解污染。
+    //   3) 横滚恒为 0。孪生解之间差的就是俯仰/横滚（深度只差 1mm 中位），
+    //      保留量测横滚等于把错误锁死在扫描族里。
+    //
+    // 还有一个比上面三条更容易踩的坑：**三列必须是同一右手系**。
+    // 物点按 (x 右, y 下) 建模，那么 z 只能是"背离相机"，三列才正交且 det=+1。
+    // 曾经按"z 朝向相机"构造，det(R)=-1、四角重投影变成交叉四边形（代价中位
+    // 69.7px），6px 门禁每帧都拒绝、每次 return 回退 PnP 原解——精修看着"生效"
+    // 其实完全空转，指标也就停在 PnP 基线 σ5.7°。验证数据：11644 帧里
+    // "z 朝相机" 0 帧胜出，"z 背离相机" 11644/11644 胜出（代价中位 1.23px）。
+    // 下游对法向本来就有"必须指向相机"的归一化（见本文件 n·p 那条），
+    // 所以这里输出背离相机的 z 不需要额外补偿，且翻转是确定性的、不会抖。
+    struct UprightBasis
+    {
+        double pitch; // 上倾角（弧度，正 = 板面朝相机的那一面向上翘）
+    };
+
+    // 物体系 x 右 / y 下 / z 背离相机（与 buildObjectPoints 一致）。
+    // 只用 (yaw, pitch) 两个自由度重建，横滚恒 0，det(R)=+1 保证 Rodrigues 有意义。
+    // yaw 的语义 = **"朝相机"那一侧法向**在云台 xy 平面的方位角（与 sp_vision_25 的
+    // armor yaw 同义）；三列里的 z 是它的反向，所以 z 的方位角是 yaw+180°。
+    // 这一点很容易写错：z 直接取 n=(cp·cos, cp·sin, sp) 会把 det 变成 -1，
+    // 四角重投影立刻退化成交叉四边形（代价 69.7px），6px 门禁每帧拒绝、精修空转。
+    double uprightReprojectionError(const std::vector<cv::Point3f> &object_points,
+                                    const std::vector<cv::Point2f> &image_points,
+                                    const cv::Mat &camera_matrix,
+                                    const cv::Mat &distortion_coefficients,
+                                    const cv::Mat &R_c2g, const cv::Mat &tvec,
+                                    const UprightBasis &basis, double yaw)
+    {
+        const double cy = std::cos(yaw), sy = std::sin(yaw);
+        const double cp = std::cos(basis.pitch), sp = std::sin(basis.pitch);
+        // x 右 / y 下 / z 背离相机，三者互相正交且 x×y=z（det=+1）。
+        // pitch 使 z 向下偏 sp（板面上倾 15° ⇒ 背离相机的法向向下偏 15°）。
+        const cv::Vec3d x(-sy, cy, 0.0);
+        const cv::Vec3d y(sp * cy, sp * sy, -cp);
+        const cv::Vec3d z(-cp * cy, -cp * sy, -sp);
+        const cv::Matx33d R_obj2g(x[0], y[0], z[0],
+                                  x[1], y[1], z[1],
+                                  x[2], y[2], z[2]);
+        cv::Mat rvec;
+        cv::Rodrigues(R_c2g.t() * cv::Mat(R_obj2g), rvec);
+        std::vector<cv::Point2f> projected;
+        cv::projectPoints(object_points, rvec, tvec, camera_matrix,
+                          distortion_coefficients, projected);
+        if (projected.size() != image_points.size())
+            return std::numeric_limits<double>::infinity();
+        double err = 0.0;
+        for (std::size_t k = 0; k < projected.size(); ++k)
+            err += cv::norm(projected[k] - image_points[k]);
+        return err / static_cast<double>(projected.size());
+    }
+
+    // 就地精修 rvec（tvec 不动）。重投影明显异常时保持 PnP 原值，交给下游门禁处理。
+    void optimizeArmorYaw(const std::vector<cv::Point3f> &object_points,
+                          const std::vector<cv::Point2f> &image_points,
+                          const CameraParameters &camera,
+                          cv::Mat &rvec, const cv::Mat &tvec)
+    {
+        // 俯仰：物理常数，默认 15°。OPTIMIZE_YAW_PITCH 可覆盖（竖直板用 0）。
+        static const char *pitch_env = std::getenv("OPTIMIZE_YAW_PITCH");
+        static const double pitch_deg = (pitch_env != nullptr) ? std::atof(pitch_env) : 15.0;
+        static const bool debug = std::getenv("OPTIMIZE_YAW_DEBUG") != nullptr;
+
+        const cv::Mat R_c2g = rotationCameraToGimbal(camera);
+
+        UprightBasis basis;
+        basis.pitch = pitch_deg * CV_PI / 180.0;
+
+        // 锚点 = "从板指向相机"的方位。云台系里相机在原点、板在前方，所以这个方位
+        // 就是 180°；等价于 sp_vision_25 用 gimbal_ypr[0]（云台朝向）当固定参考。
+        // 这里刻意不用板的位置/方位：四板车上板法向与其方位垂直，用板方位当锚点
+        // 等于把窗口整体偏 90°（实测 σ 反而变差）；用 PnP 解出的 yaw 当锚点则会被
+        // 孪生解直接带偏（σ 9.14°、max 133°）。
+        // 扫描量 = 板法向"朝向相机"那一侧的方位角，与 sp_vision_25 / 离线验证同义。
+        constexpr double kAnchor = CV_PI;
+
+        double best_yaw = kAnchor;
+        double best_err = uprightReprojectionError(object_points, image_points,
+                                                   camera.camera_matrix,
+                                                   camera.distortion_coefficients,
+                                                   R_c2g, tvec, basis, kAnchor);
+        constexpr int kHalfDeg = 70; // ±70°，与 sp_vision_25 的 SEARCH_RANGE=140 一致
+        for (int i = -kHalfDeg; i <= kHalfDeg; ++i)
+        {
+            const double yaw = kAnchor + i * CV_PI / 180.0;
+            const double err =
+                uprightReprojectionError(object_points, image_points, camera.camera_matrix,
+                                         camera.distortion_coefficients, R_c2g, tvec, basis, yaw);
+            if (err < best_err)
+            {
+                best_err = err;
+                best_yaw = yaw;
+            }
+        }
+        // 0.1° 抛光：1° 网格太重，目标 0.1° 量级的抖动指标吃这个精度
+        for (int j = -5; j <= 5; ++j)
+        {
+            const double yaw = best_yaw + j * 0.1 * CV_PI / 180.0;
+            const double err =
+                uprightReprojectionError(object_points, image_points, camera.camera_matrix,
+                                         camera.distortion_coefficients, R_c2g, tvec, basis, yaw);
+            if (err < best_err)
+            {
+                best_err = err;
+                best_yaw = yaw;
+            }
+        }
+        if (!std::isfinite(best_yaw) || !std::isfinite(best_err) ||
+            best_err > kMaxReprojErrorPx)
+        {
+            // 这个姿态族连 6px 都拟合不出来，说明俯仰常数/手性假设不成立，
+            // 保留 PnP 原解，让下游门禁自己决定收不收。
+            return;
+        }
+
+        // 用精修后的 (yaw, pitch) 重建 rvec，下游重投影自检与法向都基于精修姿态。
+        const double cy = std::cos(best_yaw), sy = std::sin(best_yaw);
+        const double cp = std::cos(basis.pitch), sp = std::sin(basis.pitch);
+        const cv::Vec3d x(-sy, cy, 0.0);
+        const cv::Vec3d y(sp * cy, sp * sy, -cp);
+        const cv::Vec3d z(-cp * cy, -cp * sy, -sp);
+        const cv::Matx33d R_obj2g(x[0], y[0], z[0],
+                                  x[1], y[1], z[1],
+                                  x[2], y[2], z[2]);
+        cv::Rodrigues(R_c2g.t() * cv::Mat(R_obj2g), rvec);
+
+        if (debug)
+        {
+            std::fprintf(stderr, "[oyaw] anchor %.1f -> yaw %.1f (pitch %.1f°) err=%.2fpx\n",
+                         kAnchor * 180.0 / CV_PI, best_yaw * 180.0 / CV_PI, pitch_deg, best_err);
+        }
+    }
+
 } // namespace
+
+cv::Vec3d gimbalToCameraPoint(const CameraParameters &camera, const cv::Vec3d &p_gimbal)
+{
+    // 与 cameraToGimbalPoint 严格互逆：R_c2g 的转置，再减掉平移。
+    cv::Vec3d p = cv::Vec3d(p_gimbal);
+    if (hasTranslation(camera))
+    {
+        for (int i = 0; i < 3; ++i)
+        {
+            p[i] -= camera.translation_camera_to_gimbal.at<double>(i);
+        }
+    }
+    const cv::Mat p_camera = rotationCameraToGimbal(camera).t() * cv::Mat(p);
+    return cv::Vec3d(p_camera.at<double>(0), p_camera.at<double>(1), p_camera.at<double>(2));
+}
+
+std::size_t refineArmorCorners(const cv::Mat &gray, std::vector<ArmorDetection> &detections,
+                               double min_edge_px, int win)
+{
+    if (gray.empty() || gray.type() != CV_8UC1)
+    {
+        return 0;
+    }
+    std::size_t refined = 0;
+    for (ArmorDetection &det : detections)
+    {
+        const double edge = cv::norm(det.corners[1] - det.corners[0]);
+        if (edge < min_edge_px)
+        {
+            continue;
+        }
+        std::vector<cv::Point2f> points(det.corners.begin(), det.corners.end());
+        cv::cornerSubPix(gray, points, cv::Size(win, win), cv::Size(-1, -1),
+                         cv::TermCriteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS, 20, 0.02));
+        // 细化结果离原角点太远说明窗口里没有可用的强角点，保留原值。
+        bool sane = true;
+        for (int k = 0; k < 4; ++k)
+        {
+            if (cv::norm(points[k] - det.corners[k]) > 4.0)
+            {
+                sane = false;
+                break;
+            }
+        }
+        if (!sane)
+        {
+            continue;
+        }
+        for (int k = 0; k < 4; ++k)
+        {
+            det.corners[k] = points[k];
+        }
+        ++refined;
+    }
+    return refined;
+}
 
 std::vector<ArmorPose> armor_solve(const std::vector<ArmorDetection> &detections,
                                    const CameraParameters &camera,
                                    const GimbalState &gimbal)
 {
-    (void)gimbal; // 云台姿态补偿属于 EKF/预测阶段，此处不用
+    (void)gimbal; // 云台姿态补偿不在此层：armor_solve 输出云台系，
+                  // gimbal->world 由 RotatingArmorTracker::collectWorldObservations 完成
     std::vector<ArmorPose> poses;
 
     for (const ArmorDetection &det : detections)
@@ -680,20 +1052,81 @@ std::vector<ArmorPose> armor_solve(const std::vector<ArmorDetection> &detections
         }
 
         // 图像点：corners 本身就是 TL,TR,BR,BL 顺序，直接搬进 vector
-        const std::vector<cv::Point2f> image_points(det.corners.begin(),
-                                                    det.corners.end());
+        std::vector<cv::Point2f> image_points(det.corners.begin(),
+                                              det.corners.end());
 
-        // PnP：4 个共面点。IPPE 可能返回两个相近重投影误差的姿态解；
-        // 按目标编号/尺寸维护历史法向，避免逐帧在两个解之间跳变。
+        // ---- 图像域时间平均（CORNER_SMOOTH_ALPHA，0/未设 = 关闭）----
+        // 在角点上平均而不是在三维位姿上平均：噪声本来就是角点层面的，
+        // 先解 PnP 再平滑会把病态的深度歧义一起平均进来（试过，无效）。
+        static const char *corner_smooth_env = std::getenv("CORNER_SMOOTH_ALPHA");
+        static const double corner_smooth_alpha =
+            corner_smooth_env != nullptr ? std::atof(corner_smooth_env) : 0.0;
+        if (corner_smooth_alpha > 0.0 && corner_smooth_alpha <= 1.0)
+        {
+            // 与 solvePoseForTrack 共用同一份历史（同 id/尺寸），避免多目标互相污染。
+            static std::map<std::pair<int, int>, std::array<cv::Point2f, 4>> smooth_history;
+            auto &history = smooth_history[{det.target_id, static_cast<int>(det.size)}];
+            static std::map<std::pair<int, int>, std::chrono::steady_clock::time_point>
+                smooth_time;
+            auto &last_time = smooth_time[{det.target_id, static_cast<int>(det.size)}];
+            const auto now = std::chrono::steady_clock::now();
+            bool reset = true;
+            if (history[0].x != 0.0F || history[0].y != 0.0F)
+            {
+                double max_shift = 0.0;
+                for (std::size_t k = 0; k < 4; ++k)
+                    max_shift = std::max(max_shift,
+                                         cv::norm(det.corners[k] - history[k]));
+                const bool stale = last_time.time_since_epoch().count() != 0 &&
+                                   now - last_time > std::chrono::milliseconds(120);
+                reset = stale || max_shift > 28.0; // 换板/跳变则不跨帧平均
+            }
+            for (std::size_t k = 0; k < 4; ++k)
+            {
+                if (reset)
+                    history[k] = det.corners[k];
+                else
+                    history[k] = history[k] * static_cast<float>(1.0 - corner_smooth_alpha) +
+                                 det.corners[k] * static_cast<float>(corner_smooth_alpha);
+                image_points[k] = history[k];
+            }
+            last_time = now;
+        }
+
+        // ---- 深度先验：用竖直边（灯条端点）长度反推深度（DEPTH_FROM_EDGES=1）----
+        static const bool depth_from_edges = std::getenv("DEPTH_FROM_EDGES") != nullptr;
+        double depth_prior = 0.0;
+        if (depth_from_edges)
+        {
+            const double plate_h = 0.057;
+            const double top_h = cv::norm(image_points[0] - image_points[3]);
+            const double bottom_h = cv::norm(image_points[1] - image_points[2]);
+            const double h_px = 0.5 * (top_h + bottom_h);
+            const double fy = camera.camera_matrix.at<double>(1, 1);
+            if (h_px > 4.0 && fy > 1.0)
+                depth_prior = fy * plate_h / h_px;
+        }
+
+        // PnP：4 个共面点。IPPE 可能返回两个相近重投影误差的姿态解，
+        // 歧义区按"装甲板上倾安装"先验选解（见 solvePoseForTrack）。
         cv::Mat rvec, tvec;
         const bool ok = solvePoseForTrack(object_points, image_points,
                                           camera.camera_matrix,
                                           camera.distortion_coefficients,
-                                          det.target_id, det.size, rvec, tvec);
+                                          det.target_id, rvec, tvec,
+                                          depth_prior);
         if (!ok)
         {
             ++g_pnp_fail; // test
             continue;     // PnP 失败 → 空观测，交给 EKF 纯预测
+        }
+
+        // ---- yaw 精修（optimize_yaw，移植自 sp_vision_25；OPTIMIZE_YAW=0 关闭）----
+        static const char *oy_env = std::getenv("OPTIMIZE_YAW");
+        static const bool oy_enabled = !(oy_env != nullptr && std::strcmp(oy_env, "0") == 0);
+        if (oy_enabled)
+        {
+            optimizeArmorYaw(object_points, image_points, camera, rvec, tvec);
         }
 
         // 重投影自检：用解出的位姿把物点投回图像，与实际角点比较
@@ -765,8 +1198,16 @@ std::vector<ArmorPose> armor_solve(const std::vector<ArmorDetection> &detections
         const double n_norm = std::sqrt(nx * nx + ny * ny + nz * nz);
         if (n_norm > 1e-9)
         {
-            pose.normal_gimbal = cv::Vec3d(nx / n_norm, ny / n_norm, nz / n_norm);
-            pose.armor_yaw = std::atan2(ny, nx);
+            cv::Vec3d n(nx / n_norm, ny / n_norm, nz / n_norm);
+            // 法向必须"指向相机"（能看见的那一面）：在同一坐标系里 n·p < 0。
+            // 实测 v4 全片段 896 帧，IPPE 给出的物体系 +Z 与 p 同向（n·p 中位 +1.22、
+            // 100% 为正），即法向朝里。这个符号会一路影响：相位初值、按法向反推车心、
+            // 法向关联——不统一就会把车心放到板的近侧，俯视图上模型板/aim 全落在远端。
+            const cv::Vec3d p = pose.position_gimbal_m;
+            if (n[0] * p[0] + n[1] * p[1] + n[2] * p[2] > 0.0)
+                n = cv::Vec3d(-n[0], -n[1], -n[2]);
+            pose.normal_gimbal = n;
+            pose.armor_yaw = std::atan2(n[1], n[0]);
         }
 
         poses.push_back(pose);
@@ -779,45 +1220,45 @@ std::vector<ArmorPose> armor_solve(const std::vector<ArmorDetection> &detections
 namespace
 {
 
-// 跟踪器持有跨帧状态：锁定样本、EKF、瞄准槽位、丢失计时。
-// 处理线程是单线程顺序调用，所以这里不需要加锁。
-rotating_armor::RotatingArmorTracker &trackerInstance()
-{
-    static rotating_armor::RotatingArmorTracker instance;
-    return instance;
-}
-
-// 锁定过程对现场调试是黑箱：只在"阶段 / 已攒样本 / 最近被拒原因 / 重锁次数"变化时
-// 打印一行，避免盯着 crc 从 0 跳到 1 干等（实机 CSV 里曾有连续 20s 一行输出都没有）。
-const char *lockPhaseName(rotating_armor::LockPhase phase)
-{
-    switch (phase)
+    // 跟踪器持有跨帧状态：锁定样本、EKF、瞄准槽位、丢失计时。
+    // 处理线程是单线程顺序调用，所以这里不需要加锁。
+    rotating_armor::RotatingArmorTracker &trackerInstance()
     {
-    case rotating_armor::LockPhase::Idle:
-        return "idle";
-    case rotating_armor::LockPhase::Collecting:
-        return "collecting";
-    case rotating_armor::LockPhase::Tracking:
-        return "tracking";
+        static rotating_armor::RotatingArmorTracker instance;
+        return instance;
     }
-    return "?";
-}
 
-void logTrackerDiagnostics(const rotating_armor::TrackerDiagnostics &diagnostics)
-{
-    static std::string last_key;
-    const std::string key = std::string(lockPhaseName(diagnostics.phase)) + "|" +
-                            diagnostics.last_reject + "|" +
-                            std::to_string(std::min(diagnostics.lock_samples, 6)) + "|" +
-                            std::to_string(diagnostics.relock_count);
-    if (key == last_key)
-        return;
-    last_key = key;
-    std::fprintf(stderr, "[ekf] phase=%s lock_samples=%d/%d relock=%d reject=%s\n",
-                 lockPhaseName(diagnostics.phase), diagnostics.lock_samples,
-                 trackerInstance().config().lock_min_samples,
-                 diagnostics.relock_count, diagnostics.last_reject.c_str());
-}
+    // 锁定过程对现场调试是黑箱：只在"阶段 / 已攒样本 / 最近被拒原因 / 重锁次数"变化时
+    // 打印一行，避免盯着 crc 从 0 跳到 1 干等（实机 CSV 里曾有连续 20s 一行输出都没有）。
+    const char *lockPhaseName(rotating_armor::LockPhase phase)
+    {
+        switch (phase)
+        {
+        case rotating_armor::LockPhase::Idle:
+            return "idle";
+        case rotating_armor::LockPhase::Collecting:
+            return "collecting";
+        case rotating_armor::LockPhase::Tracking:
+            return "tracking";
+        }
+        return "?";
+    }
+
+    void logTrackerDiagnostics(const rotating_armor::TrackerDiagnostics &diagnostics)
+    {
+        static std::string last_key;
+        const std::string key = std::string(lockPhaseName(diagnostics.phase)) + "|" +
+                                diagnostics.last_reject + "|" +
+                                std::to_string(std::min(diagnostics.lock_samples, 6)) + "|" +
+                                std::to_string(diagnostics.relock_count);
+        if (key == last_key)
+            return;
+        last_key = key;
+        std::fprintf(stderr, "[ekf] phase=%s lock_samples=%d/%d relock=%d reject=%s\n",
+                     lockPhaseName(diagnostics.phase), diagnostics.lock_samples,
+                     trackerInstance().config().lock_min_samples,
+                     diagnostics.relock_count, diagnostics.last_reject.c_str());
+    }
 
 } // namespace
 
@@ -849,4 +1290,41 @@ PredictionResult ekf_predict(const std::vector<ArmorPose> &observations, const G
         tracker.step(observations, gimbal, timestamp_seconds, measured_latency_s);
     logTrackerDiagnostics(tracker.diagnostics());
     return prediction;
+}
+
+TopDownSnapshot ekf_topdown_snapshot() {
+    const auto &tracker = trackerInstance();
+    TopDownSnapshot snap;
+    snap.valid = tracker.initialized();
+    if (!snap.valid) {
+        return snap;
+    }
+    const auto &st = tracker.ekf().state();
+    constexpr int kPlateCount = 4;
+    snap.center_x_m = st(0);
+    snap.center_y_m = st(2);
+    snap.center_z_m = st(4) + tracker.slotZOffsetMean();
+    snap.body_yaw_rad = st(6);
+    snap.radius_m = st(8);
+    for (int slot = 0; slot < kPlateCount; ++slot) {
+        const double phase = st(6) + 2.0 * M_PI * static_cast<double>(slot) / kPlateCount +
+                             tracker.slotAngleOffset(slot);
+        Eigen::Vector3d centre = rotating_armor::platePosition(st, slot, kPlateCount);
+        centre.z() += tracker.slotZOffset(slot);
+        centre.head<2>() -= tracker.slotRadiusOffset(slot) *
+                            Eigen::Vector2d(std::cos(phase), std::sin(phase));
+        snap.seat_centre_m[slot][0] = centre.x();
+        snap.seat_centre_m[slot][1] = centre.y();
+        snap.seat_centre_m[slot][2] = centre.z();
+        snap.seat_face_yaw_rad[slot] = rotating_armor::wrapToPi(phase + M_PI);
+    }
+    const auto &diagnostics = tracker.diagnostics();
+    snap.aim_slot = diagnostics.aim_slot;
+    snap.has_predicted_aim = diagnostics.predicted_aim_world.allFinite();
+    if (snap.has_predicted_aim) {
+        snap.predicted_aim_m[0] = diagnostics.predicted_aim_world.x();
+        snap.predicted_aim_m[1] = diagnostics.predicted_aim_world.y();
+        snap.predicted_aim_m[2] = diagnostics.predicted_aim_world.z();
+    }
+    return snap;
 }

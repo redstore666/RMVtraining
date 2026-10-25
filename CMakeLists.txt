@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(ENABLE_WEB_DEBUG "Build the scalar Web Debug dashboard" ON)
+option(ENABLE_WEB_SYSTEM "Build the web system view (tests/web_system, test_camera_system)" ON)
 option(BUILD_TESTING "Build the starter-project tests" ON)
 
 find_package(Eigen3 REQUIRED)
@@ -21,6 +22,11 @@ add_subdirectory(serialPort)
 
 if(ENABLE_WEB_DEBUG)
     add_subdirectory(web_debug)
+endif()
+
+# 系统视图用的 webdebug 副本（多一条 /frame.jpg 图片通道）；与 web_debug 互不影响。
+if(ENABLE_WEB_SYSTEM)
+    add_subdirectory(tests/web_system)
 endif()
 
 # MVS SDK 路径变量（放在 add_library 之前）
@@ -47,12 +53,36 @@ add_library(rotating_armor_ekf STATIC
     student/src/RotatingArmorEkf.cpp
     student/src/RotatingArmorTracker.cpp
     student/src/AimGeometry.cpp
+    student/src/MultiTargetTracker.cpp
 )
 target_include_directories(rotating_armor_ekf PUBLIC
     student/include
     ${CMAKE_SOURCE_DIR}/include
 )
 target_link_libraries(rotating_armor_ekf PUBLIC rotating_armor_model Eigen3::Eigen opencv_core)
+
+# EKF 俯视图（Top-Down）渲染器：把 EKF 结果画成 tmp/example.jpg 风格的调试图
+# （红点车心 + 四块蓝色模型板 + 绿色实测板 + 瞄准射线）。只读 EKF 结果、不碰跟踪
+# 逻辑，也不进 training_core —— 主程序 rmv_training 的依赖与行为保持不变。
+add_library(topdown_view STATIC
+    src/TopDownView.cpp
+)
+target_link_libraries(topdown_view PUBLIC rotating_armor_ekf opencv_imgproc)
+
+# 实验性视图代码（卡片/折线拼图、迷你俯视图）。全部放在 tests/ 下：
+# 这部分只在调试工具里用，不进 training_core，主程序 rmv_training 不依赖它。
+add_library(system_view STATIC
+    tests/SystemView.cpp
+)
+target_include_directories(system_view PUBLIC tests)
+target_link_libraries(system_view PUBLIC Eigen3::Eigen opencv_core opencv_imgproc)
+
+# 相机叠加层（检测框/坐标轴/PnP 面板/EKF 面板）：两个实时工具共用一份画法。
+add_library(camera_overlay STATIC
+    tests/CameraOverlay.cpp
+)
+target_include_directories(camera_overlay PUBLIC tests)
+target_link_libraries(camera_overlay PUBLIC training_core opencv_core opencv_imgproc)
 
 add_library(training_core STATIC
     src/AppSupport.cpp
@@ -107,6 +137,14 @@ if(ENABLE_WEB_DEBUG)
     target_link_libraries(rmv_training PRIVATE web_debug)
 endif()
 
+# 上车程序的迷你俯视图网页（main.cpp 的 RMV_SYSTEM_WEB 块）：渲染/推流纯被动，
+# 与生产 webdebug 的 web_port 错开（实际端口 = web_port+1，默认 8081）。
+if(ENABLE_WEB_SYSTEM)
+    target_link_libraries(rmv_training PRIVATE system_web system_view ${OpenCV_LIBS})
+    target_include_directories(rmv_training PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+    target_compile_definitions(rmv_training PRIVATE RMV_SYSTEM_WEB=1)
+endif()
+
 if(BUILD_TESTING)
     enable_testing()
     # 虚拟电控：用伪终端代替主控板，无硬件也能跑完整链路（见 tests/sim_controller.cpp）
@@ -158,10 +196,28 @@ if(BUILD_TESTING)
     target_link_libraries(test_rotating_armor_tracker PRIVATE rotating_armor_ekf)
     add_test(NAME ekf_tracker COMMAND test_rotating_armor_tracker)
 
+    #   多目标：两辆车各自一个 EKF，靠径向一致性把板分给不同的车。
+    add_executable(test_multi_target tests/test_multi_target.cpp)
+    target_link_libraries(test_multi_target PRIVATE rotating_armor_ekf)
+    add_test(NAME ekf_multi_target COMMAND test_multi_target)
+
     #   管线测试走真实的 ekf_predict + applyPrediction，所以必须链 training_core。
     add_executable(test_ekf_pipeline tests/test_ekf_pipeline.cpp)
     target_link_libraries(test_ekf_pipeline PRIVATE training_core)
     add_test(NAME ekf_pipeline COMMAND test_ekf_pipeline)
+
+    # 俯视图冒烟测试：合成一圈旋转车体，确认渲染器能跑完并落盘
+    # （不开窗口、不连相机，几秒内完成；只验证"能画、不崩、状态收敛"）。
+    # 总览图布局冒烟测试：不需要相机/窗口，验证画布尺寸与各分区都画了东西
+    add_executable(test_system_view tests/test_system_view.cpp)
+    target_link_libraries(test_system_view PRIVATE system_view ${OpenCV_LIBS})
+    add_test(NAME system_view_layout COMMAND test_system_view)
+
+    add_test(NAME ekf_viewer_smoke
+             COMMAND test_ekf_viewer --no-show --frames 40
+                     --out ${CMAKE_CURRENT_BINARY_DIR}/topdown_smoke)
+    set_tests_properties(ekf_viewer_smoke PROPERTIES
+        PASS_REGULAR_EXPRESSION "phase=tracking")
 endif()
 
 # ============ 标定工具 ============
@@ -185,6 +241,12 @@ add_executable(test_detect tests/test_detect.cpp)
 target_link_libraries(test_detect PRIVATE training_core ${OpenCV_LIBS})
 target_include_directories(test_detect PRIVATE ${OpenCV_INCLUDE_DIRS})
 
+# 检测耗时基准：把 detect() 拆成 预处理/推理/解码 三段，并对比模型尺寸与
+# OpenVINO 线程数、性能提示（优化 detect 时间前先量清楚时间花在哪）。
+add_executable(bench_detect tests/bench_detect.cpp)
+target_link_libraries(bench_detect PRIVATE training_core ${OpenCV_LIBS})
+target_include_directories(bench_detect PRIVATE ${OpenCV_INCLUDE_DIRS})
+
 # 位姿解算离线测试：armor_detect → armor_solve，打印位姿（单位外参开发配置）。
 add_executable(test_solve tests/test_solve.cpp)
 target_link_libraries(test_solve PRIVATE training_core ${OpenCV_LIBS})
@@ -195,9 +257,48 @@ add_executable(test_batch tests/test_batch.cpp)
 target_link_libraries(test_batch PRIVATE training_core ${OpenCV_LIBS})
 target_include_directories(test_batch PRIVATE ${OpenCV_INCLUDE_DIRS})
 
+# 离线回放：把录制的视频喂进完整链路（检测 -> PnP -> 可选 EKF），用于在没有
+# 相机现场时评估视觉识别质量，以及用真实序列做 EKF 关联/锁定/预测的离线调参。
+add_executable(test_camera_playback tests/test_camera_playback.cpp)
+target_link_libraries(test_camera_playback PRIVATE training_core topdown_view ${OpenCV_LIBS})
+if(ENABLE_WEB_DEBUG)
+    target_link_libraries(test_camera_playback PRIVATE web_debug)
+endif()
+target_include_directories(test_camera_playback PRIVATE ${OpenCV_INCLUDE_DIRS})
+
+# EKF 俯视图演示：合成真值绕云台旋转，实时看状态收敛与实测板对齐
+# （不连相机、不需要模型文件和视频；--out 可在无显示环境导出 PNG）。
+add_executable(test_ekf_viewer tests/test_ekf_viewer.cpp)
+target_link_libraries(test_ekf_viewer PRIVATE topdown_view ${OpenCV_LIBS})
+target_include_directories(test_ekf_viewer PRIVATE ${OpenCV_INCLUDE_DIRS})
+
 # 实时相机取流 + 装甲板检测（相机必须已连接）。
 add_executable(test_camera_live tests/test_camera_live.cpp)
-target_link_libraries(test_camera_live PRIVATE training_core ${OpenCV_LIBS})
+# topdown_view：EKF 俯视图渲染（与 test_camera_playback 的 --topdown 共用同一份实现）。
+target_link_libraries(test_camera_live PRIVATE training_core topdown_view camera_overlay
+                      ${OpenCV_LIBS})
+
+# 系统视图（网页版）：遥测 + 右下角迷你俯视图都推到浏览器，不画相机画面。
+# 与 test_camera_live 完全独立，互不影响（第一阶段验收仍用 test_camera_live）。
+add_executable(test_camera_system tests/test_camera_system.cpp)
+target_link_libraries(test_camera_system PRIVATE training_core camera_overlay system_view
+                      ${OpenCV_LIBS})
+# MVS SDK 的 ConvertPixelType 内部 dlopen libFormatConversion.so：dlopen 只认
+# 老式 DT_RPATH（RUNPATH 不认）——没有它就报 0x8000000C"像素转换失败"
+# （test_camera_live 有 RPATH 所以能跑，本 target 曾漏配）。与 rmv_training 同修。
+target_link_options(test_camera_system PRIVATE "-Wl,--disable-new-dtags")
+# 正弦小陀螺 ω(t)=A·sin(Ωt+φ)+b 在线拟合（Ceres，参考用户 task2_fit 项目）。
+# 找不到 Ceres 时静默跳过（在线拟合改走无 Ceres 的粗扫+线性 LS 降级路径）。
+find_package(Ceres QUIET)
+if(Ceres_FOUND)
+    target_link_libraries(test_camera_system PRIVATE ${CERES_LIBRARIES})
+    target_include_directories(test_camera_system PRIVATE ${CERES_INCLUDE_DIRS})
+    target_compile_definitions(test_camera_system PRIVATE HAVE_CERES=1)
+    message(STATUS "test_camera_system: Ceres ${Ceres_VERSION} 已链接（正弦拟合可用）")
+endif()
+if(ENABLE_WEB_SYSTEM)
+    target_link_libraries(test_camera_system PRIVATE system_web)
+endif()
 target_include_directories(test_camera_live PRIVATE ${OpenCV_INCLUDE_DIRS})
 
 # 同 test_camera：让 dlopen 能按 RPATH 找到 libFormatConversion.so。

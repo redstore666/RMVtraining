@@ -63,7 +63,7 @@ int main()
     translator.message.bias = 0.0F;
 
     State truth;
-    truth << 3.00, 0.05, 0.00, 0.02, 0.35, 0.0, 0.30, 2.50, 0.25;
+    truth << 3.00, 0.05, 0.00, 0.02, 0.35, 0.0, 0.30, 2.50, 0.25, 0.0, 0.0;
 
     sim::GimbalAim gimbal;
     gimbal.yaw = rotating_armor::vectorYaw(Eigen::Vector3d(3.0, 0.0, 0.0));
@@ -244,6 +244,25 @@ int main()
                                            std::fabs(p_gimbal[1] - expected.at<double>(1)),
                                            std::fabs(p_gimbal[2] - expected.at<double>(2))});
             check(error < 1e-9, "非占位外参原样参与 p_gimbal = R*p_camera + t");
+        }
+
+        // 实车现状：R 仍是单位阵占位，t 是真实值。旧判据「R≈I 且 |t|≈0 才占位」
+        // 会让真 t 把占位 R 蒙混过关（90° 重排被跳过）。新语义：R 单独判定，
+        // 占位则补 90° 重排；t 单独判定，非零就照常相加。
+        camera.rotation_camera_to_gimbal = cv::Mat::eye(3, 3, CV_64F);
+        camera.translation_camera_to_gimbal =
+            (cv::Mat_<double>(3, 1) << 6.711e-02, 0.0, 5.150e-02);
+        const std::vector<ArmorPose> placeholder_with_t =
+            armor_solve(detections, camera, GimbalState{});
+        check(placeholder_with_t.size() == 1, "占位 R + 真 t 下 armor_solve 仍输出观测");
+        if (placeholder_with_t.size() == 1)
+        {
+            const cv::Vec3d &p_camera = placeholder_with_t[0].position_camera_m;
+            const cv::Vec3d &p_gimbal = placeholder_with_t[0].position_gimbal_m;
+            const double error = std::max({std::fabs(p_gimbal[0] - (p_camera[2] + 6.711e-02)),
+                                           std::fabs(p_gimbal[1] - (-p_camera[0])),
+                                           std::fabs(p_gimbal[2] - (-p_camera[1] + 5.150e-02))});
+            check(error < 1e-6, "占位 R 补 90° 重排，同时保留真实平移 t");
         }
     }
 

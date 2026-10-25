@@ -3,6 +3,15 @@
 #include "StudentTasks.hpp"
 #include "WebLogger.hpp"
 
+#ifdef RMV_SYSTEM_WEB
+// 迷你俯视图（上车调试显示）：渲染/推流全部被动，串口控制路径零改动。
+#include "AimGeometry.hpp"
+#include "SystemView.hpp"
+#include "SystemWebLogger.hpp"
+
+#include <opencv2/imgcodecs.hpp>
+#endif
+
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -339,10 +348,22 @@ void *OperationFunction(void *arg) {
     // Web 服务和相机 SDK 都属于操作线程的资源，生命周期与原工程一致。
     START_WEB_SERVER(web_port);
 
+#ifdef RMV_SYSTEM_WEB
+    // 迷你俯视图网页通道（system_web），与生产 webdebug 的 web_port 错开。
+    SystemWebLogger::getInstance().start(web_port + 1);
+    std::cout << "mini top-down web: http://127.0.0.1:" << (web_port + 1) << "/\n";
+#endif
+
     double dt = 0.0;
     double last_time_stamp = 0.0;
     auto last_frame_time = std::chrono::steady_clock::time_point{};
     int empty_frame_count = 0;
+
+#ifdef RMV_SYSTEM_WEB
+    // 迷你俯视图 60Hz 渲染门。
+    const int64_t mini_interval_ticks = cv::getTickFrequency() / 60;
+    int64_t last_mini_tick = 0;
+#endif
 
     while (!shutdown_requested.load(std::memory_order_relaxed)) {
         const auto process_start = std::chrono::steady_clock::now();
@@ -462,8 +483,105 @@ void *OperationFunction(void *arg) {
 
         // 4. 将结果写回原 64 字节结构体。
         writeFrame(*serialPort, translator);
+
+#ifdef RMV_SYSTEM_WEB
+        // ===== 迷你俯视图（纯被动显示：渲染/推流在串口写出之后，零控制延迟）=====
+        // 几何与 test_camera_system 的刚体版一致：座位由 ekf_topdown_snapshot()
+        // 提供（EKF 刚体 + 每槽位显示偏移），绿色实测板 = 本帧 PnP 观测
+        // （gimbal->world + 180° 消歧，与 collectWorldObservations 同一变换）。
+        {
+            const int64_t now_tick = cv::getTickCount();
+            if (now_tick - last_mini_tick >= mini_interval_ticks)
+            {
+                last_mini_tick = now_tick;
+                rotating_armor::MiniTopDownFrame mini;
+                mini.camera_position = Eigen::Vector3d(0.0, 0.0, 0.0);
+                const TopDownSnapshot snap = ekf_topdown_snapshot();
+                if (snap.valid)
+                {
+                    mini.has_body = true;
+                    mini.body_centre = Eigen::Vector3d(snap.center_x_m, snap.center_y_m,
+                                                       snap.center_z_m);
+                    constexpr int kPlateCount = 4;
+                    for (int slot = 0; slot < kPlateCount; ++slot)
+                    {
+                        mini.plate_centres.push_back(Eigen::Vector3d(
+                            snap.seat_centre_m[slot][0], snap.seat_centre_m[slot][1],
+                            snap.seat_centre_m[slot][2]));
+                        mini.plate_yaws.push_back(snap.seat_face_yaw_rad[slot]);
+                        mini.plate_half_widths.push_back(0.0675); // 小板；宽学习留给工具版
+                    }
+                    mini.aim_slot = snap.aim_slot;
+                    if (snap.has_predicted_aim)
+                    {
+                        mini.has_predicted_aim = true;
+                        mini.predicted_aim = Eigen::Vector3d(
+                            snap.predicted_aim_m[0], snap.predicted_aim_m[1],
+                            snap.predicted_aim_m[2]);
+                    }
+                    // 实测叠加：绿线整圈稳定、灰线慢半拍 → EKF 相位滞后；
+                    // 绿线乱跳、灰线平稳 → 观测/关联侧问题，不是滤波器。
+                    const std::uint8_t want_id = prediction.target_id;
+                    if (want_id != 0)
+                    {
+                        const Eigen::Matrix3d rotation =
+                            rotating_armor::gimbalToWorld(gimbal);
+                        for (const ArmorPose &pose : observations)
+                        {
+                            if (pose.detection.target_id != want_id)
+                                continue;
+                            const Eigen::Vector3d p_gimbal(pose.position_gimbal_m[0],
+                                                           pose.position_gimbal_m[1],
+                                                           pose.position_gimbal_m[2]);
+                            if (!p_gimbal.allFinite() || p_gimbal.norm() < 1.0e-3)
+                                continue;
+                            const Eigen::Vector3d p_world = rotation * p_gimbal;
+                            const Eigen::Vector3d n_gimbal(pose.normal_gimbal[0],
+                                                           pose.normal_gimbal[1],
+                                                           pose.normal_gimbal[2]);
+                            Eigen::Vector3d normal_world = Eigen::Vector3d::Zero();
+                            if (n_gimbal.allFinite() && n_gimbal.norm() > 0.5)
+                                normal_world = rotation * (n_gimbal / n_gimbal.norm());
+                            else
+                                normal_world =
+                                    rotation * Eigen::Vector3d(std::cos(pose.armor_yaw),
+                                                               std::sin(pose.armor_yaw), 0.0);
+                            if (normal_world.dot(p_world) > 0.0)
+                                normal_world = -normal_world;
+                            const double yaw =
+                                (std::hypot(normal_world.x(), normal_world.y()) > 1.0e-3)
+                                    ? rotating_armor::vectorYaw(normal_world)
+                                    : 0.0;
+                            mini.detected_centres.push_back(p_world);
+                            mini.detected_yaws.push_back(yaw);
+                            mini.detected_half_widths.push_back(
+                                pose.detection.size == ArmorSize::Large ? 0.115 : 0.0675);
+                        }
+                    }
+                    mini.caption =
+                        cv::format("d=%.2fm R=%.2fm w=%+.1f", prediction.distance_m,
+                                   prediction.radius_1_m,
+                                   static_cast<double>(prediction.body_yaw_velocity));
+                }
+                else
+                {
+                    mini.caption = "no target";
+                }
+                const cv::Mat mini_canvas = rotating_armor::renderMiniTopDown(mini);
+                std::vector<unsigned char> jpeg;
+                const std::vector<int> jpeg_params = {cv::IMWRITE_JPEG_QUALITY, 80};
+                if (cv::imencode(".jpg", mini_canvas, jpeg, jpeg_params))
+                    SYSTEM_FRAME(jpeg);
+                SYSTEM_LOG("omega", static_cast<double>(prediction.body_yaw_velocity));
+                SYSTEM_LOG("distance_m", static_cast<double>(prediction.distance_m));
+            }
+        }
+#endif
     }
 
     STOP_WEB_SERVER();
+#ifdef RMV_SYSTEM_WEB
+    SystemWebLogger::getInstance().stop();
+#endif
     return nullptr;
 }
