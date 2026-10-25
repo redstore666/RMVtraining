@@ -22,8 +22,8 @@
 //   --web-port N   网页端口（默认 8081；生产程序的 webdebug 是 8080，互不影响）
 //   --id N         启动就只看 id=N（0 = 自动）。网页下拉菜单随时可以改；切 id 时跟踪器
 //                  会 reset，不会把两台车的观测混进同一个状态。
-//   --plate-width M  迷你俯视图里装甲板的长度（米，默认 0.135 = 小板）。
-//                  固定长度：不随"这一帧检测到的是大板还是小板"变来变去。
+//   --plate-width M  强制四块模型板的显示宽度（米，默认 0 = 按板型真实尺寸画：
+//                  小板 0.135 / 大板 0.230 全宽）。只在想放大看清时用。
 //   --show-camera  额外开一个窗口显示相机画面 + 检测框 + 坐标轴 + EKF 叠加
 //   --no-display   不开任何窗口（只推网页；纯吞吐/后台跑）
 //   --dump-every N 每 N 帧把迷你俯视图存到 ./tmp/system_mini_XXXXXX.png
@@ -46,6 +46,7 @@
 
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <complex>
@@ -54,6 +55,7 @@
 #include <cstring>
 #include <deque>
 #include <iostream>
+#include <limits>
 #include <set>
 #include <string>
 #include <thread>
@@ -184,8 +186,7 @@ int main(int argc, char **argv)
     int dump_every = 0;
     bool video_loop = false;
     double hold_s = 0.0;
-    double plate_width_m = 0.135; // 固定长度，不随检测到的板型变
-    double radius_display_m = 0.25; // 俯视图固定座位矩形的半径常量（--radius 覆盖）；显示用，不随估计变
+    double plate_width_m = 0.0;   // --plate-width M：>0 时覆盖四块板的显示宽度（0=按板型真实尺寸）
     int initial_pin = 0;          // --id N：启动就只看这个 id（网页下拉菜单仍可改）
     float conf_thres = -1.0F;     // --conf T：检测置信度门限（<0 = 用库默认 0.7）
     bool pair_body = false;       // --pair-body：打开"双板整车求解"（库默认关）
@@ -222,8 +223,9 @@ int main(int argc, char **argv)
                          "       [--hold S] [--web-port N] [--id N] [--plate-width M] [--conf T]\n"
                          "       [--show-camera] [--no-display] [--dump-every N]\n"
                          "  --id N           启动就只看 id=N（0=自动）；网页下拉菜单随时可改\n"
-                         "  --plate-width M  迷你图里的板长（米，默认 0.135，四块板等长）\n"
-                         "  --radius M       俯视图固定座位矩形半径（米，默认 0.25，硬固定不随估计变）\n"
+                         "  --plate-width M  强制四块模型板的显示宽度（米，默认按板型真实尺寸：\n"
+                         "                   小板 0.135 / 大板 0.230，只在镜头太远时放大看用）\n"
+                         "  --radius M       [已废弃] 半径现在取 EKF state(8)，该参数不生效\n"
                          "  --conf T         检测置信度门限（默认用库里的 0.7；调低会多出弱检\n"
                          "  --pair-body      打开双板整车求解（两块相邻板闭式解 c/R/yaw，库默认关）\n"
                          "  --rate-pll       打开残差 PLL 转速量测（库默认关；四板相位只有 mod 90 度可观测）\n"
@@ -296,17 +298,16 @@ int main(int argc, char **argv)
         }
         else if (arg == "--radius")
         {
+            // 整车建模后半径是 EKF 状态 state(8)，不再是画图用的常量。
+            // 保留这个参数只为不打断旧命令行：吃一个数值、提示一次、然后忽略。
             if (i + 1 >= argc)
             {
                 std::cerr << "--radius 后面要跟米数\n";
                 return 2;
             }
-            radius_display_m = std::atof(argv[++i]);
-            if (!(radius_display_m > 0.05 && radius_display_m < 0.60))
-            {
-                std::cerr << "--radius 应在 0.05~0.60 m 之间\n";
-                return 2;
-            }
+            const double ignored = std::atof(argv[++i]);
+            std::cerr << cv::format("[arg] --radius %.3f 已废弃：俯视图半径现在取 EKF state(8)"
+                                    "（整车刚体建模），该参数不生效\n", ignored);
         }
         else if (arg == "--video-loop")
             video_loop = true;
@@ -414,18 +415,23 @@ int main(int argc, char **argv)
                                 pair_body ? 1 : 0, rate_pll ? 1 : 0, rate_tracklet ? 1 : 0);
     }
 
-    // ===== 固定座位显示的状态 =====
-    // 车心：观测板位 + R·外法向 的显示 EMA；无观测帧保持不外推。
-    double disp_center_x{0.0};
-    double disp_center_y{0.0};
-    double disp_center_z{0.0};
-    bool disp_center_has{false};
-    // 座位号不再自己积分：旧实现用"前板绕 PnP 中心的方位角 α 逐帧累加"当相位
-    // Θ，两个致命拖慢——① 逐帧 7° 的 PnP 噪声被累加 500+ 次成随机游走；
-    // ② "前板"是"离相机最近的那块"，远处两板距离差 1~2 cm 与噪声同量级时
-    // 会在两块之间来回切换，|Δα|≈90° 全被判成"换板"丢弃，Θ 原地不动。
-    // 现在座位号直接由 EKF 相位 state(6) 决定：seat = round(φ/90°)，与
-    // RotatingArmorModel::measurement() 同一套几何，显示即 EKF 读数。
+    // ===== 迷你俯视图的显示状态（2026-10-25 整车建模后）=====
+    //
+    // 车心不再有"PnP 反推 + EMA"这一路：四块板全由 EKF 刚体 (车心, R, φ) 决定，
+    // 圆心再混一个独立来源只会让刚体自相矛盾（板位来自 EKF、圆心来自 PnP，
+    // 两者一不一致就整块四块板一起偏出去）。俯视图现在的唯一几何来源是
+    // `rotating_armor::platePosition(state, slot, N)`。
+    //
+    // 唯一还需要"学"的是每块板的显示半宽：板型（大/小装甲）不是滤波状态，
+    // 只能从观测里取。做法见下面学 slot_half_width 的那段——按"最近的观测落在
+    // 哪个槽位"记录，没观测过的槽位按小板，绝不拿半径 R 冒充板宽。
+    std::array<double, kPlateCount> slot_half_width{};
+    slot_half_width.fill(0.0675);
+    // --plate-width 给了值就四块一律用它（命令行是整板宽，这里存半宽），
+    // 且下面不再用观测去改——显式覆盖的语义必须压住自动学习。
+    const bool plate_width_overridden = plate_width_m > 0.0;
+    if (plate_width_overridden)
+        slot_half_width.fill(0.5 * plate_width_m);
 
     if (conf_thres > 0.0F)
     {
@@ -615,7 +621,10 @@ int main(int argc, char **argv)
         if (pinned != pinned_last)
         {
             tracker.reset();
-            disp_center_has = false;
+            // 换车就把学到的板型清回默认：新车的四块板大小、以及"哪块是谁"
+            // 和上一台车无关，留着会先画错几帧。
+            if (!plate_width_overridden)
+                slot_half_width.fill(0.0675);
             pinned_last = pinned;
             pinned_last_seen_s = -1.0e9;
             std::cout << (pinned > 0 ? cv::format("[pin] 只看 id=%d（丢失也不自动切换）\n", pinned)
@@ -692,11 +701,18 @@ int main(int argc, char **argv)
                     continue;
                 const Eigen::Vector3d obs(pose.position_gimbal_m[0], pose.position_gimbal_m[1],
                                           pose.position_gimbal_m[2]);
+                int pose_best_slot = -1;   // 这一块观测最像哪个槽位（学板宽用）
+                double pose_best_d = 0.10;
                 for (int slot = 0; slot < kPlateCount; ++slot)
                 {
                     const Eigen::Vector3d model =
                         rotating_armor::platePosition(st, slot, kPlateCount);
                     const double d = (model - obs).norm();
+                    if (d < pose_best_d)
+                    {
+                        pose_best_d = d;
+                        pose_best_slot = slot;
+                    }
                     if (d < best_d)
                     {
                         best_d = d;
@@ -717,48 +733,25 @@ int main(int argc, char **argv)
                                         st(7));
                     }
                 }
+                // 板型（大/小装甲）不是滤波状态，画图时只能从观测里取：
+                // 把这块观测配到它最像的那个槽位，记下该槽位的真实半宽
+                // （小 0.0675 / 大 0.115，与开火判据用的是同一组常数）。
+                // 没被任何观测配到过的槽位保持小板的默认值。
+                if (pose_best_slot >= 0 && !plate_width_overridden)
+                {
+                    slot_half_width[static_cast<std::size_t>(pose_best_slot)] =
+                        pose.detection.size == ArmorSize::Large ? 0.115 : 0.0675;
+                }
             }
         }
 
-        // ===== 固定座位显示的实测锚（每处理帧更新，不进 60Hz 渲染门）=====
-        // 只留车心：中心 = 观测板位 + R·外法向（单板可解，EMA 去抖，
-        // 无观测帧保持不外推；观测取离相机最近的那块）。相位不再从这里出。
-        if (!tracked_poses.empty())
-        {
-            const ArmorPose *front = &tracked_poses.front();
-            for (const ArmorPose &p : tracked_poses)
-            {
-                if (Eigen::Vector3d(p.position_gimbal_m[0], p.position_gimbal_m[1],
-                                    p.position_gimbal_m[2])
-                        .norm() <
-                    Eigen::Vector3d(front->position_gimbal_m[0],
-                                    front->position_gimbal_m[1],
-                                    front->position_gimbal_m[2])
-                        .norm())
-                {
-                    front = &p;
-                }
-            }
-            const double fx = front->position_gimbal_m[0];
-            const double fy = front->position_gimbal_m[1];
-            const double fz = front->position_gimbal_m[2];
-            const double cx = fx + radius_display_m * std::cos(front->armor_yaw);
-            const double cy = fy + radius_display_m * std::sin(front->armor_yaw);
-            if (!disp_center_has)
-            {
-                disp_center_x = cx;
-                disp_center_y = cy;
-                disp_center_z = fz;
-                disp_center_has = true;
-            }
-            else
-            {
-                const double a = 0.20; // 显示去抖 EMA
-                disp_center_x += a * (cx - disp_center_x);
-                disp_center_y += a * (cy - disp_center_y);
-                disp_center_z += a * (fz - disp_center_z);
-            }
-        }
+        // ===== 整车建模（2026-10-25）=====
+        // 旧的"固定座位"锚（PnP 单板反推车心 + EMA）已删除：那个车心只用来给
+        // 钉死不转的四块灰板定位，现在四块板全部由 EKF 刚体 (车心, R, φ) 决定，
+        // 再混一个 PnP 反推的车心进来反而会让"刚体"自相矛盾（板位由 EKF 算、
+        // 圆心来自 PnP，两者不一致时四块板会整体偏出去）。
+        // 俯视图现在只有一个几何来源：`rotating_armor::platePosition(state, slot, N)`,
+        // 与跟踪/预测/开火判据用的是同一个公式。
 
         const double frame_dt_ms =
             last_frame_time_s > 0.0 ? (time_s - last_frame_time_s) * 1000.0 : 0.0;
@@ -779,42 +772,105 @@ int main(int argc, char **argv)
             {
                 const rotating_armor::State &state = tracker.ekf().state();
                 mini.has_body = true;
+                // 车心抬到四块板高偏移的均值上：state(4) 会被"最近更新的那块板"
+                // 的 z 拽着上下跳，四块板才不会对称地绕它转。
                 mini.body_centre = Eigen::Vector3d(
                     state(0), state(2), state(4) + tracker.slotZOffsetMean());
                 const double radius = state(8);
-                // 固定座位显示：四块灰色板钉在车心 ± R 的四个基点围成闭合矩形，
-                // 永不转动、大小不变；"选定板"落到哪个座位，那个座位亮黄。
-                // 座位号只由 EKF 相位决定，不掺 aim_slot：座位的定义是
-                // "参考板(槽位 0)此刻所在的位置"，模型里它就在 φ，所以
-                // seat = round(φ/90°)。φ 每前进 90° 走一格，一格耗时 = 90°/ω，
-                // 速度与 EKF 转速严格一致；aim_slot 的变化由白色描边单独表达
-                // （SystemView 的 is_aim），两者不互相污染。
-                const double R = radius_display_m;
-                if (disp_center_has)
+
+                // ===== 整车刚体建模：四块板随 φ 一起连续转动 =====
+                //
+                // 每一块板都只有两个数决定，和跟踪/预测/开火判据用的是同一份公式：
+                //   phase = φ + slot·2π/N                        （RotatingArmorModel::platePhase）
+                //   板心  = center − R_slot·[cos phase, sin phase]（= platePosition())
+                //   外法向 = phase + π                           （platePhaseToWorldYaw）
+                // 画成"垂直于法向、长度 = 真实板宽"的短线段，因此是四段互不相连的
+                // 短线、随转速一圈圈转——不是以前那四个钉死座位拼成的方框。
+                //
+                // 再叠加 tracker 用观测学出来的**每槽位显示偏移**（z / 半径 / 角度）：
+                // 实拍道具不是严格正方形、四块板也不在同一高度（同帧高度差能到 ±4 cm），
+                // 不补的话模型板会一块压住另一块、一块明显偏出去，看着像"模型算错了"，
+                // 其实是被拍的物体不标准。这三个偏移只影响画图，不进滤波状态。
+                //
+                // 板心/法向都走下面两个小函数，**瞄准点也用同一个**——否则青环会
+                // 落在没加偏移的"理想板位"上，和画出来的灰线错开几厘米。
+                const auto platePhaseOnScreen = [&](int slot)
                 {
-                    const Eigen::Vector3d c(disp_center_x, disp_center_y, disp_center_z);
-                    mini.body_centre = c; // 车心标记也用 PnP 实测（不随预测外推）
-                    for (int slot = 0; slot < kPlateCount; ++slot)
-                    {
-                        const double seat = static_cast<double>(slot) * M_PI * 0.5;
-                        mini.plate_centres.push_back(
-                            Eigen::Vector3d(c.x() - R * std::cos(seat),
-                                            c.y() - R * std::sin(seat), c.z()));
-                        mini.plate_yaws.push_back(seat);
-                        mini.plate_half_widths.push_back(R); // 半长=R → 四边首尾相连
-                    }
-                    const double phase = state(6);
-                    const int phase_seats =
-                        static_cast<int>(std::lround(phase / (M_PI * 0.5)));
-                    mini.highlight_slot = ((phase_seats % kPlateCount) + kPlateCount) % kPlateCount;
-                    SYSTEM_LOG("ekf_phase_deg", phase * 180.0 / M_PI);
+                    return state(6) + 2.0 * M_PI * static_cast<double>(slot) /
+                                          static_cast<double>(kPlateCount) +
+                           tracker.slotAngleOffset(slot);
+                };
+                const auto plateCentreOnScreen = [&](int slot)
+                {
+                    Eigen::Vector3d centre =
+                        rotating_armor::platePosition(state, slot, kPlateCount);
+                    centre.z() += tracker.slotZOffset(slot);
+                    const double phase = platePhaseOnScreen(slot);
+                    centre.head<2>() -=
+                        tracker.slotRadiusOffset(slot) *
+                        Eigen::Vector2d(std::cos(phase), std::sin(phase));
+                    return centre;
+                };
+                for (int slot = 0; slot < kPlateCount; ++slot)
+                {
+                    mini.plate_centres.push_back(plateCentreOnScreen(slot));
+                    // 外法向 = 相位 + π；画线时取切线 (-sin, cos)。
+                    mini.plate_yaws.push_back(
+                        rotating_armor::wrapToPi(platePhaseOnScreen(slot) + M_PI));
+                    mini.plate_half_widths.push_back(slot_half_width[static_cast<std::size_t>(slot)]);
                 }
+
+                // ===== 叠加实测板（PnP 原始观测，不经过 EKF）=====
+                // 灰线是"模型认为板在哪"，绿线是"这一帧传感器看到板在哪"：
+                //   · 绿线整圈稳定、灰线慢半拍 → 转速/相位滞后（EKF 侧问题）；
+                //   · 绿线自己乱跳、灰线平稳   → 观测/关联侧问题，不是滤波器。
+                // 坐标变换与 collectWorldObservations 一致：位置 = R_world_gimbal·p_gimbal，
+                // 法向先转向量；没有 normal_gimbal 时才退回 armor_yaw 的二维方向。
+                // 两侧都做 180° 消歧：板能被检出就说明它的外法向朝着相机，n·p < 0。
+                {
+                    const int want_id = pinned > 0 ? pinned : diagnostics.target_id;
+                    const Eigen::Matrix3d rotation = rotating_armor::gimbalToWorld(gimbal);
+                    for (const ArmorPose &pose : poses)
+                    {
+                        if (want_id > 0 && pose.detection.target_id != want_id)
+                            continue;
+                        const Eigen::Vector3d p_gimbal(pose.position_gimbal_m[0],
+                                                       pose.position_gimbal_m[1],
+                                                       pose.position_gimbal_m[2]);
+                        if (!p_gimbal.allFinite() || p_gimbal.norm() < 1.0e-3)
+                            continue;
+                        const Eigen::Vector3d p_world = rotation * p_gimbal;
+
+                        const Eigen::Vector3d n_gimbal(pose.normal_gimbal[0], pose.normal_gimbal[1],
+                                                       pose.normal_gimbal[2]);
+                        Eigen::Vector3d normal_world = Eigen::Vector3d::Zero();
+                        if (n_gimbal.allFinite() && n_gimbal.norm() > 0.5)
+                        {
+                            normal_world = rotation * (n_gimbal / n_gimbal.norm());
+                        }
+                        else
+                        {
+                            normal_world = rotation * Eigen::Vector3d(std::cos(pose.armor_yaw),
+                                                                      std::sin(pose.armor_yaw), 0.0);
+                        }
+                        if (normal_world.dot(p_world) > 0.0)
+                            normal_world = -normal_world;
+                        const double yaw = (std::hypot(normal_world.x(), normal_world.y()) > 1.0e-3)
+                                               ? rotating_armor::vectorYaw(normal_world)
+                                               : std::numeric_limits<double>::quiet_NaN();
+                        mini.detected_centres.push_back(p_world);
+                        mini.detected_yaws.push_back(yaw);
+                        mini.detected_half_widths.push_back(
+                            pose.detection.size == ArmorSize::Large ? 0.115 : 0.0675);
+                    }
+                }
+
                 mini.aim_slot = diagnostics.aim_slot;
                 if (diagnostics.aim_slot >= 0 && diagnostics.aim_slot < kPlateCount)
                 {
                     mini.has_valid_aim = true;
-                    mini.valid_aim = rotating_armor::platePosition(state, diagnostics.aim_slot,
-                                                                  kPlateCount);
+                    // 与灰线同一个几何：否则青环会落在没加槽位偏移的理想板位上。
+                    mini.valid_aim = plateCentreOnScreen(diagnostics.aim_slot);
                 }
                 if (diagnostics.predicted_aim_world.allFinite())
                 {
@@ -826,6 +882,7 @@ int main(int argc, char **argv)
                                           radius, static_cast<double>(prediction.body_yaw_velocity));
                 if (has_phase_lag)
                     mini.caption += cv::format("  lag=%+.0f", phase_lag_deg);
+                SYSTEM_LOG("ekf_phase_deg", state(6) * 180.0 / M_PI);
             }
             else if (pinned > 0)
             {

@@ -524,9 +524,10 @@ cv::Mat renderMiniTopDown(const MiniTopDownFrame &frame, const MiniTopDownOption
     const auto to_px3 = [&](const Eigen::Vector3d &p) { return to_px(p.x(), p.y()); };
     const cv::Rect canvas_rect(0, 0, width, height);
 
-    // 板：一段粗线（长度 = 整板宽），aim 板多画一圈白描边。固定座位显示：
-    // 四块板灰色钉死不转；跟踪板当前落点的座位整体亮黄（highlight_slot），
-    // 高亮走一格 = 真实板转了 90°。
+    // 板：一段粗线（长度 = 整板宽），aim 板多画一圈白描边。
+    // 整车建模后四块板都由 (车心, R, φ) 的刚体给出、一起随 φ 转，
+    // 半宽用真实装甲板尺寸（小 0.0675 / 大 0.115），所以画出来是四段
+    // 互不相连的短线段，而不是一个"方框"。
     for (std::size_t i = 0; i < frame.plate_centres.size(); ++i)
     {
         const double yaw = i < frame.plate_yaws.size() ? frame.plate_yaws[i] : 0.0;
@@ -552,8 +553,31 @@ cv::Mat renderMiniTopDown(const MiniTopDownFrame &frame, const MiniTopDownOption
         }
         else
         {
-            cv::line(canvas, a, b, cv::Scalar(150, 150, 150), 3, cv::LINE_AA); // 灰=座位
+            cv::line(canvas, a, b, cv::Scalar(150, 150, 150), 3, cv::LINE_AA); // 灰=模型板
         }
+    }
+
+    // 实测板（PnP 原始观测，不经过 EKF）：绿色细线 + 中心点。
+    // 和灰色模型板并排看，一眼就能分辨"模型转慢了"和"观测在跳"：
+    //   · 绿线整圈稳定、灰线落后一个角度 → 转速/相位滞后；
+    //   · 绿线自己乱跳、灰线平稳      → 观测（法向/关联）有问题，不是滤波器。
+    for (std::size_t i = 0; i < frame.detected_centres.size(); ++i)
+    {
+        const double yaw = i < frame.detected_yaws.size() ? frame.detected_yaws[i] : 0.0;
+        const double half_w = i < frame.detected_half_widths.size()
+                                  ? frame.detected_half_widths[i]
+                                  : 0.0675;
+        if (!std::isfinite(yaw))
+            continue;
+        const double tx = -std::sin(yaw);
+        const double ty = std::cos(yaw);
+        const cv::Point a = to_px(frame.detected_centres[i].x() - half_w * tx,
+                                  frame.detected_centres[i].y() - half_w * ty);
+        const cv::Point b = to_px(frame.detected_centres[i].x() + half_w * tx,
+                                  frame.detected_centres[i].y() + half_w * ty);
+        cv::line(canvas, a, b, cv::Scalar(80, 220, 80), 2, cv::LINE_AA);
+        cv::circle(canvas, to_px3(frame.detected_centres[i]), 2, cv::Scalar(80, 220, 80), -1,
+                   cv::LINE_AA);
     }
 
     // 云台原点：灰色空心小圆（"相机装在云台前面一点"，两者要能分开看）。

@@ -108,7 +108,7 @@ curl -s http://127.0.0.1:8080/frame.jpg -o /tmp/mini.jpg   # 端口换成你起�
 | `student/include/RotatingArmorTracker.hpp` | 一堆 `rate_*` / `pair_body_*` 配置 | 详见 §6 的开关表 |
 | `tests/test_camera_system.cpp` | `SYSTEM_LOG` 块 | 网页/SSE 的键都在这里加（约 30 个），改完工具的调试面板自动有 |
 | `tests/web_system/static/index.html` | `#mini-topdown` | 右下角迷你图 + 左上角选车下拉（`/targets`、`/select?id=`） |
-| `tests/SystemView.cpp` | `renderMiniTopDown()` | 迷你俯视图绘制（黑底、固定板长 `--plate-width`、观测白十字、有效瞄准青环、预测瞄准黄叉） |
+| `tests/SystemView.cpp` | `renderMiniTopDown()` | 迷你俯视图绘制：灰短线 = 4 块**刚体模型板**（`platePosition(state,slot,N)`，随 φ 转，半宽按板型 0.0675/0.115）、绿细线 = PnP 实测板（世界系，不经 EKF）、白描边 = aim 板、青环 = 有效瞄准、黄叉/绿点 = 预测瞄准 |
 | `src/TopDownView.cpp` | 旧的完整俯视图（含 HUD/图例） | 生产 `main.cpp` 用；`test_camera_system` 不用 |
 
 **渲染约定**：板在平面上是 `c - r*[cos φ, sin φ]`，**外法向 = φ + π**（`RotatingArmorModel.cpp` 的 `platePhaseToWorldYaw`）。
