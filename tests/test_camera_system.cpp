@@ -414,16 +414,6 @@ int main(int argc, char **argv)
                                 pair_body ? 1 : 0, rate_pll ? 1 : 0, rate_tracklet ? 1 : 0);
     }
 
-    // ===== 观测驱动的显示相位（零锁频延迟的真实相位）=====
-    // 检测到的板的法向本身就是真实板相位（白十字标记转得和实际一致——
-    // 用户的发现）。连续解缠观测法向序列：同板帧间 Δ=ω·dt 很小；换板
-    // 精确跳 ±90°（四板对称），fold±π 下照样推进——净推进=真实转速、
-    // 方向正确（离线验证该序列净转速 +8.5 rad/s）。显示优先用它；
-    // 观测缺失（出画）回退通道积分相位。
-    // 观测驱动的显示相位（零锁频延迟的真实相位）：0.3s 窗口内所有
-    // (t, 法向) 样本跨帧全配对 fold±π 取中位速率，逐帧积分。
-    double obs_disp_phase{0.0};
-    bool obs_disp_init{false};
     // ===== 固定座位显示的状态（全部 PnP 实测锚定，与 EKF 预测无关）=====
     // 中心：观测板位 + R·外法向 的显示 EMA；无观测帧保持不外推。
     double disp_center_x{0.0};
@@ -626,7 +616,6 @@ int main(int argc, char **argv)
         if (pinned != pinned_last)
         {
             tracker.reset();
-            obs_disp_init = false;
             disp_center_has = false;
             front_seat_has = false;
             front_theta = 0.0;
@@ -655,75 +644,6 @@ int main(int argc, char **argv)
         // POSE_DEBUG=1：逐帧打印每块板的"位置 bearing vs 法向"，用来判断
         // 模型的"外法向 = 相位 + π"约定和实拍法向到底差多少（45 度偏置的来源）。
         static const bool pose_debug = std::getenv("POSE_DEBUG") != nullptr;
-        // 观测转速诊断（obs_rate 键）：窗口内存所有 (t, 法向) 原始样本，跨帧
-        // 全配对 fold±π/dt 取中位——同板对给真实 ω、换板/闪烁对(±90°)
-        // 是离群对，中值免疫；链式"最近邻选择"会被闪烁系统性带偏（实测
-        // ±24 rad/s 伪转速）。逐帧把中值速率积分成显示相位。
-        {
-            static std::deque<std::pair<double, double>> obs_yaw_win;  // (t, yaw)
-            static double obs_int_t = 0.0;
-            if (!tracked_poses.empty())
-            {
-                for (const ArmorPose &pose : tracked_poses)
-                {
-                    obs_yaw_win.push_back({time_s, pose.armor_yaw});
-                }
-                while (!obs_yaw_win.empty() && time_s - obs_yaw_win.front().first > 0.30)
-                {
-                    obs_yaw_win.pop_front();
-                }
-                if (obs_yaw_win.size() >= 16)
-                {
-                    std::vector<double> pair_rates;
-                    for (std::size_t i = 0; i + 1 < obs_yaw_win.size(); ++i)
-                    {
-                        for (std::size_t j = i + 1; j < obs_yaw_win.size(); ++j)
-                        {
-                            const double dt = obs_yaw_win[j].first - obs_yaw_win[i].first;
-                            if (dt < 0.03 || dt > 0.15)
-                                continue;
-                            double d = obs_yaw_win[j].second - obs_yaw_win[i].second;
-                            while (d > CV_PI) d -= 2.0 * CV_PI;
-                            while (d < -CV_PI) d += 2.0 * CV_PI;
-                            pair_rates.push_back(d / dt);
-                        }
-                    }
-                    if (pair_rates.size() >= 12)
-                    {
-                        std::sort(pair_rates.begin(), pair_rates.end());
-                        const double rate = pair_rates[pair_rates.size() / 2];
-                        // 物理量程 + 噪声门（|rate| 也要信得过）
-                        if (std::abs(rate) < 12.0 && std::abs(rate) > 0.3)
-                        {
-                            if (obs_disp_init && obs_int_t > 0.0 &&
-                                time_s - obs_int_t < 0.05)
-                            {
-                                obs_disp_phase += rate * (time_s - obs_int_t);
-                            }
-                            obs_disp_init = true;
-                            obs_int_t = time_s;
-                        }
-                        else if (!obs_disp_init)
-                        {
-                            obs_disp_init = false;
-                        }
-                    }
-                }
-                if (!obs_disp_init && !obs_yaw_win.empty())
-                {
-                    // 未起转时的初始化锚（相位随便取一块板的法向即可，四重
-                    // 对称下显示相位差 90° 不可分辨）
-                    obs_disp_phase = obs_yaw_win.back().second;
-                    obs_disp_init = true;
-                    obs_int_t = time_s;
-                }
-            }
-            else if (time_s - (obs_yaw_win.empty() ? 0.0 : obs_yaw_win.back().first) > 0.3)
-            {
-                obs_yaw_win.clear();
-                obs_int_t = 0.0;
-            }
-        }
 
         if (pose_debug && tracker.initialized() && !tracked_poses.empty())
         {
@@ -752,28 +672,6 @@ int main(int argc, char **argv)
             }
         }
 
-
-        // 观测法向净转速（诊断键 obs_rate）：纯观测驱动的白十字转速，与
-        // EKF/俯视图相位无耦合，留作锁频通道重建时的对照信号。
-        {
-            static double s_prev_obs_phase = 0.0;
-            static double s_prev_t = 0.0;
-            if (obs_disp_init && s_prev_t > 0.0 && time_s > s_prev_t &&
-                time_s - s_prev_t < 0.05)
-            {
-                SYSTEM_LOG("obs_rate",
-                           (obs_disp_phase - s_prev_obs_phase) / (time_s - s_prev_t));
-            }
-            if (obs_disp_init)
-            {
-                s_prev_obs_phase = obs_disp_phase;
-                s_prev_t = time_s;
-            }
-            else
-            {
-                s_prev_t = 0.0;
-            }
-        }
 
         const PredictionResult prediction =
             tracker.step(tracked_poses, gimbal, time_s, latency_s);
@@ -905,10 +803,10 @@ int main(int argc, char **argv)
                 mini.body_centre = Eigen::Vector3d(
                     state(0), state(2), state(4) + tracker.slotZOffsetMean());
                 const double radius = state(8);
-                // 固定座位显示 v3（用户方案）：座位 = 车心 ± R 的四个基点，
-                // 中心/半径全锚 PnP 实测（中心在每处理帧块里更新），四条边
-                // 半长 = R 首尾相连闭合，全灰不转；黄色相位标记按实测 Θ
-                // 连续滑动——速度=真实转速，每 90° 对齐下一个座位。
+                // 固定座位显示（最终语义）：四块灰色板钉在车心 ± R 的四个基点
+                // 围成闭合矩形，永不转动、大小不变；"选定板"落到哪个座位，
+                // 那个座位亮黄。座位号 = 实测积分相位 Θ 对 90° 取整——Θ 每前进
+                // 90° 高亮走一格（速度=真实转速、方向反转即时跟随）。
                 const double R = radius_display_m;
                 if (disp_center_has)
                 {
@@ -923,19 +821,11 @@ int main(int argc, char **argv)
                         mini.plate_yaws.push_back(seat);
                         mini.plate_half_widths.push_back(R); // 半长=R → 四边首尾相连
                     }
-                    mini.has_phase_marker = true;
-                    mini.phase_marker_centre = Eigen::Vector3d(
-                        c.x() - R * std::cos(front_theta),
-                        c.y() - R * std::sin(front_theta), c.z());
-                    mini.phase_marker_yaw = front_theta;
-                }
-                // 观测叠加：白十字 + 法向短线（只看选中的那条轨迹）。
-                for (const ArmorPose &pose : tracked_poses)
-                {
-                    mini.observed_centres.push_back(
-                        Eigen::Vector3d(pose.position_gimbal_m[0], pose.position_gimbal_m[1],
-                                        pose.position_gimbal_m[2]));
-                    mini.observed_yaws.push_back(pose.armor_yaw);
+                    mini.highlight_slot =
+                        ((static_cast<int>(std::lround(front_theta / (M_PI * 0.5))) %
+                          kPlateCount) +
+                         kPlateCount) %
+                        kPlateCount;
                 }
                 mini.aim_slot = diagnostics.aim_slot;
                 if (diagnostics.aim_slot >= 0 && diagnostics.aim_slot < kPlateCount)

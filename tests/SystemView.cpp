@@ -525,8 +525,8 @@ cv::Mat renderMiniTopDown(const MiniTopDownFrame &frame, const MiniTopDownOption
     const cv::Rect canvas_rect(0, 0, width, height);
 
     // 板：一段粗线（长度 = 整板宽），aim 板多画一圈白描边。固定座位显示：
-    // 四块板一律灰色（不随相位转的座位），"当前在最前方"的槽位黄色高亮——
-    // 高亮轮转的节奏就是转速跟随的直接读数。
+    // 四块板灰色钉死不转；跟踪板当前落点的座位整体亮黄（highlight_slot），
+    // 高亮走一格 = 真实板转了 90°。
     for (std::size_t i = 0; i < frame.plate_centres.size(); ++i)
     {
         const double yaw = i < frame.plate_yaws.size() ? frame.plate_yaws[i] : 0.0;
@@ -546,40 +546,13 @@ cv::Mat renderMiniTopDown(const MiniTopDownFrame &frame, const MiniTopDownOption
         {
             cv::line(canvas, a, b, cv::Scalar(255, 255, 255), 6, cv::LINE_AA);
         }
-        // 固定座位：全部灰色（位置/朝向/大小不随任何估计变化）。
-        cv::line(canvas, a, b, cv::Scalar(150, 150, 150), 3, cv::LINE_AA);
-    }
-
-    // 相位标记：黄色短棒，按实测积分角度 Θ 在座位圈上连续滑动——不跳格，
-    // 速度=真实转速；Θ 每 90° 与下一个座位对齐（"选定板落在哪个座位"）。
-    if (frame.has_phase_marker)
-    {
-        const double mtx = -std::sin(frame.phase_marker_yaw);
-        const double mty = std::cos(frame.phase_marker_yaw);
-        const double mhalf =
-            0.45 * (frame.phase_marker_centre - frame.body_centre).head<2>().norm();
-        const cv::Point ma = to_px(frame.phase_marker_centre.x() - mhalf * mtx,
-                                   frame.phase_marker_centre.y() - mhalf * mty);
-        const cv::Point mb = to_px(frame.phase_marker_centre.x() + mhalf * mtx,
-                                   frame.phase_marker_centre.y() + mhalf * mty);
-        cv::line(canvas, ma, mb, cv::Scalar(0, 255, 255), 4, cv::LINE_AA);
-    }
-
-    // 本帧观测到的板：白色小十字 + 法向短线（12 px）。彩色模型板压在它上面还是
-    // 落后它，一眼能看出来——这就是"模型有没有跟着真实板转"的直观检验。
-    for (std::size_t i = 0; i < frame.observed_centres.size(); ++i)
-    {
-        const cv::Point c = to_px3(frame.observed_centres[i]);
-        if (!canvas_rect.contains(c))
-            continue;
-        cv::drawMarker(canvas, c, cv::Scalar(255, 255, 255), cv::MARKER_CROSS, 8, 1,
-                       cv::LINE_AA);
-        const double yaw = i < frame.observed_yaws.size() ? frame.observed_yaws[i] : 0.0;
-        if (std::isfinite(yaw))
+        if (static_cast<int>(i) == frame.highlight_slot)
         {
-            const cv::Point tip(cvRound(c.x + 12.0 * std::cos(yaw)),
-                                cvRound(c.y - 12.0 * std::sin(yaw)));
-            cv::line(canvas, c, tip, cv::Scalar(200, 200, 200), 1, cv::LINE_AA);
+            cv::line(canvas, a, b, cv::Scalar(0, 255, 255), 4, cv::LINE_AA); // 亮黄=落点
+        }
+        else
+        {
+            cv::line(canvas, a, b, cv::Scalar(150, 150, 150), 3, cv::LINE_AA); // 灰=座位
         }
     }
 

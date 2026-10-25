@@ -137,17 +137,9 @@ struct MiniTopDownFrame
     // 每块板的半宽（米）：缺省 0.0675（小板）。工具里传固定值，长度不随板型跳。
     std::vector<double> plate_half_widths;
 
-    // 连续相位标记（黄色短棒）：工具端按 PnP 实测积分的"选定板"角度放置，
-    // 在固定座位圈上连续滑动（不跳格）——每转过 90° 与下一个座位对齐，
-    // 滑动速度 = 实测转速，方向反转即时跟随。has_phase_marker=false 不画。
-    bool has_phase_marker{false};
-    Eigen::Vector3d phase_marker_centre{Eigen::Vector3d::Zero()};
-    double phase_marker_yaw{0.0};
-
-    // 本帧"看到的"板（白色小十字 + 一条法向短线），用来核对模型板有没有跟着真实
-    // 板转：白十字贴在彩色板上 = 跟上了；白十字明显领先/落后 = 相位或 ω 有滞后。
-    std::vector<Eigen::Vector3d> observed_centres;
-    std::vector<double> observed_yaws;
+    // 高亮座位：跟踪板当前落点（0..3，工具端按实测积分相位对 90° 取整给出）。
+    // 对应座位的板整体亮黄，其余保持灰色。-1（默认）= 无高亮。
+    int highlight_slot{-1};
     int aim_slot{-1};
 
     // 有效瞄准 = 当前时刻那块板的位置（弹丸瞬间到达会打中的点）；
