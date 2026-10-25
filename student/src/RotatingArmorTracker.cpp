@@ -599,6 +599,9 @@ void RotatingArmorTracker::reset()
     aim_slot_ = -1;
     last_seen_s_.fill(-1.0);
     radius_updates_ = 0;
+    // 半径冻结必须跨锁清零：下一辆车（或同一台车重新锁定）的半径要重新估。
+    radius_frozen_ = false;
+    radius_settled_streak_ = 0;
     aim_smoothed_valid_ = false;
     aim_smoothed_s_ = -1.0;
     aim_history_count_.fill(0);
@@ -2643,10 +2646,10 @@ void RotatingArmorTracker::updateRadiusFromPairs(const std::vector<WorldObservat
             {
                 continue;
             }
-            // 用"模型构型"的半角而不是实测法向差：实测法向差本身有 ±20° 噪声，
-            // 直接带进 sin() 会把半径算大（v4 实测法向差 80° → 半径 0.31，
-            // 而弦长 0.40/相邻构型给出的是 0.283）。四板模型只有两种可能：
-            // 相邻 90°（弦 = √2 R）或对置 180°（弦 = 2R）。
+            // 用"模型构型"的半角而不是实测法向差：实测法向差本身有 ±2.6° 噪声
+            // （2026-10-25 实测：相邻板 Δψ = 84.3° ± 2.6°，p10~p90 = 80.6~86.7）。
+            // 把它代进 1/sin() 会让半径更不稳：同一段素材上逐帧半径的 σ 从
+            // 0.0298 涨到 0.0351，所以宁可留着 90° 这 6% 的系统偏置，也不引这份噪声。
             double half_model = 0.0;
             if (dpsi > config_.radius_update_opposite_yaw_rad)
             {
@@ -2742,6 +2745,18 @@ void RotatingArmorTracker::noteChordRadius(const std::vector<WorldObservation>& 
 
 void RotatingArmorTracker::applySlowRadius(double candidate_radius)
 {
+    // 半径冻结闸门。弦长(pair_body / updateRadiusFromPairs)、圆拟合(body_circle)、
+    // 批拟合(batch)三条写入路径都从这里进，所以一处拦死就够。
+    // 为什么必须冻结：单板观测只给出"圆心在板心 + R·n 这条射线上"，R 与车心
+    // 在雅可比里强耦合，滤波器可以拿 R 换车心；于是 R 会以秒级周期来回漂
+    // （moveandrotate.avi 实测 R 在 0.272~0.299 之间漂，|ΔR| 逐帧却是 0）。
+    // 三家开源实现全部不在线学半径（sp_vision_25 Q[8..10]=0、rmcs
+    // noise_radius_*=1e-8、rm_auto_aim 硬钳 [0.12,0.40]），这里跟它们一致：
+    // 锁定期把 R 估准，收敛后锁死。
+    if (radius_frozen_)
+    {
+        return;
+    }
     if (!std::isfinite(candidate_radius) || candidate_radius <= 0.0)
     {
         return;
@@ -2802,6 +2817,22 @@ void RotatingArmorTracker::applySlowRadius(double candidate_radius)
                                      cur + config_.radius_max_step_m);
     }
     ekf_.setRadius(radius_track_m_);
+    // 冻结判据：低通后的值已经追上候选值（残差 < ratio×R）就认为收敛。
+    // 用残差而不是步长：步长 = alpha×残差，靠拢期步长天然只有几毫米，
+    // 拿步长当判据会在中途就把 R 锁死在半路上（实测锁在 0.207/0.240）。
+    const double residual = std::fabs(radius_track_m_ - target);
+    const double band = config_.radius_freeze_residual_ratio * radius_track_m_;
+    if (config_.radius_freeze_confirm > 0 && band > 0.0 && residual <= band)
+    {
+        if (++radius_settled_streak_ >= config_.radius_freeze_confirm)
+        {
+            radius_frozen_ = true;
+        }
+    }
+    else
+    {
+        radius_settled_streak_ = 0;
+    }
 }
 
 // 掉线快照续接：注销后不久、同一编号又出现时，直接恢复掉线前的状态，
@@ -3546,6 +3577,14 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                     std::atan2(center_y - chosen.position.y(), center_x - chosen.position.x());
                 const double theta_target = wrapToPi(phase_target - slot_phase);
                 const double delta_theta = wrapToPi(theta_target - ekf_.state()(6));
+                // 2026-10-25 试过把 delta_theta 折进 (-period/2, period/2]，理由是四板
+                // 模型对 period 整数倍旋转完全对称、折掉"纯换名"部分能消掉瞄准圈跳
+                // 180°。实测收益不单调，已撤回：middlespeed 上确实把 5 次 ~180° 跳变
+                // 清零（>30° 跳变 21→14），但 highspeed 上 realign 从 4 次涨到 47 次、
+                // >30° 跳变 3→21。原因是折叠后 rotatePhase 只挪不到一个槽位，紧跟着的
+                // shiftCenter 必须把车心朝观测板方向硬拽最多 2R 来补齐角度差，反而把
+                // 车心拽飞、missed 变多、realign 反复触发。要修"跳 180°"应该改的是
+                // 折叠后重选 aim_slot 而不是压 delta_theta，属于另一件事。
                 ++diagnostics_.single_plate_realigns;
                 ekf_.rotatePhase(delta_theta);
                 const Eigen::Vector3d plate_after =

@@ -726,8 +726,14 @@ namespace
         return {TL, TR, BR, BL};
     }
 
-    // 平面 PnP 解算（单板）。IPPE 可能返回两个重投影相近的孪生解，
-    // 歧义区（重投影差 ≤3px）按"装甲板上倾安装"先验选解，见下方 pick 逻辑。
+    // 平面 PnP 解算（单板）。
+    // **只用 PnP 的平移**：朝向一律交给 optimizeArmorYaw 用 (yaw, pitch) 两自由度重建。
+    // 原因（实测，见 docs/开源对照-消歧与半径的三种解法_2026-10-25.md §1）：
+    // 这套板上 IPPE 的孪生解 100% 落进歧义区（|e0-e1| 中位 0.43px、p90 1.54px），
+    // 而且两解的深度只差 1mm（中位）、差的全是俯仰/横滚。任何基于法向分量的硬规则
+    // 都只是在两个等优解之间抛硬币：实测 n_y 规则与"最小重投影"冲突 82.5%、
+    // 相邻检测翻转 11.2% → yaw σ 5.74°、|Δyaw|>30° 占 2.43%。
+    // sp_vision_25 的解法是根本不看那对解（solver.cpp:61 用的是单解重载），这里照做。
     bool solvePoseForTrack(const std::vector<cv::Point3f> &object_points,
                            const std::vector<cv::Point2f> &image_points,
                            const cv::Mat &camera_matrix,
@@ -736,91 +742,15 @@ namespace
                            cv::Mat &rvec, cv::Mat &tvec,
                            double depth_prior = 0.0)
     {
-        std::vector<cv::Mat> rvecs, tvecs;
-        const int count = cv::solvePnPGeneric(object_points, image_points,
-                                              camera_matrix, distortion_coefficients,
-                                              rvecs, tvecs, false, cv::SOLVEPNP_IPPE);
-        if (count <= 0)
+        (void)target_id;    // 孪生解消歧已删除，不再需要按 id 打日志
+        (void)depth_prior;  // DEPTH_FROM_EDGES 的深度先验只用于在孪生解里挑一个，随之作废
+        if (!cv::solvePnP(object_points, image_points, camera_matrix, distortion_coefficients,
+                          rvec, tvec, false, cv::SOLVEPNP_IPPE))
+        {
             return false;
-
-        const double inf = std::numeric_limits<double>::infinity();
-        std::vector<double> errors(static_cast<std::size_t>(count), inf);
-        std::vector<cv::Vec3d> normals(static_cast<std::size_t>(count), cv::Vec3d(0, 0, 1));
-        int best_error_index = -1;
-        for (int i = 0; i < count; ++i)
-        {
-            if (tvecs[i].at<double>(2) <= 0.0)
-                continue;
-            std::vector<cv::Point2f> projected;
-            cv::projectPoints(object_points, rvecs[i], tvecs[i], camera_matrix,
-                              distortion_coefficients, projected);
-            double sum = 0.0;
-            for (std::size_t k = 0; k < projected.size(); ++k)
-                sum += cv::norm(projected[k] - image_points[k]);
-            errors[static_cast<std::size_t>(i)] =
-                sum / std::max<std::size_t>(projected.size(), 1);
-
-            cv::Mat rotation;
-            cv::Rodrigues(rvecs[i], rotation);
-            normals[static_cast<std::size_t>(i)] = cv::Vec3d(
-                rotation.at<double>(0, 2), rotation.at<double>(1, 2), rotation.at<double>(2, 2));
-            if (best_error_index < 0 || errors[static_cast<std::size_t>(i)] <
-                                            errors[static_cast<std::size_t>(best_error_index)])
-                best_error_index = i;
         }
-        if (best_error_index < 0)
-            return false;
-
-        int pick = best_error_index;
-        // 深度先验：用板的竖直边（灯条端点）长度给出的深度。俯仰不变，
-        // 所以它不受绕竖轴旋转的 cos(yaw) 衰减影响，比横向宽度可靠。
-        if (depth_prior > 0.0 && count >= 1)
-        {
-            int best_depth_index = -1;
-            double best_dz = 0.0;
-            for (int i = 0; i < count; ++i)
-            {
-                if (!std::isfinite(errors[static_cast<std::size_t>(i)]))
-                    continue;
-                const double dz = std::fabs(tvecs[static_cast<std::size_t>(i)].at<double>(2) -
-                                            depth_prior);
-                if (best_depth_index < 0 || dz < best_dz)
-                {
-                    best_depth_index = i;
-                    best_dz = dz;
-                }
-            }
-            if (best_depth_index >= 0)
-                pick = best_depth_index;
-            if (std::getenv("DEPTH_DEBUG") != nullptr)
-                std::fprintf(stderr, "[depth] id=%d prior=%.3f pick=%.3f dz=%.3f\n", target_id,
-                             depth_prior, tvecs[static_cast<std::size_t>(pick)].at<double>(2),
-                             best_dz);
-        }
-        else if (count >= 2 && std::isfinite(errors[0]) && std::isfinite(errors[1]) &&
-            std::fabs(errors[0] - errors[1]) <= 3.0)
-        {
-            // 上倾先验消歧：实车装甲板朝车外侧斜向上安装（sp_vision_25 参考实现
-            // 硬编码 ~15° 安装角即此前提），孪生对在歧义区表现为法向 n_y 变号——
-            // 相机系 y 朝下，上倾解的 n_y 更小，直接取之，不做时域记忆。
-            // 前提边界：板接近竖直时两侧 n_y 都 ≈0，先验退化；云台大俯仰时
-            // 相机系的"上"偏离重力系，需俯仰补偿后判据才成立。
-            pick = normals[0][1] <= normals[1][1] ? 0 : 1;
-            if (!std::isfinite(errors[static_cast<std::size_t>(pick)]))
-                pick = best_error_index;
-            if (std::getenv("IPPE_DEBUG") != nullptr)
-            {
-                std::fprintf(stderr,
-                             "[ippe] id=%d e0=%.3f e1=%.3f z0=%.3f z1=%.3f dz=%.3f pick=%d\n",
-                             target_id, errors[0], errors[1], tvecs[0].at<double>(2),
-                             tvecs[1].at<double>(2),
-                             std::fabs(tvecs[0].at<double>(2) - tvecs[1].at<double>(2)), pick);
-            }
-        }
-
-        rvec = rvecs[static_cast<std::size_t>(pick)].clone();
-        tvec = tvecs[static_cast<std::size_t>(pick)].clone();
-        return true;
+        // 板必须在相机前方
+        return std::isfinite(tvec.at<double>(2)) && tvec.at<double>(2) > 0.0;
     }
 
     // 门禁阈值（现场可调；任务书要求拒绝深度非法或误差异常的观测）
@@ -897,149 +827,153 @@ namespace
         return result;
     }
 
-    // ===== optimize_yaw（移植自 sp_vision_25 solver.cpp 的 optimize_yaw，保真版）=====
-    // PnP 的平移解很稳（深度由板的竖直边约束），朝向 yaw 却在斜视角下病态：
-    // 4 点共面歧义 + IPPE 双解的欧拉分解噪声，是实拍法向 ±20~45° 抖动的主要
-    // 来源。做法：保持 PnP 的平移**和它自己的俯仰/横滚**不动，在云台系里绕
-    // 竖轴穷举 yaw（原始 yaw ±70°、1° 步长，最优附近 0.1° 抛光），取四角
-    // 重投影误差最小的解——把"噪声分解"变成"一维几何拟合"。
-    // 参考实现在固定俯仰上硬编码 15°（RM 实车装甲的标准安装角）；我们的
-    // 合成测试板是竖直的（pitch=0），固定 15° 会把合成场景搬歪（3m 处
-    // ~100px），因此默认保留量测俯仰。OPTIMIZE_YAW_PITCH=deg 可强制固定
-    // 俯仰做实验；OPTIMIZE_YAW=0 整体关闭。
-    struct YawBasis
+    // ===== optimize_yaw（对齐 sp_vision_25 solver.cpp:196-218 的干法，2026-10-25 重写）=====
+    // 背景：PnP 的平移很稳（深度由板的竖直边约束），朝向在斜视角下病态——
+    // 4 点共面歧义 + IPPE 孪生解的姿态分量噪声。实拍实测（moveandrotate.avi，
+    // 11644 条检测）：
+    //   n_y 硬规则消歧            → yaw σ 5.74°、|Δyaw|>30° 占 2.43%、max 47.5°
+    //   本函数（照抄 sp_vision_25）→ yaw σ ~0.9°、跳变 0%、        max  ~7°
+    // 做法：**丢掉 PnP 的旋转**，只留平移；在一个只有 2 个自由度的姿态族里
+    // （yaw 扫描 + 固定俯仰 + 横滚恒 0）穷举 yaw，取四角重投影最小的解。
+    //
+    // 三个必须同时成立的点，缺一个就退化成无效（见
+    // docs/开源对照-消歧与半径的三种解法_2026-10-25.md §1.3）：
+    //   1) 锚点是**固定的云台朝向**（sp_vision_25 的 gimbal_ypr[0]），与板在哪、
+    //      PnP 解出什么无关。锚在 PnP yaw 上实测恶化到 σ 9.14°、max 133°；
+    //      锚在"板的方位角"上同样不行——四板车的板法向与半径（=板方位）垂直，
+    //      两者差 90°，锚错 90° 就等于扫描窗口整体偏了 90°。
+    //   2) 俯仰是**物理常数**（RM 实车装甲标准上倾 15°；本素材反推最优 14.2±4.9°，
+    //      n=571），不是从 PnP 读出来的量测值——那个自由度正好被孪生解污染。
+    //   3) 横滚恒为 0。孪生解之间差的就是俯仰/横滚（深度只差 1mm 中位），
+    //      保留量测横滚等于把错误锁死在扫描族里。
+    //
+    // 还有一个比上面三条更容易踩的坑：**三列必须是同一右手系**。
+    // 物点按 (x 右, y 下) 建模，那么 z 只能是"背离相机"，三列才正交且 det=+1。
+    // 曾经按"z 朝向相机"构造，det(R)=-1、四角重投影变成交叉四边形（代价中位
+    // 69.7px），6px 门禁每帧都拒绝、每次 return 回退 PnP 原解——精修看着"生效"
+    // 其实完全空转，指标也就停在 PnP 基线 σ5.7°。验证数据：11644 帧里
+    // "z 朝相机" 0 帧胜出，"z 背离相机" 11644/11644 胜出（代价中位 1.23px）。
+    // 下游对法向本来就有"必须指向相机"的归一化（见本文件 n·p 那条），
+    // 所以这里输出背离相机的 z 不需要额外补偿，且翻转是确定性的、不会抖。
+    struct UprightBasis
     {
-        cv::Vec3d n;   // 板面外法向（云台系）
-        cv::Vec3d u;   // 物体系 y 轴（板面内"上"方向，云台系）
-        double pitch;  // 量测俯仰（或强制值）
-        double yaw0;   // 原始 yaw
+        double pitch; // 上倾角（弧度，正 = 板面朝相机的那一面向上翘）
     };
 
-    double yawSweepReprojectionError(const std::vector<cv::Point3f> &object_points,
-                                     const std::vector<cv::Point2f> &image_points,
-                                     const cv::Mat &camera_matrix,
-                                     const cv::Mat &distortion_coefficients,
-                                     const cv::Mat &R_c2g, const cv::Mat &tvec,
-                                     const YawBasis &basis, double yaw)
+    // 物体系 x 右 / y 下 / z 背离相机（与 buildObjectPoints 一致）。
+    // 只用 (yaw, pitch) 两个自由度重建，横滚恒 0，det(R)=+1 保证 Rodrigues 有意义。
+    // yaw 的语义 = **"朝相机"那一侧法向**在云台 xy 平面的方位角（与 sp_vision_25 的
+    // armor yaw 同义）；三列里的 z 是它的反向，所以 z 的方位角是 yaw+180°。
+    // 这一点很容易写错：z 直接取 n=(cp·cos, cp·sin, sp) 会把 det 变成 -1，
+    // 四角重投影立刻退化成交叉四边形（代价 69.7px），6px 门禁每帧拒绝、精修空转。
+    double uprightReprojectionError(const std::vector<cv::Point3f> &object_points,
+                                    const std::vector<cv::Point2f> &image_points,
+                                    const cv::Mat &camera_matrix,
+                                    const cv::Mat &distortion_coefficients,
+                                    const cv::Mat &R_c2g, const cv::Mat &tvec,
+                                    const UprightBasis &basis, double yaw)
     {
-        // n' = 绕竖轴转到 yaw（保持俯仰角 φ）
-        const double st = std::sin(yaw), ct = std::cos(yaw);
-        const double sp = std::sin(basis.pitch), cp = std::cos(basis.pitch);
-        cv::Vec3d n(ct * cp, st * cp, -sp);
-        // u' = Rz(Δθ)·u，再投影到与 n' 垂直的平面内（保持横滚）
-        const double dth = yaw - basis.yaw0;
-        const double cd = std::cos(dth), sd = std::sin(dth);
-        cv::Vec3d u(cd * basis.u[0] - sd * basis.u[1],
-                    sd * basis.u[0] + cd * basis.u[1],
-                    basis.u[2]);
-        u = u - n * (u.dot(n));
-        const double un = std::sqrt(u.dot(u));
-        if (un < 1e-9)
-            return std::numeric_limits<double>::infinity();
-        u = u * (1.0 / un);
-        const cv::Vec3d r = u.cross(n);
-        cv::Matx33d R_obj2g;
-        R_obj2g(0, 0) = r[0]; R_obj2g(1, 0) = r[1]; R_obj2g(2, 0) = r[2];
-        R_obj2g(0, 1) = u[0]; R_obj2g(1, 1) = u[1]; R_obj2g(2, 1) = u[2];
-        R_obj2g(0, 2) = n[0]; R_obj2g(1, 2) = n[1]; R_obj2g(2, 2) = n[2];
-        // R_obj2cam = R_c2g^T · R_obj2g
-        const cv::Mat R_obj2cam = R_c2g.t() * cv::Mat(R_obj2g);
+        const double cy = std::cos(yaw), sy = std::sin(yaw);
+        const double cp = std::cos(basis.pitch), sp = std::sin(basis.pitch);
+        // x 右 / y 下 / z 背离相机，三者互相正交且 x×y=z（det=+1）。
+        // pitch 使 z 向下偏 sp（板面上倾 15° ⇒ 背离相机的法向向下偏 15°）。
+        const cv::Vec3d x(-sy, cy, 0.0);
+        const cv::Vec3d y(sp * cy, sp * sy, -cp);
+        const cv::Vec3d z(-cp * cy, -cp * sy, -sp);
+        const cv::Matx33d R_obj2g(x[0], y[0], z[0],
+                                  x[1], y[1], z[1],
+                                  x[2], y[2], z[2]);
         cv::Mat rvec;
-        cv::Rodrigues(R_obj2cam, rvec);
+        cv::Rodrigues(R_c2g.t() * cv::Mat(R_obj2g), rvec);
         std::vector<cv::Point2f> projected;
         cv::projectPoints(object_points, rvec, tvec, camera_matrix,
                           distortion_coefficients, projected);
+        if (projected.size() != image_points.size())
+            return std::numeric_limits<double>::infinity();
         double err = 0.0;
         for (std::size_t k = 0; k < projected.size(); ++k)
             err += cv::norm(projected[k] - image_points[k]);
-        return err / std::max<std::size_t>(projected.size(), 1);
+        return err / static_cast<double>(projected.size());
     }
 
-    // 就地精修 rvec（tvec 不动）。失败（数值异常）时保持原值。
+    // 就地精修 rvec（tvec 不动）。重投影明显异常时保持 PnP 原值，交给下游门禁处理。
     void optimizeArmorYaw(const std::vector<cv::Point3f> &object_points,
                           const std::vector<cv::Point2f> &image_points,
                           const CameraParameters &camera,
                           cv::Mat &rvec, const cv::Mat &tvec)
     {
+        // 俯仰：物理常数，默认 15°。OPTIMIZE_YAW_PITCH 可覆盖（竖直板用 0）。
         static const char *pitch_env = std::getenv("OPTIMIZE_YAW_PITCH");
-        static const bool force_pitch = pitch_env != nullptr;
-        static const double forced_pitch =
-            (force_pitch ? std::atof(pitch_env) : 0.0) * CV_PI / 180.0;
+        static const double pitch_deg = (pitch_env != nullptr) ? std::atof(pitch_env) : 15.0;
         static const bool debug = std::getenv("OPTIMIZE_YAW_DEBUG") != nullptr;
 
         const cv::Mat R_c2g = rotationCameraToGimbal(camera);
-        cv::Mat R_obj2cam0;
-        cv::Rodrigues(rvec, R_obj2cam0);
-        const cv::Mat R_obj2g0 = R_c2g * R_obj2cam0;
-        YawBasis basis;
-        basis.n = cv::Vec3d(R_obj2g0.at<double>(0, 2), R_obj2g0.at<double>(1, 2),
-                            R_obj2g0.at<double>(2, 2));
-        basis.u = cv::Vec3d(R_obj2g0.at<double>(0, 1), R_obj2g0.at<double>(1, 1),
-                            R_obj2g0.at<double>(2, 1));
-        basis.yaw0 = std::atan2(basis.n[1], basis.n[0]);
-        basis.pitch = force_pitch ? forced_pitch : std::asin(std::clamp(-basis.n[2], -1.0, 1.0));
 
-        double best_yaw = basis.yaw0;
-        double best_err = yawSweepReprojectionError(object_points, image_points,
-                                                    camera.camera_matrix,
-                                                    camera.distortion_coefficients,
-                                                    R_c2g, tvec, basis, basis.yaw0);
-        for (int i = -70; i <= 70; ++i)
+        UprightBasis basis;
+        basis.pitch = pitch_deg * CV_PI / 180.0;
+
+        // 锚点 = "从板指向相机"的方位。云台系里相机在原点、板在前方，所以这个方位
+        // 就是 180°；等价于 sp_vision_25 用 gimbal_ypr[0]（云台朝向）当固定参考。
+        // 这里刻意不用板的位置/方位：四板车上板法向与其方位垂直，用板方位当锚点
+        // 等于把窗口整体偏 90°（实测 σ 反而变差）；用 PnP 解出的 yaw 当锚点则会被
+        // 孪生解直接带偏（σ 9.14°、max 133°）。
+        // 扫描量 = 板法向"朝向相机"那一侧的方位角，与 sp_vision_25 / 离线验证同义。
+        constexpr double kAnchor = CV_PI;
+
+        double best_yaw = kAnchor;
+        double best_err = uprightReprojectionError(object_points, image_points,
+                                                   camera.camera_matrix,
+                                                   camera.distortion_coefficients,
+                                                   R_c2g, tvec, basis, kAnchor);
+        constexpr int kHalfDeg = 70; // ±70°，与 sp_vision_25 的 SEARCH_RANGE=140 一致
+        for (int i = -kHalfDeg; i <= kHalfDeg; ++i)
         {
-            const double yaw = basis.yaw0 + i * CV_PI / 180.0;
-            const double err = yawSweepReprojectionError(
-                object_points, image_points, camera.camera_matrix,
-                camera.distortion_coefficients, R_c2g, tvec, basis, yaw);
+            const double yaw = kAnchor + i * CV_PI / 180.0;
+            const double err =
+                uprightReprojectionError(object_points, image_points, camera.camera_matrix,
+                                         camera.distortion_coefficients, R_c2g, tvec, basis, yaw);
             if (err < best_err)
             {
                 best_err = err;
                 best_yaw = yaw;
             }
         }
+        // 0.1° 抛光：1° 网格太重，目标 0.1° 量级的抖动指标吃这个精度
         for (int j = -5; j <= 5; ++j)
         {
             const double yaw = best_yaw + j * 0.1 * CV_PI / 180.0;
-            const double err = yawSweepReprojectionError(
-                object_points, image_points, camera.camera_matrix,
-                camera.distortion_coefficients, R_c2g, tvec, basis, yaw);
+            const double err =
+                uprightReprojectionError(object_points, image_points, camera.camera_matrix,
+                                         camera.distortion_coefficients, R_c2g, tvec, basis, yaw);
             if (err < best_err)
             {
                 best_err = err;
                 best_yaw = yaw;
             }
         }
-        if (!std::isfinite(best_yaw) || !std::isfinite(best_err))
+        if (!std::isfinite(best_yaw) || !std::isfinite(best_err) ||
+            best_err > kMaxReprojErrorPx)
+        {
+            // 这个姿态族连 6px 都拟合不出来，说明俯仰常数/手性假设不成立，
+            // 保留 PnP 原解，让下游门禁自己决定收不收。
             return;
+        }
 
-        // 用精修后的 yaw 重建 rvec，让下游重投影自检/法向计算都基于精修姿态。
-        const double err_unused = yawSweepReprojectionError(
-            object_points, image_points, camera.camera_matrix,
-            camera.distortion_coefficients, R_c2g, tvec, basis, best_yaw);
-        (void)err_unused;
-        const double st = std::sin(best_yaw), ct = std::cos(best_yaw);
-        const double sp = std::sin(basis.pitch), cp = std::cos(basis.pitch);
-        cv::Vec3d n(ct * cp, st * cp, -sp);
-        const double dth = best_yaw - basis.yaw0;
-        const double cd = std::cos(dth), sd = std::sin(dth);
-        cv::Vec3d u(cd * basis.u[0] - sd * basis.u[1],
-                    sd * basis.u[0] + cd * basis.u[1], basis.u[2]);
-        u = u - n * (u.dot(n));
-        u = u * (1.0 / std::sqrt(u.dot(u)));
-        const cv::Vec3d r = u.cross(n);
-        cv::Matx33d R_obj2g;
-        R_obj2g(0, 0) = r[0]; R_obj2g(1, 0) = r[1]; R_obj2g(2, 0) = r[2];
-        R_obj2g(0, 1) = u[0]; R_obj2g(1, 1) = u[1]; R_obj2g(2, 1) = u[2];
-        R_obj2g(0, 2) = n[0]; R_obj2g(1, 2) = n[1]; R_obj2g(2, 2) = n[2];
+        // 用精修后的 (yaw, pitch) 重建 rvec，下游重投影自检与法向都基于精修姿态。
+        const double cy = std::cos(best_yaw), sy = std::sin(best_yaw);
+        const double cp = std::cos(basis.pitch), sp = std::sin(basis.pitch);
+        const cv::Vec3d x(-sy, cy, 0.0);
+        const cv::Vec3d y(sp * cy, sp * sy, -cp);
+        const cv::Vec3d z(-cp * cy, -cp * sy, -sp);
+        const cv::Matx33d R_obj2g(x[0], y[0], z[0],
+                                  x[1], y[1], z[1],
+                                  x[2], y[2], z[2]);
         cv::Rodrigues(R_c2g.t() * cv::Mat(R_obj2g), rvec);
 
         if (debug)
         {
-            double wrap = best_yaw - basis.yaw0;
-            while (wrap > CV_PI) wrap -= 2 * CV_PI;
-            while (wrap < -CV_PI) wrap += 2 * CV_PI;
-            std::fprintf(stderr, "[oyaw] yaw %.1f -> %.1f (Δ%+.1f°) err=%.2fpx\n",
-                         basis.yaw0 * 180.0 / CV_PI, best_yaw * 180.0 / CV_PI,
-                         wrap * 180.0 / CV_PI, best_err);
+            std::fprintf(stderr, "[oyaw] anchor %.1f -> yaw %.1f (pitch %.1f°) err=%.2fpx\n",
+                         kAnchor * 180.0 / CV_PI, best_yaw * 180.0 / CV_PI, pitch_deg, best_err);
         }
     }
 

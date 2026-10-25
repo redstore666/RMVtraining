@@ -272,6 +272,22 @@ struct TrackerConfig
     double radius_update_adjacent_yaw_rad{0.87};  // 50°
     double radius_update_opposite_yaw_rad{2.27};  // 130°
 
+    // 半径"收敛后冻结"。三家开源实现（sp_vision_25 / rmcs_auto_aim_v2 / rm_auto_aim）
+    // 全都不在线学半径：sp_vision_25 的 Q 第 8~10 行全 0，rmcs 的 noise_radius_* 是 1e-8，
+    // rm_auto_aim 直接硬钳。原因就是半径和车心在观测里强耦合——单板观测只给出
+    // "圆心在板心 + R·n 上"这条射线，滤波可以拿 R 换车心，于是 R 会慢慢漂，
+    // 画面上就是半径在"呼吸"。本仓库的 R 已经能靠弦长/圆拟合一次估准，
+    // 之后继续逐帧修只有漂移没有收益，所以收敛就锁死。
+    //
+    // 判据必须看"残差"而不是"步长"：低通每步只挪 alpha×残差，靠拢期步长本身
+    // 只有几毫米，任何"步长小于 X 就算收敛"的判据都会在靠拢中途误锁——实测把
+    // R 锁在 0.207 / 0.240（真值 0.283），比不冻结更糟。同理"按写入次数"也不行：
+    // 80 次只走到一半。只有 |当前值 - 候选值| 才是真正的收敛度量。
+    //   ratio：残差小于当前 R 的 1% 就算追上了（0.283 上 = 2.8 mm）
+    //   confirm：连续命中几次才认（5 次，滤掉候选值偶然跳到当前值附近）
+    double radius_freeze_residual_ratio{0.01};
+    int radius_freeze_confirm{5};
+
     // 板面法向当"相位观测"塞进滤波器（折叠掉 2pi/N）。实拍小目标法向抖 0.05~0.15
     // rad，取 0.12；关掉它就退回"yaw 只靠位置间接约束"。
     // 默认关闭：合成 A 场景实测"打开后 yaw 抖动、半径被压到 0.18（真值 0.25）"，
@@ -1110,6 +1126,10 @@ private:
     double tangent_last_time_s_{-1.0};
     bool tangent_has_last_{false};
     int radius_updates_{0};   // 本次锁定后已用弦长修正过几次半径
+    // 半径冻结（见 TrackerConfig::radius_freeze_residual_ratio）。冻结后 applySlowRadius
+    // 一律直接返回：弦长、圆拟合、批拟合三条写入路径全走它，一处闸门就够。
+    bool radius_frozen_{false};
+    int radius_settled_streak_{0}; // 连续几次写入时"已追上候选值"
     std::array<double, 4> slot_z_offset_{};
     std::array<double, 4> slot_radius_offset_{};
     std::array<double, 4> slot_angle_offset_{};
