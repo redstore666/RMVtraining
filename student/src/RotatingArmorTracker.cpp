@@ -285,6 +285,209 @@ bool RotatingArmorTracker::injectRateObservation(double omega_rad_s, double sigm
     return true;
 }
 
+// 唯一量测通道：窗口内"同一块板"板心绕固定车心的方位角斜率。
+//
+// 为什么不是逐帧差分：单帧转速信噪比只有 0.08（见配置注释）。窗口最小二乘把
+// 不确定性压到 σ_α/√Sxx，60 帧给出 σ_ω≈0.10 rad/s，对 1.1 rad/s 是 9% 精度。
+//
+// 三个"不许"：不许让 R 参与拟合（短弧上病态，实测解到 8 mm）；不许硬写状态
+// （抹掉协方差，量测对了滤波器照样崩）；不许用绝对速度门（1.1 rad/s 与
+// 8 rad/s 必须走同一条判据）。
+void RotatingArmorTracker::updateRateFromPhaseWindow(double timestamp_s)
+{
+    if (!config_.rate_phase_window_enabled || !ekf_.initialized())
+    {
+        return;
+    }
+    if (diagnostics_.phase != LockPhase::Tracking)
+    {
+        return;
+    }
+    if (static_cast<int>(phase_window_samples_.size()) < config_.rate_phase_min_samples)
+    {
+        return;
+    }
+    // 节流：相邻窗口共享大部分样本，每帧都估等于把同一份证据反复喂给滤波器，
+    // 会让它对 ω 过度自信（P 塌陷）。
+    if (config_.rate_phase_stride_frames > 1 &&
+        ++phase_window_stride_ < config_.rate_phase_stride_frames)
+    {
+        return;
+    }
+    phase_window_stride_ = 0;
+
+    // 车心固定为 EKF 当前值。半径根本不进来——R 是已知的机器人尺寸，
+    // 不该在"估转速"这一层重新解。
+    const Eigen::Vector2d c(ekf_.state()(0), ekf_.state()(2));
+
+    // 取最近 n_win 个样本，按位置连续性切段，选**最长的一段**。
+    // 不选"最新的一段"：四块板轮流被选中时最新段可能只有一两帧；而最长段
+    // 通常就是同一块板连续可见的那一段（R≈0.25 m 时相邻帧位移 ~1 mm，
+    // 换板是 ~0.2 m，差两个数量级，判据非常干净）。
+    const int n_win = std::max(8, config_.rate_phase_window_n);
+    std::vector<const LockSample *> window;
+    window.reserve(static_cast<std::size_t>(n_win));
+    for (auto it = phase_window_samples_.rbegin();
+         it != phase_window_samples_.rend() && static_cast<int>(window.size()) < n_win; ++it)
+    {
+        window.push_back(&(*it));
+    }
+    std::reverse(window.begin(), window.end());
+
+    std::size_t best_begin = 0;
+    std::size_t best_len = 0;
+    std::size_t run_begin = 0;
+    for (std::size_t i = 0; i < window.size(); ++i)
+    {
+        if (i > 0)
+        {
+            const Eigen::Vector2d a(window[i - 1]->position.x(), window[i - 1]->position.y());
+            const Eigen::Vector2d b(window[i]->position.x(), window[i]->position.y());
+            if ((b - a).norm() > config_.rate_phase_jump_m)
+            {
+                if (i - run_begin > best_len)
+                {
+                    best_len = i - run_begin;
+                    best_begin = run_begin;
+                }
+                run_begin = i;
+            }
+        }
+    }
+    if (window.size() - run_begin > best_len)
+    {
+        best_len = window.size() - run_begin;
+        best_begin = run_begin;
+    }
+    if (static_cast<int>(best_len) < config_.rate_phase_min_samples)
+    {
+        return;
+    }
+    // 太旧的段不能描述"现在"：那段时间里车可能已经换了转速。
+    if (timestamp_s - window[best_begin + best_len - 1]->timestamp_s >
+        config_.rate_phase_max_tail_gap_s)
+    {
+        return;
+    }
+
+    // 方位角用 fold ±45° 增量展开：四块板相隔 90°，换板造成的跳变正好被折掉，
+    // 只留真实转角。8 rad/s 时每帧 2.9°，离 45° 有 15 倍余量。
+    const double half_pi = kPi * 0.5;
+    const std::size_t n = best_len;
+    std::vector<double> ts(n, 0.0);
+    std::vector<double> al(n, 0.0);
+    const double t0 = window[best_begin]->timestamp_s;
+    double prev_angle = 0.0;
+    double unwrapped = 0.0;
+    double radius_sum = 0.0;
+    for (std::size_t k = 0; k < n; ++k)
+    {
+        const LockSample *sample = window[best_begin + k];
+        const Eigen::Vector2d p(sample->position.x(), sample->position.y());
+        const double dx = p.x() - c.x();
+        const double dy = p.y() - c.y();
+        const double angle = std::atan2(dy, dx);
+        radius_sum += std::hypot(dx, dy);
+        if (k == 0)
+        {
+            unwrapped = angle;
+        }
+        else
+        {
+            unwrapped += foldPeriod(angle - prev_angle, half_pi);
+        }
+        prev_angle = angle;
+        ts[k] = sample->timestamp_s - t0;
+        al[k] = unwrapped;
+    }
+
+    // 半径一致性门：样本必须落在"以车心为圆心、半径恒定"的圆上。散开说明
+    // 车心在动、或者这一段根本不是同一块板——这时方位角不是转角。
+    const double radius_mean = radius_sum / static_cast<double>(n);
+    double radius_var = 0.0;
+    for (std::size_t k = 0; k < n; ++k)
+    {
+        const LockSample *sample = window[best_begin + k];
+        const double r = std::hypot(sample->position.x() - c.x(), sample->position.y() - c.y());
+        radius_var += (r - radius_mean) * (r - radius_mean);
+    }
+    const double radius_rms = std::sqrt(radius_var / static_cast<double>(n));
+    if (radius_rms > config_.rate_phase_max_radius_rms_m)
+    {
+        return;
+    }
+
+    const double span = ts.back() - ts.front();
+    if (span < config_.rate_phase_min_span_s)
+    {
+        return;
+    }
+
+    const double dn = static_cast<double>(n);
+    double st = 0.0;
+    double stt = 0.0;
+    double sa = 0.0;
+    double sta = 0.0;
+    for (std::size_t k = 0; k < n; ++k)
+    {
+        st += ts[k];
+        stt += ts[k] * ts[k];
+        sa += al[k];
+        sta += ts[k] * al[k];
+    }
+    // Sxx = Σ(t−t̄)² = stt − st²/n，这样不必再扫一遍。
+    const double sxx = stt - st * st / dn;
+    if (!(sxx > 1e-12))
+    {
+        return;
+    }
+    const double slope = (dn * sta - st * sa) / (dn * sxx);
+    const double intercept = (sa - slope * st) / dn;
+    double ss = 0.0;
+    for (std::size_t k = 0; k < n; ++k)
+    {
+        const double r = al[k] - (intercept + slope * ts[k]);
+        ss += r * r;
+    }
+    const double dof = std::max(1.0, dn - 2.0);
+    const double sigma_alpha = std::sqrt(ss / dof);
+    // 本方案的核心一步：σ_ω = σ_α/√Sxx，**不是** σ_α/span。后者把 σ 高估
+    // √Sxx/span ≈ 2.2 倍——历史上 rate_window 通道就是被这一步废掉的。
+    double sigma_rate = sigma_alpha / std::sqrt(sxx);
+    if (!std::isfinite(sigma_rate))
+    {
+        return;
+    }
+    sigma_rate = std::max(sigma_rate, config_.rate_phase_sigma_floor_rad_s);
+
+    // 显著性检验，不是绝对阈值：静止时 slope≈0 而 σ_ω 覆盖 0，自动不更新；
+    // 1.1 rad/s 与 8 rad/s 用同一条判据，不需要场景相关的门限。
+    const bool significant =
+        std::fabs(slope) > config_.rate_phase_significance * sigma_rate &&
+        std::fabs(slope) <= config_.rate_phase_max_abs_rad_s;
+    static const bool phase_dbg = std::getenv("RATE_DEBUG") != nullptr;
+    if (phase_dbg)
+    {
+        std::fprintf(stderr,
+                     "[pwr] t=%.3f slope=%+.2f ekf=%+.2f n=%zu span=%.3f sxx=%.4f "
+                     "sig_a=%.3f sig_w=%.2f %s\n",
+                     timestamp_s, slope, ekf_.state()(7), n, span, sxx, sigma_alpha, sigma_rate,
+                     significant ? "USE" : "skip");
+    }
+    if (!significant)
+    {
+        return;
+    }
+    if (ekf_.updateRate(slope, sigma_rate))
+    {
+        last_rate_update_s_ = timestamp_s;
+        diagnostics_.rate_measurements += 1;
+        diagnostics_.rate_obs_used = true;
+        diagnostics_.rate_obs_rad_s = slope;
+        diagnostics_.rate_obs_sigma_rad_s = sigma_rate;
+    }
+}
+
 void RotatingArmorTracker::reset()
 {
     ekf_.reset();
@@ -311,6 +514,10 @@ void RotatingArmorTracker::reset()
     contradiction_streak_ = 0;
     relock_count_ = 0;
     lock_samples_.clear();
+    // 转速窗口必须跨锁清零：上一台车（或同一台车上一段锁定）的板心轨迹算出来
+    // 的斜率是垃圾。body_samples_ 故意不清（body_refit 要跨锁保留轨迹），
+    // 所以窗口相位斜率通道单独维护一条缓冲。
+    resetPhaseWindow();
     for (auto &history : normal_history_per_slot_)
     {
         history.clear();
@@ -3484,6 +3691,17 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
         {
             body_samples_.pop_front();
         }
+        // 转速窗口的样本缓冲（独立于 body_samples_，见头文件为什么）。
+        // 按**数量**截断而不是按时间：窗口长度是以"样本数"定义的（N=60 有
+        // 解析依据 σ_ω=σ_α/√Sxx），掉帧时按时间截会把窗口悄悄缩短。
+        phase_window_samples_.push_back(
+            LockSample{timestamp_s, chosen.position, chosen.yaw, chosen.target_id, chosen.size,
+                       false});
+        while (static_cast<int>(phase_window_samples_.size()) >
+               std::max(8, config_.rate_phase_window_n))
+        {
+            phase_window_samples_.pop_front();
+        }
         // 装甲板法向直接给出"从板心指向转轴"的方向：车心 = 板心 − R·n。
         // 这条式子不用槽位、不用相位，等于给车心一个只由板朝向量出来的独立量测。
         // 之前所有位置更新都是拿"滤波自己的相位"去算预测板位，法向只用于相位更新；
@@ -4479,7 +4697,10 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
     updateYawRateFromWindow(world, timestamp_seconds);
     // 证据持续缺席时把 omega 慢慢拉回 0：转速由数据决定，数据说不转就不转。
     // 窗口很弱（sigma 2.0），压不过一次真实的斜率量测（sigma 0.15 量级）。
-    if (config_.rate_update_enabled &&
+    // 唯一量测通道（rate_phase_window_enabled）同样需要这条兜底：它的显著性门
+    // 在静止时按设计"不更新"，此时阻止 ω 被位置更新经协方差耦合慢慢推走的，
+    // 正是这个弱伪量测（H 组静止+噪声法向契约靠它）。
+    if ((config_.rate_update_enabled || config_.rate_phase_window_enabled) &&
         timestamp_seconds - last_rate_update_s_ > config_.rate_decay_after_s &&
         std::fabs(ekf_.state()(7)) > 0.05)
     {
@@ -4655,6 +4876,10 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
             }
         }
     }
+
+    // 唯一量测通道：窗口相位斜率（docs/转速架构-唯一量测通道方案）。
+    // 放在 associateAndUpdate 之后：这一帧的样本刚入缓冲，用的是最新几何。
+    updateRateFromPhaseWindow(timestamp_seconds);
 
     // 绿色（实测反推车体）的窗口圆：只写诊断，给俯视图用。
     // 单帧两块板的解会被 PnP 噪声带得抖 2-6 cm；同一窗口的板心其实落在一条

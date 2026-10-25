@@ -514,6 +514,54 @@ struct TrackerConfig
     double adaptive_spin_alpha{0.25};
     double rate_tracklet_max_step_rad_s{0.4};
 
+    // ===== 唯一量测通道：窗口相位斜率（2026-10-25）=====
+    //
+    // 依据 docs/转速架构-唯一量测通道方案_2026-10-25.md：单帧转速信噪比只有
+    // **0.08**（1.1 rad/s、R=0.17 m、dt=6 ms 下每帧旋转位移 1.13 mm，而单帧
+    // 位置噪声 σ=13.8 mm）。所以任何"逐帧差分"（角度差/切向投影/PLL 残差）
+    // 在数学上都不可能工作——这不是调参问题。窗口最小二乘能把不确定性压到
+    // σ_ω = σ_α/√Sxx：σ_α=0.081 rad 时，60 帧（0.36 s）给出 σ_ω≈0.10 rad/s，
+    // 对 1.1 rad/s 是 9% 精度，够用。
+    //
+    // 三段职责，缺一不可：
+    //   ① 观测量 = 窗口内"同一块板"板心绕**固定**车心的方位角斜率。
+    //      车心取 EKF 当前 state(0),state(2)，半径取 state(8) 且**不参与拟合**。
+    //      R 自由时短弧上 (R,ω) 病态——batch_fit 实测解出 R=0.008~0.019 m
+    //      （真值 0.17），ω 一路撞 ±12 饱和，一开 v4 ≤5cm 73.2→48.7。
+    //   ② 融合 = ekf_.updateRate(ω, σ_ω)。**不许** setRate/rotatePhase/
+    //      shiftCenter 硬写：硬写抹掉协方差，量测对了滤波器照样崩。
+    //   ③ 门控 = 显著性检验 |ω| > 3σ_ω，不是 |ω| > 0.5 或 3.0 这种绝对阈值。
+    //      静止时斜率≈0 而 σ 覆盖 0，自动不更新——H 组契约不需要靠
+    //      "1.5/3.0 rad/s"这类场景相关门限来保护。
+    //
+    // Q 保持常量（见 process_angular_accel）：φ 由 ω 传播（F(6,7)=dt），
+    // 不再靠角度残差硬拽，所以"Q 大→φ 漂、Q 小→ω 冻"这个矛盾从根上消失。
+    bool rate_phase_window_enabled{false};
+    int rate_phase_window_n{60};        // 窗口样本数（166 fps ≈ 0.36 s）
+    int rate_phase_min_samples{40};     // 少于它不估（σ_ω 还压不下来）
+    int rate_phase_stride_frames{8};    // 每隔几帧估一次：相邻窗共享样本，太密等于重复用同一份证据
+    double rate_phase_sigma_floor_rad_s{0.05}; // σ_ω 下界
+    double rate_phase_significance{5.0};       // |ω| > k·σ_ω 才更新
+    // 切段阈值（米）。**不**按"换板"切段：四块板相隔 90°，fold90 展开时换板的
+    // 90° 跳变正好被折掉，弧长本来就该连续。按 0.10 m 切会把每次换板都开一段，
+    // 合成夹具里 chosen 频繁换板 → 窗口永远攒不满 40 个样本 → 通道完全不触发
+    // （G 组 ω 估计掉到 0）。所以阈值放到 0.45 m（R=0.25 时相邻板相距 0.35 m），
+    // 只切"跳到别的车/别的目标"这种真正的不连续；斜置副板那种非圆轨迹由
+    // rate_phase_max_radius_rms_m 兜住。
+    double rate_phase_jump_m{0.45};
+    double rate_phase_max_abs_rad_s{12.0};     // 物理上限（四板车实测最快 8）
+    // 半径一致性门（RMS，米）：窗口内样本到车心的距离必须恒定（=R）。
+    // 这条是 2026-10-25 实测补出来的：v4 有一段窗口切向斜率读出 -3.5 rad/s
+    // （真值 ~1.1），离线查出来是样本半径在 0.19~0.33 m 之间散开（RMS 4.0 cm）。
+    // 车心在动、或续到别的板上时，"绕车心的方位角"已经不再是转角，斜率就没意义。
+    // 好窗口的 RMS ≈1.4~2 cm（就是 PnP 位置噪声），所以 2.8 cm 能把两者分开。
+    double rate_phase_max_radius_rms_m{0.028};
+    // 段末端允许落后多久（秒）：太旧的段不能用来描述"现在"转多快。
+    double rate_phase_max_tail_gap_s{0.15};
+    // 同一段至少要覆盖的时间跨度（秒）。0.12 s 是 60 帧窗口在 8 帧节流下的
+    // 最坏情况；跨度再短时 Sxx 太小，σ_ω 会自己炸大，门会自然拒掉。
+    double rate_phase_min_span_s{0.12};
+
     // === 状态机 ===
     int stable_updates{12};
     double stable_min_lock_s{0.60}; // 上锁后至少这么久才允许报 Stable          // 连续接受多少帧才允许报 Stable
@@ -962,6 +1010,13 @@ private:
     std::deque<RateSample> rate_samples_{};
     void updateYawRateFromWindow(const std::vector<WorldObservation>& world,
                                  double timestamp_s);
+    // 唯一量测通道（见 TrackerConfig::rate_phase_window_enabled 的注释）。
+    void updateRateFromPhaseWindow(double timestamp_s);
+    void resetPhaseWindow()
+    {
+        phase_window_samples_.clear();
+        phase_window_stride_ = 0;
+    }
     void resetRateWindow()
     {
         rate_samples_.clear();
@@ -1062,6 +1117,11 @@ private:
     bool refit_center_valid_{false};
     std::deque<LockSample> body_samples_;
     std::deque<LockSample> tracklet_samples_;
+    // 窗口相位斜率通道的样本缓冲（与 body_samples_ 分开）：
+    // body_samples_ 故意不在 reset() 里清（body_refit 要跨锁保留轨迹），
+    // 但转速窗口绝不能跨锁——上一台车的板心轨迹算出来的斜率是垃圾。
+    std::deque<LockSample> phase_window_samples_;
+    int phase_window_stride_{0};
     bool has_pair_relock_{false};
     double last_pair_relock_s_{0.0};
     double timestamp_s_{0.0};
