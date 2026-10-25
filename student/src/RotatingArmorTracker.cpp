@@ -218,38 +218,24 @@ void RotatingArmorTracker::applyProcessNoise()
     config.process.accel_x = 0.01 * scale;
     config.process.accel_y = 0.01 * scale;
     config.process.accel_z = 0.01 * scale;
+    // 【2026-10-25 参考对齐】Q(ω) 现在是**常量**，与当前转速无关。
+    //
+    // 原来那条"按 tracklet |ω| EMA 分档的线性软门"（floor 1.5 / full 3.0 rad/s，
+    // 开满到 400）已整段删除，理由见头文件 process_angular_accel 的注释：
+    // 门控变量只在 |ω|≥3 且连续同向 20 步时才更新，所以低速段门恒关、
+    // angular_accel 恒 0.01，等于禁止 ω 变化——这正是"显示转速跟不上"的
+    // 直接原因之一。而 0.01 与 400 分属两套离散化口径，本身不可比。
+    //
+    // 现在的唯一旋钮是 config_.process_angular_accel（连续谱密度 q，
+    // Q_ω = q·dt）。SPIN_Q 环境变量保留为扫参用：angular_accel = 0.01·SPIN_Q，
+    // 与 tools/sweep_q.py 的历史口径一致，成品不设。
     static const double spin_env = [] {
         const char *v = std::getenv("SPIN_Q");
         return v ? std::atof(v) : -1.0;
     }();
-    double spin_scale =
-        spin_env > 0.0 ? spin_env : std::max(1e-6, config_.process_spin_scale);
-    if (spin_env < 0.0 && config_.adaptive_spin_q_enabled)
-    {
-        // 线性软门（2026-10-25 参考对齐）：|ω| 低于 floor 保持基值 0.01
-        // （静态契约/H 组容差），高于 full 开满到参考量级 v2=400。
-        // 只信 tracklet 实测（measured_rate_ema_），不信 |state(7)|——
-        // 状态尖峰进 Q 门会形成"尖峰→大Q→更大尖峰"的正反馈（实测 w 冲到 -41）。
-        // 旧二次曲线 (|ω|/2)² 在实拍 4.72 rad/s 只给 v2≈0.056（差 7000 倍）。
-        //
-        // 2026-10-25 复核（§四十六）——务必知道这条门的真实行为：
-        // measured_rate_ema_ 只在 `spinning` 成立时更新，而 spinning 要求 tracklet
-        // |ω| ≥ rate_tracklet_min_rate_rad_s(3.0) 且连续同向 ≥20 步。所以
-        //   · |ω| < 3 rad/s：门恒关，angular_accel 恒 0.01（这套自适应等于不存在）；
-        //   · |ω| ≥ 3 rad/s 的爆发段：门真的打开（v4 有 p90≈10 rad/s 的爆发）。
-        // 换句话说它是"爆发段才生效的开关"，不是纯死代码。实测删掉换成常量：
-        // 20 rad/s² 会让 v4/v1 的 ≤5cm 变成 72.9/49.2，但 ekf_tracker 的
-        // G 组(ω=8) 与 H 组(静止+噪声法向) 双红（预测点差一块板、静止漂 0.45）。
-        // 结论：Q 上"跟得上转速"与"槽位/预测稳"是真冲突，保持原值，留给专题。
-        const double rate_now = std::fabs(measured_rate_ema_);
-        const double span = std::max(1e-3, config_.adaptive_spin_rate_full_rad_s -
-                                                config_.adaptive_spin_rate_floor_rad_s);
-        const double ramp = std::clamp(
-            (rate_now - config_.adaptive_spin_rate_floor_rad_s) / span, 0.0, 1.0);
-        const double v2 = 0.01 + ramp * (400.0 - 0.01);
-        spin_scale = std::max(spin_scale, v2 / 0.01);
-    }
-    config.process.angular_accel = 0.01 * scale * spin_scale;
+    config.process.angular_accel =
+        spin_env > 0.0 ? 0.01 * spin_env
+                       : std::max(1e-6, config_.process_angular_accel);
     ekf_.setConfig(config);
 }
 
@@ -1338,9 +1324,18 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
     // 首帧的相位来自单帧板面法向（实拍里小目标法向抖动可达 10 度以上），
     // 初值给宽容一点，让随后的更新把它拉正；给太紧会把 0.2-0.3m 的初值偏差
     // 全部判成离群，于是整段跟踪 0 次更新。
-    prior.yaw_sigma_rad = 0.80;
+    //
+    // 【2026-10-25 参考对齐】0.80 → 0.63：sp_vision_25 与 rmcs 的 P0(angle)
+    // 都是 0.4（方差）⇒ σ=0.632，且这个数正好等于 PnP 板面法向的实测噪声
+    // （±35°），说明它是"量测噪声先验"而不是调出来的。我们原来给 0.80，
+    // 比参考宽 1.27 倍。
+    prior.yaw_sigma_rad = 0.63;
     // 静态也留 1.0 rad/s 的方差：先验只是起点，斜率量测会把它拉到真值。
-    prior.yaw_rate_sigma_rad_s = clampd(2.0 * slope_error, 1.0, 6.0);
+    // 【2026-10-25 参考对齐】上限 6.0 → 10.0：参考的 P0(ω) = 100（方差）
+    // ⇒ σ=10 rad/s，是"完全不知道转多快"的物理先验。我们用板面法向斜率
+    // 估出来的 slope_error 比参考多一条信息，所以保留 2·slope_error 的数据驱动
+    // 部分，只把上限放开到参考的 10，让"真的看不出来"时能表达得出来。
+    prior.yaw_rate_sigma_rad_s = clampd(2.0 * slope_error, 1.0, 10.0);
     prior.radius_sigma_m = config_.radius_sigma_m;
     prior.radius_fixed = config_.freeze_radius;
 
@@ -3335,7 +3330,6 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                                                      rate_last_position_.x() - c_now.x());
                     const double dtheta = wrapToPi(a_now - a_prev);
                     const double omega_meas = dtheta / dt;
-                    bool rate_ema_updated = false;
                     // 有符号的滑动平均：真自转方向恒定，平均后仍在；云台抖动正负抵消，
                     // 平均后接近 0。用它区分"真在转"和"抖出来的大角速度"。
                     if (std::isfinite(omega_meas) && std::fabs(omega_meas) < 12.0)
@@ -3398,22 +3392,9 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                             last_rate_update_s_ = timestamp_s;
                         }
                         diagnostics_.rate_measurements += 1;
-                        // 只有"真的在转 + 板心确实在半径上"的量测才用来调 Q：
-                        // 静止目标遇到云台抖动时，噪声差分会一路灌到 12 rad/s，
-                        // 把 Q 顶得很高，omega 就自己飘到 -1.4（合成 H 就是这样挂的）。
-                        measured_rate_ema_ = std::fabs(rate_signed_ema_);
-                        rate_ema_updated = true;
-                        applyProcessNoise();
-                    }
-                    if (!rate_ema_updated)
-                    {
-                        // 没有可信量测时让 Q 慢慢回落，别把一次抖动的记忆一直留着。
-                        const double decay = config_.adaptive_spin_decay_rad_s * std::max(0.0, dt);
-                        if (measured_rate_ema_ > 0.0)
-                        {
-                            measured_rate_ema_ = std::max(0.0, measured_rate_ema_ - decay);
-                            applyProcessNoise();
-                        }
+                        // Q(ω) 已改成常量（见 applyProcessNoise），这里不再回写任何
+                        // 门控变量：原来的 measured_rate_ema_ + applyProcessNoise()
+                        // 一处写、一处衰减，本质上是"随转速改 Q"，已随参考对齐删除。
                     }
                     static const bool rate_dbg = std::getenv("RATE_DEBUG") != nullptr;
                     if (rate_dbg)
@@ -3618,10 +3599,15 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                 }
                 else if (config_.angle_state_obliquity_sigma)
                 {
+                    // 参考实现原式（sp_vision_25 target.cpp）：
+                    //   σ = sqrt(log(|Δ|+1)/200 + 9e-2)
+                    // Δ = 板外法向与"板→相机"方向的夹角。旧版本写成
+                    // sqrt(log(Δ+1)+1)，在 Δ=1 时给 1.5 rad——比参考弱了 5 倍，
+                    // 等于把角度通道关掉，ω 就失去唯一来源。
                     const double to_cam_yaw =
                         std::atan2(-chosen.position.y(), -chosen.position.x());
                     const double delta = std::fabs(wrapToPi(chosen.yaw - to_cam_yaw));
-                    sigma = std::sqrt(std::log(delta + 1.0) + 1.0);
+                    sigma = std::sqrt(std::log(delta + 1.0) / 200.0 + 9e-2);
                 }
                 ekf_.updateFaceYawForSlot(chosen.yaw, sigma, best_slot);
                 pushNormalHistory(best_slot, timestamp_s, chosen.yaw);

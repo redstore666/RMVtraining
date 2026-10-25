@@ -244,13 +244,17 @@ struct TrackerConfig
     bool joint_pair_binding_enabled{true};
     double joint_pair_binding_max_cost_m{0.80};
     // ===== S2：板身份精确后验（单射配对枚举）=====
-    // 默认关。开启后，同帧 ≥2 块同编号板时不再"每个观测各自贪心 argmin 判
+    // 【2026-10-25 参考对齐】默认改成**开**。原默认关是因为角度通道 σ=2.5 时
+    // 身份判错也拽不动状态（量测基本被忽略），后验只多花 CPU。σ 收到参考刻度
+    // 0.31 之后，槽位判错就是一次 ±90° 的硬拽，必须靠整帧最优配对兜住。
+    // 实测（q=4、σ=0.31）：身份关 v4 78.52/v1 36.38，身份开 86.85/51.28。
+    // 详细机制：同帧 ≥2 块同编号板时不再"每个观测各自贪心 argmin 判
     // 槽位"，而是穷举全部单射配对（N=4、k≤4 时最多 24 种），取 Σ新息NIS 最小
     // 的一组作为**整帧**配对；同时用 softmax 记录最优/次优的后验与 margin。
     // 单板帧（身份无歧义）硬旁路，走原路径。
     // 详见 docs/架构重构-板身份多假设方案_2026-10-25.md 与
     // docs/身份后验-从环序假设到精确枚举_2026-10-25.md。
-    bool identity_posterior_enabled{false};
+    bool identity_posterior_enabled{true};
     bool pair_body_solve_enabled{false};
     // 只在慢转/平移时用双板闭式解：高速自转（>=3 rad/s）时同一帧两块板的
     // 曝光不是同一瞬间，弦长和法向差都会被拖尾污染，闭式解反而会把相位推歪。
@@ -375,8 +379,20 @@ struct TrackerConfig
     // 抖出 3cm 门（命中率 33~74%），2.5/4.0 全过（96~98%）。参考实现能扛 1.55
     // 是因为它的法向经 optimize_yaw 统一到高质量、且 4 维量测一次性融合；
     // 我们是顺序更新 + 换板瞬态，需要更弱的角度通道。
-    bool angle_state_obliquity_sigma{false};
-    double angle_state_sigma_rad{2.5};
+    //
+    // 【2026-10-25 参考对齐】上面这段"2.5 才稳"的结论是在 Q 错 241 倍的坐标系
+    // 下扫出来的——Q 过刚时 ω 不会变，角度残差只能全压到相位上，于是必须把
+    // σ 放得极大才不抖。Q 对齐到 q=4 之后实测 σ=0.31 反而更好（v4 73.15→86.85、
+    // v1 47.02→51.28）。所以默认改成参考刻度 0.31 rad（17°）。
+    // 注意 σ 与身份后验是耦合的：小 σ 一旦槽位判错就硬拽 ±90°，所以
+    // identity_posterior_enabled 必须同时打开。
+    //
+    // angle_state_obliquity_sigma=true 时用参考实现的原公式
+    //   σ = sqrt(log(|Δ|+1)/200 + 9e-2)
+    // （Δ=板外法向与"板→相机"方向的夹角）。该式在 Δ∈[0,π] 上几乎是常数
+    // ≈0.30 rad——它本来就是"角度量测天生弱"的弱化通道，不是真的想把 σ 拉大。
+    bool angle_state_obliquity_sigma{true};
+    double angle_state_sigma_rad{0.31};
     // 槽位相位更新的触发下界。用 static_rate_rad_s(1.2) 会让静止车上的 omega
     // 抖动也偶尔触发（实测 id=1 的 PIX 样本数 516 -> 279）。但取 3.0 会让转子
     // 低速段失去槽位锁定（id=3 82.2 -> 91.2），所以仍用 1.2。
@@ -476,22 +492,26 @@ struct TrackerConfig
     double rate_tracklet_sigma_floor_rad_s{0.35};
     // 用量测而不是硬写之后，这个开关可以默认打开（合成 F/G/H 仍然要绿）。
     bool rate_measurement_enabled{true};
-    // 只放大"角加速度"这一项过程噪声：让 omega 跟得上观测，又不让位置跳变。
-    double process_spin_scale{1.0};
-    // 自适应：按"实测 |ω| 的滑动统计"放大角加速度噪声。
-    // 依据：v4 上固定 SPIN_Q 从 1 加到 100，EKF ω 从 1.18 涨到 3.64、PIX 91.5→84.5；
-    // 而 v1 目标几乎不转，固定大 Q 反而变差，所以只能按实测转速自适应。
-    bool adaptive_spin_q_enabled{true};
-    // ===== 2026-10-25 参考对齐：Q 门改线性（0.01 → v2=400）=====
-    // 旧二次曲线 (|ω|/2)² 在实拍转速 4.72 rad/s 只给到 v2≈0.056——比参考
-    // sp_vision_25 的 400 小 7000 倍，是"纯 EKF 转速立不起来"的定量卡点
-    // （见 docs/spvision25转速跟随机制报告_2026-10-25.md §四）。现在角度
-    // 直接量测（updateFaceYawForSlot，σ=2.5 弱约束）每帧都在约束相位，
-    // 静态漂移风险远低于 §16 时代（那时角度观测是关的），门可以线性开满。
-    double adaptive_spin_rate_floor_rad_s{1.5}; // 低于它 Q 保持基值 0.01
-    double adaptive_spin_rate_full_rad_s{3.0};  // 高于它 Q 开满到 v2=400
+    // 角加速度过程噪声（连续白噪声谱密度 q，Q_ω = q · dt）。
+    //
+    // 【2026-10-25 参考对齐】原来的"按 tracklet |ω| EMA 分档的线性软门"
+    // （floor 1.5 / full 3.0 rad/s，开满到 400）+ 两处回写已整段删除。两个原因：
+    //   ① 门控变量 measured_rate_ema_ 只在 tracklet |ω|≥3 rad/s 且连续同向 20 步
+    //      时才更新 → |ω|<3 时门恒关，angular_accel 恒 0.01，等于禁止 ω 变化；
+    //   ② 0.01 与 400 分属两套离散化口径，本身不可比（见下），所以历史上
+    //      "抬到 400 就对齐参考了"这个判断是错的。
+    //
+    // 量纲对照（这是本次对齐的核心）：
+    //   sp_vision_25: Q_ω = v2 · dt²，v2 = 400  → dt=1/166 时 0.0145 /帧
+    //   rmcs        : Q_ω = noise_rotation_speed 每帧常量 = 1.0
+    //   本项目      : Q_ω = q · dt            → q = 0.01 时 6.0e-5 /帧（= 参考的 1/241）
+    //   换算关系    : q ≈ v2 · dt，故 166 fps 上 v2=400 ⇔ q≈2.4。
+    // 取 4.0（对应 v2≈660）而不是 2.4：本项目单帧位置噪声实测 13.8 mm，
+    // 高于参考场景；两片段实测在 q∈[2,5] 内取 4 最优，8 会把 v1 打崩。
+    // 环境变量 SPIN_Q 仍是实验旋钮（angular_accel = 0.01·SPIN_Q），勿在成品里设。
+    double process_angular_accel{4.0};
+    // 仅 tracklet 路径使用的有符号 EMA 系数（真自转同向、抖动正负抵消）。
     double adaptive_spin_alpha{0.25};
-    double adaptive_spin_decay_rad_s{2.0}; // 没有可信量测时 EMA 每秒回落多少 rad/s
     double rate_tracklet_max_step_rad_s{0.4};
 
     // === 状态机 ===
@@ -1001,7 +1021,6 @@ private:
     std::deque<RateResidual> rate_residual_samples_;
     Eigen::Vector2d rate_last_position_{0.0, 0.0};
     double rate_last_time_s_{-1.0};
-    double measured_rate_ema_{0.0};
     double rate_signed_ema_{0.0};
     int spin_streak_{0};
     bool rate_has_last_{false};
