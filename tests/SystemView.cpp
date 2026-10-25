@@ -571,6 +571,14 @@ cv::Mat renderMiniTopDown(const MiniTopDownFrame &frame, const MiniTopDownOption
         }
     }
 
+    // ω 方向箭头：绿色，slot 0 板外侧 → 板运动方向（尾/头工具端算好，米制）。
+    if (frame.has_omega_arrow)
+    {
+        cv::arrowedLine(canvas, to_px3(frame.omega_arrow_tail),
+                        to_px3(frame.omega_arrow_head), cv::Scalar(0, 255, 0), 2,
+                        cv::LINE_AA, 0, 0.35);
+    }
+
     // 云台原点：灰色空心小圆（"相机装在云台前面一点"，两者要能分开看）。
     const cv::Point origin_px = to_px(0.0, 0.0);
     if (canvas_rect.contains(origin_px))

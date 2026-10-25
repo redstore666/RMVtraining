@@ -831,6 +831,32 @@ int main(int argc, char **argv)
                     mini.plate_yaws.push_back(phase);
                     mini.plate_half_widths.push_back(half_w);
                 }
+                // ω 方向箭头：方向 = slot 0 板位置对相位的导数 × sign(ω)——
+                // 板位置 = C − r·(cosφ, sinφ)，d/dφ = (sinφ, −cosφ)，与板在
+                // 图上的真实运动方向严格一致；数据与 caption w= 同源（EKF）。
+                const double ekf_w = static_cast<double>(prediction.body_yaw_velocity);
+                if (std::abs(ekf_w) > 0.15)
+                {
+                    const double phi0 = body_phase_for_plates;
+                    const double s = ekf_w > 0.0 ? 1.0 : -1.0;
+                    const double len_m = std::min(0.28, 0.08 + 0.03 * std::abs(ekf_w));
+                    const Eigen::Vector3d p0(state(0) - radius * std::cos(phi0),
+                                             state(2) - radius * std::sin(phi0),
+                                             state(4) + tracker.slotZOffsetMean());
+                    Eigen::Vector2d radial(p0.x() - state(0), p0.y() - state(2));
+                    const double r_norm = radial.norm();
+                    if (r_norm > 1e-6)
+                    {
+                        radial /= r_norm;
+                        mini.has_omega_arrow = true;
+                        mini.omega_arrow_tail =
+                            p0 + Eigen::Vector3d(0.05 * radial.x(), 0.05 * radial.y(), 0.0);
+                        mini.omega_arrow_head = mini.omega_arrow_tail +
+                                                Eigen::Vector3d(
+                                                    len_m * s * std::sin(phi0),
+                                                    -len_m * s * std::cos(phi0), 0.0);
+                    }
+                }
                 // 观测叠加：白十字 + 法向短线（只看选中的那条轨迹）。
                 for (const ArmorPose &pose : tracked_poses)
                 {

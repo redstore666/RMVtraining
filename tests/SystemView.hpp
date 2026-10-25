@@ -137,6 +137,13 @@ struct MiniTopDownFrame
     // 每块板的半宽（米）：缺省 0.0675（小板）。工具里传固定值，长度不随板型跳。
     std::vector<double> plate_half_widths;
 
+    // ω 方向箭头（调试）：画在 slot 0 板外侧，指向该板当前的运动方向（与板在
+    // 图上的真实移动方向一致），长度 ∝ |ω|。用来判"旋转方向反了"是相位真反转
+    // 还是四重对称（mod 90°）造成的视觉错觉。has_omega_arrow=false 不画。
+    bool has_omega_arrow{false};
+    Eigen::Vector3d omega_arrow_tail{Eigen::Vector3d::Zero()};
+    Eigen::Vector3d omega_arrow_head{Eigen::Vector3d::Zero()};
+
     // 本帧"看到的"板（白色小十字 + 一条法向短线），用来核对模型板有没有跟着真实
     // 板转：白十字贴在彩色板上 = 跟上了；白十字明显领先/落后 = 相位或 ω 有滞后。
     std::vector<Eigen::Vector3d> observed_centres;
