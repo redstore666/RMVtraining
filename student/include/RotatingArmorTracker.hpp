@@ -243,6 +243,14 @@ struct TrackerConfig
     double normal_tiebreak_weight{0.0};
     bool joint_pair_binding_enabled{true};
     double joint_pair_binding_max_cost_m{0.80};
+    // ===== S2：板身份精确后验（单射配对枚举）=====
+    // 默认关。开启后，同帧 ≥2 块同编号板时不再"每个观测各自贪心 argmin 判
+    // 槽位"，而是穷举全部单射配对（N=4、k≤4 时最多 24 种），取 Σ新息NIS 最小
+    // 的一组作为**整帧**配对；同时用 softmax 记录最优/次优的后验与 margin。
+    // 单板帧（身份无歧义）硬旁路，走原路径。
+    // 详见 docs/架构重构-板身份多假设方案_2026-10-25.md 与
+    // docs/身份后验-从环序假设到精确枚举_2026-10-25.md。
+    bool identity_posterior_enabled{false};
     bool pair_body_solve_enabled{false};
     // 只在慢转/平移时用双板闭式解：高速自转（>=3 rad/s）时同一帧两块板的
     // 曝光不是同一瞬间，弦长和法向差都会被拖尾污染，闭式解反而会把相位推歪。
@@ -679,6 +687,14 @@ struct TrackerDiagnostics
     // 只有单板时可全为 nan（4 个 h 同构，没有意义）。
     double ring_cost[4]{0.0, 0.0, 0.0, 0.0};
     int ring_obs_count{0};
+    // ===== S2：身份后验运行态（只有启用且本帧走多板路径时有意义）=====
+    bool identity_active{false};
+    int identity_assignment_count{0};   // 本帧枚举了多少种单射配对
+    double identity_best_posterior{0.0};
+    double identity_second_posterior{0.0};
+    // 相对 margin = 次优代价/最优代价 - 1。越接近 0 说明"身份打平"，
+    // 此时强制的整帧配对没有信息量，应该让上层知道。
+    double identity_margin_rel{0.0};
 };
 
 class RotatingArmorTracker
@@ -842,6 +858,15 @@ private:
 
     // 关联 + 更新。返回本帧接受的更新数。
     int associateAndUpdate(const std::vector<WorldObservation>& world, double timestamp_s);
+
+    // ===== S2：板身份精确后验 =====
+    // 不留任何跨帧状态：身份在单帧内已由穷举给出精确最优，时间维的不确定性
+    // 由滤波器自己的协方差承担。跨帧累积权重反而会被"可见板数变化"打断。
+    void resetIdentityPosterior();
+    // 穷举全部单射配对，成功时 slot_of[world 下标] = 槽位（-1 表示不参与）。
+    // 返回 false 表示本帧不该走这条路径（单板帧 / 未锁定 / 数值异常）。
+    bool identityPosteriorAssignment(const std::vector<WorldObservation>& world, double timestamp_s,
+                                     std::vector<int>& slot_of);
     // 观测平滑（见 TrackerConfig::observation_smoothing_enabled）：返回 true 时
     // out 是平滑后的观测，否则调用方用原始观测。
     bool smoothObservation(const WorldObservation& observation, int slot,

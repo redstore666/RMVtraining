@@ -292,6 +292,7 @@ void RotatingArmorTracker::reset()
     ekf_.reset();
     applyProcessNoise();
     diagnostics_ = TrackerDiagnostics{};
+    resetIdentityPosterior();
     has_timestamp_ = false;
     last_timestamp_s_ = 0.0;
     state_timestamp_s_ = 0.0;
@@ -2592,12 +2593,211 @@ bool RotatingArmorTracker::smoothObservation(const WorldObservation &observation
     return true;
 }
 
+// ==================== S2：板身份的精确后验（单射配对枚举）====================
+//
+// 问题：k_i ∈ {0,1,2,3}（这个观测是车上第几块板）不可观测。旧实现按顺序对每个
+// 观测各做一次贪心 argmin（`best_distance` 挑最近的预测板），等价于一步步把
+// 混合似然塌成 delta，且不把"判错的概率"传下去。判错一次就往状态里塞
+// 0.23~0.33 m 的假位移——实测多板帧的法向一致性只有 49%（单板帧 99.8%）。
+//
+// 第二版尝试用"环序配对"把身份压成 4 个循环移位 h（观测按方位角排序，
+// 第 r 个 -> (h+r) mod N）。方向是对的（空间从 4^k 压到 4），但**物理前提
+// 被数据否掉了**：那个前提是"同帧可见的板在槽位上是连续的一段"，而 v4 的
+// 相邻帧位移直方图在 2R·sin45°≈0.232 m 和 2R≈0.328 m 上**都有峰**
+// （见 docs/架构重构-板身份多假设方案 §1），即对置板也会同时可见。相邻假设
+// 会把对置板硬判成相邻槽位，A/B 实测：单板帧不变，但瞄准残差中位
+// 0.014 -> 0.022 m、≤2cm 58% -> 47%，是净退化。所以环序被降级为诊断。
+//
+// 本版：N=4、同帧可见 k≤4，**全部单射配对数只有 4P2=12 / 4P3=24 / 4P4=24**，
+// 小到可以直接穷举——那就没有理由再用任何几何近似。做法：
+//   1) 预计算每个 (观测 r, 槽位 s) 的 3 维新息 NIS（NIS 与状态/协方差有关、
+//      与其它观测的配对无关，所以可分离，表大小 ≤ k·N ≤ 16）；
+//   2) 深度优先枚举单射配对，代价 = Σ NIS，最好的一组即"整帧配对"；
+//   3) 同时记录次优代价，用 softmax 给出最优配对的后验权重与相对 margin
+//      （纯诊断 + 让"打平"这件事可见，不再需要人手调的标量权重）。
+//
+// 这不是把后验退回点估计：旧做法是"每个观测各自独立地 4 选 1"（组合空间
+// 4^k，且用贪心近似），新做法是"在所有合法整体配对里取精确最优"（组合空间
+// 4Pk，穷举）。前者会给出互相矛盾的槽位分配（实测同槽 20 帧、异槽 157 帧），
+// 后者结构上不可能矛盾。时间维度的不确定性由滤波器自己承担（位置/相位有
+// 协方差），身份这一维在单帧内已经是精确的，不需要跨帧累积。
+
+void RotatingArmorTracker::resetIdentityPosterior()
+{
+    diagnostics_.identity_active = false;
+    diagnostics_.identity_assignment_count = 0;
+    diagnostics_.identity_best_posterior = 0.0;
+    diagnostics_.identity_second_posterior = 0.0;
+    diagnostics_.identity_margin_rel = 0.0;
+}
+
+bool RotatingArmorTracker::identityPosteriorAssignment(const std::vector<WorldObservation> &world,
+                                                       double timestamp_s,
+                                                       std::vector<int> &slot_of)
+{
+    const int plate_count = std::max(config_.ekf.plate_count, 1);
+    if (target_id_ == 0 || plate_count < 2 || plate_count > 8)
+    {
+        return false;
+    }
+
+    // 1) 候选观测：只要锁定编号的，按"相对当前车心的方位角"升序。
+    //    排序只为得到确定的枚举顺序（保证结果可复现），不再赋予"相邻"语义。
+    std::vector<std::pair<double, int>> by_bearing;
+    by_bearing.reserve(world.size());
+    const double centre_x = ekf_.state()(0);
+    const double centre_y = ekf_.state()(2);
+    for (std::size_t i = 0; i < world.size(); ++i)
+    {
+        if (world[i].target_id != target_id_ || !world[i].position.allFinite())
+        {
+            continue;
+        }
+        by_bearing.emplace_back(
+            std::atan2(world[i].position.y() - centre_y, world[i].position.x() - centre_x),
+            static_cast<int>(i));
+    }
+    // 单板帧没有身份歧义（这块板就是它自己），交回原路径——这是 S2 的硬门槛。
+    const int count = static_cast<int>(by_bearing.size());
+    if (count < 2 || count > plate_count)
+    {
+        return false;
+    }
+    std::sort(by_bearing.begin(), by_bearing.end());
+
+    // 2) 新息表：NIS[r][s]。可分离，所以总代价就是配对代价之和。
+    std::vector<std::vector<double>> nis(static_cast<std::size_t>(count),
+                                         std::vector<double>(static_cast<std::size_t>(plate_count),
+                                                             0.0));
+    for (int r = 0; r < count; ++r)
+    {
+        const WorldObservation &source =
+            world[static_cast<std::size_t>(by_bearing[static_cast<std::size_t>(r)].second)];
+        ArmorObservation observation;
+        observation.position = source.position;
+        observation.sigma_position_m = observationSigma(source.sigma_position_m);
+        observation.has_world_yaw = source.has_yaw;
+        observation.world_yaw_rad = source.yaw;
+        observation.plates_visible = count;
+        for (int s = 0; s < plate_count; ++s)
+        {
+            double value = 0.0;
+            if (!ekf_.innovationNis(observation, s, value) || !std::isfinite(value))
+            {
+                value = 1.0e3;
+            }
+            nis[static_cast<std::size_t>(r)][static_cast<std::size_t>(s)] = value;
+        }
+    }
+
+    // 3) 穷举全部单射配对（DFS + 当前最优剪枝）。
+    std::vector<int> current(static_cast<std::size_t>(count), -1);
+    std::vector<int> best(static_cast<std::size_t>(count), -1);
+    std::vector<bool> used(static_cast<std::size_t>(plate_count), false);
+    double best_cost = std::numeric_limits<double>::infinity();
+    double second_cost = std::numeric_limits<double>::infinity();
+    int enumerated = 0;
+
+    // 递归（count ≤ 8，深度极浅）。用显式 lambda 递归避免 std::function 开销。
+    const auto search = [&](auto &&self, int index, double cost) -> void {
+        if (cost >= second_cost)
+        {
+            return; // 已经不可能进前二，剪掉整棵子树
+        }
+        if (index == count)
+        {
+            ++enumerated;
+            if (cost < best_cost)
+            {
+                second_cost = best_cost;
+                best_cost = cost;
+                best = current;
+            }
+            else if (cost < second_cost)
+            {
+                second_cost = cost;
+            }
+            return;
+        }
+        const std::vector<double> &row = nis[static_cast<std::size_t>(index)];
+        for (int s = 0; s < plate_count; ++s)
+        {
+            if (used[static_cast<std::size_t>(s)])
+            {
+                continue;
+            }
+            used[static_cast<std::size_t>(s)] = true;
+            current[static_cast<std::size_t>(index)] = s;
+            self(self, index + 1, cost + row[static_cast<std::size_t>(s)]);
+            used[static_cast<std::size_t>(s)] = false;
+        }
+    };
+    search(search, 0, 0.0);
+
+    if (!(best_cost < std::numeric_limits<double>::infinity()))
+    {
+        return false;
+    }
+    // 0.5 不是调出来的门限，是"有没有信息"的分界：MAP 配对必须比**其余所有**
+    // 配对加起来更像，否则身份这一维对本帧没有可用信息，就不该去覆盖原路径的
+    // 贪心解（实拍里存在 wbest≈0.5 的对置板构型）。这是二选一 0-1 损失下的
+    // 贝叶斯最优动作，不含任何标量权重。
+    // 4) softmax 只用于诊断与"打平"可见性：w = exp(-c/2) 归一化。
+    const double best_weight = 1.0;
+    const double second_weight =
+        std::isfinite(second_cost) ? std::exp(-0.5 * (second_cost - best_cost)) : 0.0;
+    const double normalizer = best_weight + second_weight;
+    diagnostics_.ring_obs_count = count;
+    diagnostics_.identity_assignment_count = enumerated;
+    diagnostics_.identity_best_posterior = best_weight / normalizer;
+    diagnostics_.identity_second_posterior = second_weight / normalizer;
+    diagnostics_.identity_margin_rel =
+        std::isfinite(second_cost) && best_cost > 1.0e-9 ? (second_cost / best_cost) - 1.0 : 0.0;
+
+    // 信息量判据（见上）：MAP 必须胜过其余全部配对之和，否则本帧不覆盖原路径。
+    const bool informative = diagnostics_.identity_best_posterior > 0.5;
+    diagnostics_.identity_active = informative;
+    if (!informative)
+    {
+        return false;
+    }
+
+    slot_of.assign(world.size(), -1);
+    for (int r = 0; r < count; ++r)
+    {
+        const int observation_index = by_bearing[static_cast<std::size_t>(r)].second;
+        slot_of[static_cast<std::size_t>(observation_index)] =
+            best[static_cast<std::size_t>(r)];
+    }
+
+    static const bool debug = std::getenv("ID_POSTERIOR_DEBUG") != nullptr;
+    if (debug)
+    {
+        std::fprintf(stderr,
+                     "[idp] t=%.4f k=%d n=%d best=%.2f second=%.2f margin=%.3f wbest=%.3f\n",
+                     timestamp_s, count, enumerated, best_cost, second_cost,
+                     diagnostics_.identity_margin_rel, diagnostics_.identity_best_posterior);
+    }
+    return true;
+}
+
 int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation> &world,
                                              double timestamp_s)
 {
     if (!ekf_.initialized())
     {
         return 0;
+    }
+    // ===== S2：板身份后验（默认关；单板帧硬旁路）=====
+    // 逐帧清诊断：这组字段只在"本帧真的走了后验配对"时有意义，绝不能粘住
+    // 上一帧的值（否则 A/B 统计会把 578 帧都算成"走后验"，实际只有 209 帧）。
+    resetIdentityPosterior();
+    // 只在"同帧 ≥2 块同编号板"时给出整帧配对；单板帧没有身份歧义，
+    // 直接交回原来的逐块贪心路径（硬门槛：单板已有 34°/0.2% 的好基线）。
+    std::vector<int> identity_slot;
+    if (config_.identity_posterior_enabled)
+    {
+        identityPosteriorAssignment(world, timestamp_s, identity_slot);
     }
     const int plate_count = config_.ekf.plate_count;
     // 关联诊断开关（只在置位时输出，默认零开销）。
@@ -2616,6 +2816,18 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
     diagnostics_.chosen_obs_yaw_rad = 0.0;
     diagnostics_.chosen_slot = -1;
     diagnostics_.ring_obs_count = 0;
+    // 同帧同编号观测数：环序恒量，任何时候都要有（不依赖 RING_DEBUG），
+    // 因为 S2 的多板/单板分流、以及回放侧的 A/B 统计都读它。
+    if (target_id_ != 0)
+    {
+        for (const WorldObservation &observation : world)
+        {
+            if (observation.target_id == target_id_)
+            {
+                ++diagnostics_.ring_obs_count;
+            }
+        }
+    }
 
     // 同帧两块板的联合绑定：两块板是同一台车上的两块相邻面，它们的槽位差由
     // 几何决定，只有 4 种整体旋转可选。逐块"找最近的预测板"是各自独立决策，
@@ -2623,7 +2835,7 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
     // 一旦同槽就互相拉扯，相位永远定不住）。这里对 4 种槽位整体旋转求和代价，
     // 取最小的一组，用它把两块板的槽位钉住。
     std::vector<int> forced_slot(world.size(), -1);
-    if (config_.joint_pair_binding_enabled)
+    if (config_.joint_pair_binding_enabled && !config_.identity_posterior_enabled)
     {
         std::vector<int> cand;
         for (std::size_t i = 0; i < world.size(); ++i)
@@ -2675,6 +2887,19 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                     }
                 }
             }
+        }
+    }
+
+    // ===== S2：后验给出的整帧配对，覆盖逐块打分 =====
+    // 与上面 joint_pair 的关键差别：joint_pair 也是"4 种整体旋转取最小代价"，
+    // 但它只处理"恰好 2 块板 + 两块都有法向 + 弦长在 0.15~0.90 m"这一种构型，
+    // 且代价里混了法向内积/弦长门限这些手调标量；S2 用统一的 3 维新息代价
+    // 处理任意可见板数，代价不含量纲不成立的权重。两者互斥，见 config 注释。
+    if (!identity_slot.empty())
+    {
+        for (std::size_t i = 0; i < forced_slot.size(); ++i)
+        {
+            forced_slot[i] = identity_slot[i];
         }
     }
 

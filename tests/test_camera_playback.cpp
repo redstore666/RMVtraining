@@ -164,6 +164,7 @@ namespace
         int antianchor{-1};
         double normal_tiebreak{-1.0};
         int joint_pair{-1};
+        int id_posterior{-1};
         int circle_phase{-1};
         int batch_fit{-1};
         int tracklet{-1};
@@ -396,6 +397,12 @@ namespace
             else if (arg == "--joint-pair")
             {
                 args.joint_pair = std::atoi(next("--joint-pair").c_str());
+            }
+            else if (arg == "--id-posterior")
+            {
+                // S2 板身份精确后验（穷举全部单射配对）。A/B 用开关，
+                // 语义写在 TrackerConfig 里，库代码自身不读环境变量。
+                args.id_posterior = std::atoi(next("--id-posterior").c_str());
             }
             else if (arg == "--normal-tiebreak")
             {
@@ -999,6 +1006,18 @@ int main(int argc, char **argv)
     {
         tracker_config.joint_pair_binding_enabled = args.joint_pair != 0;
     }
+    if (args.id_posterior >= 0)
+    {
+        // S2：精确身份后验取代"逐块贪心 argmin 判槽位"。开了之后逐块贪心在
+        // 多板帧不参与；单板帧按硬门槛仍走原路径。
+        tracker_config.identity_posterior_enabled = args.id_posterior != 0;
+        // 架构正确性判据：身份一旦由后验决定，靠手调标量的联合绑定就必须
+        // 让位（否则等于新旧两套并存）。这里跟随开关自动关掉。
+        if (args.joint_pair < 0)
+        {
+            tracker_config.joint_pair_binding_enabled = args.id_posterior == 0;
+        }
+    }
     if (args.normal_tiebreak >= 0.0)
     {
         tracker_config.normal_tiebreak_weight = args.normal_tiebreak;
@@ -1166,7 +1185,8 @@ int main(int argc, char **argv)
         dump_stream.open(args.dump_csv);
         dump_stream << "frame,t,det,target_id,aim_slot,obs_id,x,y,z,best_slot,best_dist,"
                        "second_dist,cx,cy,cz,cyaw,R,oyaw,aimx,aimy,aimz,u,v,stab,upd,missed,"
-                       "tyaw,thasyaw,tslot,ringk,rc0,rc1,rc2,rc3\n";
+                       "tyaw,thasyaw,tslot,ringk,rc0,rc1,rc2,rc3,"
+                       "ekfw,idact,idn,idwbest,idw2nd,idmargin\n";
     }
 
     // --only-id N 是"只研究一个板号"的单目标模式，跟多目标是互斥的：
@@ -1694,7 +1714,16 @@ int main(int argc, char **argv)
                                             << ',' << dg.chosen_slot
                                             << ',' << dg.ring_obs_count
                                             << ',' << dg.ring_cost[0] << ',' << dg.ring_cost[1]
-                                            << ',' << dg.ring_cost[2] << ',' << dg.ring_cost[3]
+                                            << ',' << dg.ring_cost[2] << ',' << dg.ring_cost[3];
+                                // S2：EKF 转速 + 身份后验运行态。未启用时 idact=0，
+                                // A/B 时能逐帧看出"这帧走的是后验配对还是原贪心路径、
+                                // 枚举了多少种配对、最优后验多强、次优差多少"。
+                                dump_stream << ',' << st(7)
+                                            << ',' << (dg.identity_active ? 1 : 0)
+                                            << ',' << dg.identity_assignment_count
+                                            << ',' << dg.identity_best_posterior
+                                            << ',' << dg.identity_second_posterior
+                                            << ',' << dg.identity_margin_rel
                                             << '\n';
                 }
                 if (std::isfinite(best))
