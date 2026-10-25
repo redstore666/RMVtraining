@@ -137,6 +137,14 @@ if(ENABLE_WEB_DEBUG)
     target_link_libraries(rmv_training PRIVATE web_debug)
 endif()
 
+# 上车程序的迷你俯视图网页（main.cpp 的 RMV_SYSTEM_WEB 块）：渲染/推流纯被动，
+# 与生产 webdebug 的 web_port 错开（实际端口 = web_port+1，默认 8081）。
+if(ENABLE_WEB_SYSTEM)
+    target_link_libraries(rmv_training PRIVATE system_web system_view ${OpenCV_LIBS})
+    target_include_directories(rmv_training PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+    target_compile_definitions(rmv_training PRIVATE RMV_SYSTEM_WEB=1)
+endif()
+
 if(BUILD_TESTING)
     enable_testing()
     # 虚拟电控：用伪终端代替主控板，无硬件也能跑完整链路（见 tests/sim_controller.cpp）

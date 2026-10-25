@@ -1291,3 +1291,40 @@ PredictionResult ekf_predict(const std::vector<ArmorPose> &observations, const G
     logTrackerDiagnostics(tracker.diagnostics());
     return prediction;
 }
+
+TopDownSnapshot ekf_topdown_snapshot() {
+    const auto &tracker = trackerInstance();
+    TopDownSnapshot snap;
+    snap.valid = tracker.initialized();
+    if (!snap.valid) {
+        return snap;
+    }
+    const auto &st = tracker.ekf().state();
+    constexpr int kPlateCount = 4;
+    snap.center_x_m = st(0);
+    snap.center_y_m = st(2);
+    snap.center_z_m = st(4) + tracker.slotZOffsetMean();
+    snap.body_yaw_rad = st(6);
+    snap.radius_m = st(8);
+    for (int slot = 0; slot < kPlateCount; ++slot) {
+        const double phase = st(6) + 2.0 * M_PI * static_cast<double>(slot) / kPlateCount +
+                             tracker.slotAngleOffset(slot);
+        Eigen::Vector3d centre = rotating_armor::platePosition(st, slot, kPlateCount);
+        centre.z() += tracker.slotZOffset(slot);
+        centre.head<2>() -= tracker.slotRadiusOffset(slot) *
+                            Eigen::Vector2d(std::cos(phase), std::sin(phase));
+        snap.seat_centre_m[slot][0] = centre.x();
+        snap.seat_centre_m[slot][1] = centre.y();
+        snap.seat_centre_m[slot][2] = centre.z();
+        snap.seat_face_yaw_rad[slot] = rotating_armor::wrapToPi(phase + M_PI);
+    }
+    const auto &diagnostics = tracker.diagnostics();
+    snap.aim_slot = diagnostics.aim_slot;
+    snap.has_predicted_aim = diagnostics.predicted_aim_world.allFinite();
+    if (snap.has_predicted_aim) {
+        snap.predicted_aim_m[0] = diagnostics.predicted_aim_world.x();
+        snap.predicted_aim_m[1] = diagnostics.predicted_aim_world.y();
+        snap.predicted_aim_m[2] = diagnostics.predicted_aim_world.z();
+    }
+    return snap;
+}

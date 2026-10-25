@@ -72,3 +72,23 @@ std::vector<ArmorPose> armor_solve(const std::vector<ArmorDetection> &detections
 // timestamp_seconds 单调递增；prediction_bias_s 来自控制器。
 PredictionResult ekf_predict(const std::vector<ArmorPose> &observations,
                              const GimbalState &gimbal, double timestamp_seconds);
+
+// ===== 俯视图快照（上车程序 mini top-down 用；2026-10-25）=====
+// 纯读取跟踪器内部状态打包给显示层，不改变任何跟踪/控制行为。
+// seat_* 的几何与 test_camera_system 的 plateCentreOnScreen 完全一致：
+//   phase  = body_yaw + slot·2π/4 + slot_angle_offset
+//   centre = platePosition(state, slot)，z 加 slot_z_offset，再沿径向内收
+//            slot_radius_offset
+//   face_yaw = phase + π（外法向）
+struct TopDownSnapshot {
+    bool valid{false}; // 跟踪器已初始化；false 时其余字段无意义
+    double center_x_m{0.0}, center_y_m{0.0}, center_z_m{0.0};
+    double body_yaw_rad{0.0};
+    double radius_m{0.0};
+    double seat_centre_m[4][3]{};
+    double seat_face_yaw_rad[4]{};
+    int aim_slot{-1};
+    bool has_predicted_aim{false};
+    double predicted_aim_m[3]{};
+};
+TopDownSnapshot ekf_topdown_snapshot();
