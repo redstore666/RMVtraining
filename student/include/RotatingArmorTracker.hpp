@@ -140,6 +140,12 @@ struct TrackerConfig
     bool freeze_radius{true};
     double radius_min_m{0.05};
     double radius_max_m{0.60};
+    // 半径写入限速：刚性车的 R 物理恒定，弦长证据里混着"相邻/对置构型误判"
+    // 的双峰噪声（两簇差 √2 倍，rotate.avi 实测 R 在 0.20~0.385 摆、帧间最大
+    // 跳 51mm），低通压不住，俯视图的板圆周会"呼吸"。applySlowRadius 每次写入
+    // 相对当前 R 最多走这么多（米/调用），显示端即稳；0 = 关闭。0.5mm/帧
+    // @165fps ≈ 8cm/s，先验收径到实测值约 1s 收敛。
+    double radius_max_step_m{0.0005};
     double phase_spread_for_radius_rad{0.30}; // 相位扫过小于它 -> 半径不可辨识
     // 位置圆拟合锁定：高速自转时单帧板面 yaw 的抖动（实拍 ±0.3 rad）比单帧
     // 真实转角还大，yaw 序列拟合不出转速；板心位置却准（重投影 0.5 px），

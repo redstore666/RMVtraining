@@ -2429,6 +2429,12 @@ void RotatingArmorTracker::applySlowRadius(double candidate_radius)
     const double alpha = config_.radius_track_smooth_alpha;
     if (alpha <= 0.0)
     {
+        if (config_.radius_max_step_m > 0.0)
+        {
+            candidate_radius = std::clamp(candidate_radius,
+                                          ekf_.state()(8) - config_.radius_max_step_m,
+                                          ekf_.state()(8) + config_.radius_max_step_m);
+        }
         ekf_.setRadius(candidate_radius);
         return;
     }
@@ -2463,6 +2469,14 @@ void RotatingArmorTracker::applySlowRadius(double candidate_radius)
         radius_track_m_ += alpha * (target - radius_track_m_);
     }
     radius_track_m_ = std::max(config_.radius_min_m, std::min(config_.radius_max_m, radius_track_m_));
+    // 写入限速：相对 EKF 当前 R 每次最多 radius_max_step_m（0=关闭）。呼吸的
+    // 根源是双峰弦长噪声，限速让显示端稳定、真实几何差走连续小步收敛。
+    if (config_.radius_max_step_m > 0.0)
+    {
+        const double cur = ekf_.state()(8);
+        radius_track_m_ = std::clamp(radius_track_m_, cur - config_.radius_max_step_m,
+                                     cur + config_.radius_max_step_m);
+    }
     ekf_.setRadius(radius_track_m_);
 }
 
