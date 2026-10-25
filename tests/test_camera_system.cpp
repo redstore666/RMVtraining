@@ -185,6 +185,7 @@ int main(int argc, char **argv)
     bool video_loop = false;
     double hold_s = 0.0;
     double plate_width_m = 0.135; // 固定长度，不随检测到的板型变
+    double radius_display_m = 0.25; // 俯视图固定座位矩形的半径常量（--radius 覆盖）；显示用，不随估计变
     int initial_pin = 0;          // --id N：启动就只看这个 id（网页下拉菜单仍可改）
     float conf_thres = -1.0F;     // --conf T：检测置信度门限（<0 = 用库默认 0.7）
     bool pair_body = false;       // --pair-body：打开"双板整车求解"（库默认关）
@@ -222,6 +223,7 @@ int main(int argc, char **argv)
                          "       [--show-camera] [--no-display] [--dump-every N]\n"
                          "  --id N           启动就只看 id=N（0=自动）；网页下拉菜单随时可改\n"
                          "  --plate-width M  迷你图里的板长（米，默认 0.135，四块板等长）\n"
+                         "  --radius M       俯视图固定座位矩形半径（米，默认 0.25，硬固定不随估计变）\n"
                          "  --conf T         检测置信度门限（默认用库里的 0.7；调低会多出弱检\n"
                          "  --pair-body      打开双板整车求解（两块相邻板闭式解 c/R/yaw，库默认关）\n"
                          "  --rate-pll       打开残差 PLL 转速量测（库默认关；四板相位只有 mod 90 度可观测）\n"
@@ -289,6 +291,20 @@ int main(int argc, char **argv)
             if (!(plate_width_m > 0.02 && plate_width_m < 0.60))
             {
                 std::cerr << "--plate-width 应在 0.02~0.60 m 之间\n";
+                return 2;
+            }
+        }
+        else if (arg == "--radius")
+        {
+            if (i + 1 >= argc)
+            {
+                std::cerr << "--radius 后面要跟米数\n";
+                return 2;
+            }
+            radius_display_m = std::atof(argv[++i]);
+            if (!(radius_display_m > 0.05 && radius_display_m < 0.60))
+            {
+                std::cerr << "--radius 应在 0.05~0.60 m 之间\n";
                 return 2;
             }
         }
@@ -408,6 +424,16 @@ int main(int argc, char **argv)
     // (t, 法向) 样本跨帧全配对 fold±π 取中位速率，逐帧积分。
     double obs_disp_phase{0.0};
     bool obs_disp_init{false};
+    // ===== 固定座位显示的状态（全部 PnP 实测锚定，与 EKF 预测无关）=====
+    // 中心：观测板位 + R·外法向 的显示 EMA；无观测帧保持不外推。
+    double disp_center_x{0.0};
+    double disp_center_y{0.0};
+    double disp_center_z{0.0};
+    bool disp_center_has{false};
+    // 前方座位计数器：观测法向跳 ±90°（= 真实车转了 90°/检测换板）时 ±1。
+    double front_seat_last_yaw{0.0};
+    bool front_seat_has{false};
+    int front_seat_index{-1};
 
     if (conf_thres > 0.0F)
     {
@@ -598,6 +624,9 @@ int main(int argc, char **argv)
         {
             tracker.reset();
             obs_disp_init = false;
+            disp_center_has = false;
+            front_seat_has = false;
+            front_seat_index = -1;
             pinned_last = pinned;
             pinned_last_seen_s = -1.0e9;
             std::cout << (pinned > 0 ? cv::format("[pin] 只看 id=%d（丢失也不自动切换）\n", pinned)
@@ -815,42 +844,100 @@ int main(int argc, char **argv)
                 mini.body_centre = Eigen::Vector3d(
                     state(0), state(2), state(4) + tracker.slotZOffsetMean());
                 const double radius = state(8);
-                // 板固定座位显示（用户实验方案）：四块板灰色、钉在固定座位
-                // （车心 ± R 的四个基点）围成矩形，不随相位转动、大小不变；
-                // "当前在最前方"（EKF 相位下离相机最近的槽位）黄色高亮。
-                // 高亮绕座位的轮转节奏 = 转速跟随是否达成的直接读数。
-                const double body_phase_for_plates = state(6);
-                // 固定半宽：四块板画一样长（--plate-width）。
-                const double half_w = 0.5 * plate_width_m;
-                for (int slot = 0; slot < kPlateCount; ++slot)
+                // 固定座位显示 v2（用户方案）：中心与半径全锚 PnP 实测——
+                // 中心 = 观测板位 + R·外法向（单板即可解），小 EMA 去抖、
+                // 无观测帧保持（不外推）；半径 = --radius 常量；四条边的
+                // 半长 = R，首尾相连围成闭合矩形，全部灰色不转动。
+                // 高亮 = "选定的板之后落在哪个座位"：观测法向跳 ±90°
+                // （真实车转了 90°/检测换板）时座位 ±1，纯 PnP 事件驱动。
+                const double R = radius_display_m;
+                if (!tracked_poses.empty())
                 {
-                    const double seat = static_cast<double>(slot) * M_PI * 0.5;
-                    mini.plate_centres.push_back(
-                        Eigen::Vector3d(state(0) - radius * std::cos(seat),
-                                        state(2) - radius * std::sin(seat),
-                                        state(4) + tracker.slotZOffsetMean()));
-                    mini.plate_yaws.push_back(seat);
-                    mini.plate_half_widths.push_back(half_w);
-                }
-                // 前方槽位：旋转位置 P_k = C − R(cos(φ+k·90°), sin(φ+k·90°))，
-                // 取离相机（云台原点）最近者。EKF 相位跳槽位会直接表现为高亮
-                // 跳格/倒退——这正是本显示方案要暴露的信号。
-                {
-                    int front_slot = -1;
-                    double best = 1e18;
-                    for (int slot = 0; slot < kPlateCount; ++slot)
+                    // 取离相机最近的观测 = 当前最正对的板（换板事件的主角）
+                    const ArmorPose *front = &tracked_poses.front();
+                    for (const ArmorPose &p : tracked_poses)
                     {
-                        const double a0 = body_phase_for_plates + M_PI * 0.5 * slot;
-                        const double dx = state(0) - radius * std::cos(a0);
-                        const double dy = state(2) - radius * std::sin(a0);
-                        const double d2 = dx * dx + dy * dy;
-                        if (d2 < best)
+                        if (Eigen::Vector3d(p.position_gimbal_m[0], p.position_gimbal_m[1],
+                                            p.position_gimbal_m[2])
+                                .norm() <
+                            Eigen::Vector3d(front->position_gimbal_m[0],
+                                            front->position_gimbal_m[1],
+                                            front->position_gimbal_m[2])
+                                .norm())
                         {
-                            best = d2;
-                            front_slot = slot;
+                            front = &p;
                         }
                     }
-                    mini.highlight_slot = front_slot;
+                    const double fx = front->position_gimbal_m[0];
+                    const double fy = front->position_gimbal_m[1];
+                    const double fz = front->position_gimbal_m[2];
+                    // 中心：板位 + R·外法向（armor_yaw 即外法向 world yaw）
+                    const double cx = fx + R * std::cos(front->armor_yaw);
+                    const double cy = fy + R * std::sin(front->armor_yaw);
+                    if (!disp_center_has)
+                    {
+                        disp_center_x = cx;
+                        disp_center_y = cy;
+                        disp_center_z = fz;
+                        disp_center_has = true;
+                    }
+                    else
+                    {
+                        const double a = 0.20; // 显示去抖 EMA
+                        disp_center_x += a * (cx - disp_center_x);
+                        disp_center_y += a * (cy - disp_center_y);
+                        disp_center_z += a * (fz - disp_center_z);
+                    }
+                    // 换板事件：法向差折叠到 ±180°，落在 90°±20° 记一次
+                    if (!front_seat_has)
+                    {
+                        front_seat_has = true;
+                        front_seat_last_yaw = front->armor_yaw;
+                        int best = 0; // 初始座位 = 离相机最近的固定座位
+                        double bd = 1e18;
+                        for (int k = 0; k < kPlateCount; ++k)
+                        {
+                            const double a0 = static_cast<double>(k) * M_PI * 0.5;
+                            const double sx = disp_center_x - R * std::cos(a0);
+                            const double sy = disp_center_y - R * std::sin(a0);
+                            const double d2 = sx * sx + sy * sy;
+                            if (d2 < bd)
+                            {
+                                bd = d2;
+                                best = k;
+                            }
+                        }
+                        front_seat_index = best;
+                    }
+                    else
+                    {
+                        double d = front->armor_yaw - front_seat_last_yaw;
+                        while (d > M_PI) d -= 2.0 * M_PI;
+                        while (d < -M_PI) d += 2.0 * M_PI;
+                        if (std::abs(std::abs(d) - M_PI * 0.5) < M_PI / 9.0)
+                        {
+                            front_seat_index =
+                                ((front_seat_index + (d > 0 ? 1 : -1)) % kPlateCount +
+                                 kPlateCount) %
+                                kPlateCount;
+                        }
+                        front_seat_last_yaw = front->armor_yaw;
+                    }
+                }
+                if (disp_center_has)
+                {
+                    const Eigen::Vector3d c(disp_center_x, disp_center_y, disp_center_z);
+                    mini.body_centre = c; // 车心标记也用 PnP 实测（不随预测外推）
+                    for (int slot = 0; slot < kPlateCount; ++slot)
+                    {
+                        const double seat = static_cast<double>(slot) * M_PI * 0.5;
+                        mini.plate_centres.push_back(
+                            Eigen::Vector3d(c.x() - R * std::cos(seat),
+                                            c.y() - R * std::sin(seat), c.z()));
+                        mini.plate_yaws.push_back(seat);
+                        mini.plate_half_widths.push_back(R); // 半长=R → 四边首尾相连
+                    }
+                    mini.highlight_slot = front_seat_index;
                 }
                 // 观测叠加：白十字 + 法向短线（只看选中的那条轨迹）。
                 for (const ArmorPose &pose : tracked_poses)
