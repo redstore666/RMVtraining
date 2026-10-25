@@ -231,6 +231,16 @@ void RotatingArmorTracker::applyProcessNoise()
         // 只信 tracklet 实测（measured_rate_ema_），不信 |state(7)|——
         // 状态尖峰进 Q 门会形成"尖峰→大Q→更大尖峰"的正反馈（实测 w 冲到 -41）。
         // 旧二次曲线 (|ω|/2)² 在实拍 4.72 rad/s 只给 v2≈0.056（差 7000 倍）。
+        //
+        // 2026-10-25 复核（§四十六）——务必知道这条门的真实行为：
+        // measured_rate_ema_ 只在 `spinning` 成立时更新，而 spinning 要求 tracklet
+        // |ω| ≥ rate_tracklet_min_rate_rad_s(3.0) 且连续同向 ≥20 步。所以
+        //   · |ω| < 3 rad/s：门恒关，angular_accel 恒 0.01（这套自适应等于不存在）；
+        //   · |ω| ≥ 3 rad/s 的爆发段：门真的打开（v4 有 p90≈10 rad/s 的爆发）。
+        // 换句话说它是"爆发段才生效的开关"，不是纯死代码。实测删掉换成常量：
+        // 20 rad/s² 会让 v4/v1 的 ≤5cm 变成 72.9/49.2，但 ekf_tracker 的
+        // G 组(ω=8) 与 H 组(静止+噪声法向) 双红（预测点差一块板、静止漂 0.45）。
+        // 结论：Q 上"跟得上转速"与"槽位/预测稳"是真冲突，保持原值，留给专题。
         const double rate_now = std::fabs(measured_rate_ema_);
         const double span = std::max(1e-3, config_.adaptive_spin_rate_full_rad_s -
                                                 config_.adaptive_spin_rate_floor_rad_s);
@@ -3343,7 +3353,6 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                     const bool spinning =
                         spin_streak_ >= config_.rate_tracklet_min_streak &&
                         std::fabs(rate_signed_ema_) >= config_.rate_tracklet_min_rate_rad_s;
-                        std::fabs(ekf_.state()(7)) >= config_.rate_tracklet_min_rate_rad_s;
                     const bool warmed_up = diagnostics_.accepted_updates >=
                                            static_cast<std::uint64_t>(config_.rate_tracklet_min_updates);
                     // 车心还没收敛时，绕它算出来的角度差是垃圾：要求板心到车心的

@@ -414,19 +414,18 @@ int main(int argc, char **argv)
                                 pair_body ? 1 : 0, rate_pll ? 1 : 0, rate_tracklet ? 1 : 0);
     }
 
-    // ===== 固定座位显示的状态（全部 PnP 实测锚定，与 EKF 预测无关）=====
-    // 中心：观测板位 + R·外法向 的显示 EMA；无观测帧保持不外推。
+    // ===== 固定座位显示的状态 =====
+    // 车心：观测板位 + R·外法向 的显示 EMA；无观测帧保持不外推。
     double disp_center_x{0.0};
     double disp_center_y{0.0};
     double disp_center_z{0.0};
     bool disp_center_has{false};
-    // 连续相位积分 Θ（"选定板"的实测角度）：前板绕 PnP 中心的角度 α 逐帧
-    // 连续积分（斜率=真实转速）；换板瞬间观测对象切换，|Δα|>45° 的跳变
-    // 跳过不积分——Θ 每前进 90° 对齐下一个座位，方向反转即时跟随，
-    // 对旋转波形零假设（正弦/变速/双向切换都适用）。
-    double front_theta{0.0};
-    double front_last_alpha{0.0};
-    bool front_seat_has{false};
+    // 座位号不再自己积分：旧实现用"前板绕 PnP 中心的方位角 α 逐帧累加"当相位
+    // Θ，两个致命拖慢——① 逐帧 7° 的 PnP 噪声被累加 500+ 次成随机游走；
+    // ② "前板"是"离相机最近的那块"，远处两板距离差 1~2 cm 与噪声同量级时
+    // 会在两块之间来回切换，|Δα|≈90° 全被判成"换板"丢弃，Θ 原地不动。
+    // 现在座位号直接由 EKF 相位 state(6) 决定：seat = round(φ/90°)，与
+    // RotatingArmorModel::measurement() 同一套几何，显示即 EKF 读数。
 
     if (conf_thres > 0.0F)
     {
@@ -617,8 +616,6 @@ int main(int argc, char **argv)
         {
             tracker.reset();
             disp_center_has = false;
-            front_seat_has = false;
-            front_theta = 0.0;
             pinned_last = pinned;
             pinned_last_seen_s = -1.0e9;
             std::cout << (pinned > 0 ? cv::format("[pin] 只看 id=%d（丢失也不自动切换）\n", pinned)
@@ -724,9 +721,8 @@ int main(int argc, char **argv)
         }
 
         // ===== 固定座位显示的实测锚（每处理帧更新，不进 60Hz 渲染门）=====
-        // 中心/相位全部 PnP 实测：中心 = 观测板位 + R·外法向（单板可解，
-        // EMA 去抖，无观测帧保持不外推）；Θ = 前板绕中心角度的连续积分，
-        // |Δα|>45° 的换板跳变（观测对象切换）跳过。前板 = 离相机最近的观测。
+        // 只留车心：中心 = 观测板位 + R·外法向（单板可解，EMA 去抖，
+        // 无观测帧保持不外推；观测取离相机最近的那块）。相位不再从这里出。
         if (!tracked_poses.empty())
         {
             const ArmorPose *front = &tracked_poses.front();
@@ -762,23 +758,6 @@ int main(int argc, char **argv)
                 disp_center_y += a * (cy - disp_center_y);
                 disp_center_z += a * (fz - disp_center_z);
             }
-            const double alpha_now =
-                std::atan2(fy - disp_center_y, fx - disp_center_x);
-            if (!front_seat_has)
-            {
-                front_seat_has = true;
-                front_theta = alpha_now;
-            }
-            else
-            {
-                double d = alpha_now - front_last_alpha;
-                while (d > M_PI) d -= 2.0 * M_PI;
-                while (d < -M_PI) d += 2.0 * M_PI;
-                if (std::abs(d) <= M_PI * 0.25)
-                    front_theta += d; // 换板跳变（±90°）= 观测对象切换，不积分
-            }
-            front_last_alpha = alpha_now;
-            SYSTEM_LOG("front_theta_deg", front_theta * 180.0 / M_PI);
         }
 
         const double frame_dt_ms =
@@ -803,10 +782,13 @@ int main(int argc, char **argv)
                 mini.body_centre = Eigen::Vector3d(
                     state(0), state(2), state(4) + tracker.slotZOffsetMean());
                 const double radius = state(8);
-                // 固定座位显示（最终语义）：四块灰色板钉在车心 ± R 的四个基点
-                // 围成闭合矩形，永不转动、大小不变；"选定板"落到哪个座位，
-                // 那个座位亮黄。座位号 = 实测积分相位 Θ 对 90° 取整——Θ 每前进
-                // 90° 高亮走一格（速度=真实转速、方向反转即时跟随）。
+                // 固定座位显示：四块灰色板钉在车心 ± R 的四个基点围成闭合矩形，
+                // 永不转动、大小不变；"选定板"落到哪个座位，那个座位亮黄。
+                // 座位号只由 EKF 相位决定，不掺 aim_slot：座位的定义是
+                // "参考板(槽位 0)此刻所在的位置"，模型里它就在 φ，所以
+                // seat = round(φ/90°)。φ 每前进 90° 走一格，一格耗时 = 90°/ω，
+                // 速度与 EKF 转速严格一致；aim_slot 的变化由白色描边单独表达
+                // （SystemView 的 is_aim），两者不互相污染。
                 const double R = radius_display_m;
                 if (disp_center_has)
                 {
@@ -821,11 +803,11 @@ int main(int argc, char **argv)
                         mini.plate_yaws.push_back(seat);
                         mini.plate_half_widths.push_back(R); // 半长=R → 四边首尾相连
                     }
-                    mini.highlight_slot =
-                        ((static_cast<int>(std::lround(front_theta / (M_PI * 0.5))) %
-                          kPlateCount) +
-                         kPlateCount) %
-                        kPlateCount;
+                    const double phase = state(6);
+                    const int phase_seats =
+                        static_cast<int>(std::lround(phase / (M_PI * 0.5)));
+                    mini.highlight_slot = ((phase_seats % kPlateCount) + kPlateCount) % kPlateCount;
+                    SYSTEM_LOG("ekf_phase_deg", phase * 180.0 / M_PI);
                 }
                 mini.aim_slot = diagnostics.aim_slot;
                 if (diagnostics.aim_slot >= 0 && diagnostics.aim_slot < kPlateCount)
