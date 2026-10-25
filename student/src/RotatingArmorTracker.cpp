@@ -233,9 +233,11 @@ void RotatingArmorTracker::applyProcessNoise()
         const char *v = std::getenv("SPIN_Q");
         return v ? std::atof(v) : -1.0;
     }();
+    // process_accel_scale（--q-scale）仍是全局 Q 倍率，角加速度同样吃它，
+    // 与对齐前"0.01·scale·spin_scale"的语义保持一致。
     config.process.angular_accel =
-        spin_env > 0.0 ? 0.01 * spin_env
-                       : std::max(1e-6, config_.process_angular_accel);
+        scale * (spin_env > 0.0 ? 0.01 * spin_env
+                                : std::max(1e-6, config_.process_angular_accel));
     ekf_.setConfig(config);
 }
 
