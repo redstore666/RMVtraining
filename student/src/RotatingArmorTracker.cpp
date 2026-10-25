@@ -226,18 +226,18 @@ void RotatingArmorTracker::applyProcessNoise()
         spin_env > 0.0 ? spin_env : std::max(1e-6, config_.process_spin_scale);
     if (spin_env < 0.0 && config_.adaptive_spin_q_enabled)
     {
-        // |ω| 越大，需要的角加速度噪声越大（Q ∝ |ω|²）。
-        // 参考 sp_vision_25 的角加速度方差 v2=400：大 Q 让 vyaw 通过 a+=w*dt
-        // 的交叉协方差被角度观测隐式、快速地修正（它没有任何伪量测结构）。
-        // 我们原来 base=0.01、上限 2 倍——比参考小 4 个数量级，omega 被 Q
-        // 和衰减压死在 0（实拍 omega 只剩 +10 尖峰的根因之一）。取 max(
-        // 量测EMA, state(7)) 做 bootstrap：静止时 Q 保持小（H 组静态容差
-        // 0.45 不能被随机游走破坏），转起来后 Q 放大到参考量级。
-        const double rate_now =
-            std::max(std::fabs(measured_rate_ema_), std::fabs(ekf_.state()(7)));
-        const double ratio = rate_now / std::max(1e-3, config_.adaptive_spin_rate_ref_rad_s);
-        const double adaptive = std::clamp(ratio * ratio, 1.0, config_.adaptive_spin_q_max);
-        spin_scale = std::max(spin_scale, adaptive);
+        // 线性软门（2026-10-25 参考对齐）：|ω| 低于 floor 保持基值 0.01
+        // （静态契约/H 组容差），高于 full 开满到参考量级 v2=400。
+        // 只信 tracklet 实测（measured_rate_ema_），不信 |state(7)|——
+        // 状态尖峰进 Q 门会形成"尖峰→大Q→更大尖峰"的正反馈（实测 w 冲到 -41）。
+        // 旧二次曲线 (|ω|/2)² 在实拍 4.72 rad/s 只给 v2≈0.056（差 7000 倍）。
+        const double rate_now = std::fabs(measured_rate_ema_);
+        const double span = std::max(1e-3, config_.adaptive_spin_rate_full_rad_s -
+                                                config_.adaptive_spin_rate_floor_rad_s);
+        const double ramp = std::clamp(
+            (rate_now - config_.adaptive_spin_rate_floor_rad_s) / span, 0.0, 1.0);
+        const double v2 = 0.01 + ramp * (400.0 - 0.01);
+        spin_scale = std::max(spin_scale, v2 / 0.01);
     }
     config.process.angular_accel = 0.01 * scale * spin_scale;
     ekf_.setConfig(config);
@@ -3241,49 +3241,81 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
         diagnostics_.last_nis = best_nis;
         if (chosen.has_yaw)
         {
-            // 相位观测：板面法向直接约束车体 yaw（折叠掉 2pi/N 的换板歧义）。
-            // 它和位置观测吃的是同一帧的同一块板，但因为折叠，换板不会把
-            // 相位带歪——这正是位置关联最脆弱的地方。
-            const bool phase_from_yaw =
-                config_.phase_update_enabled ||
-                (config_.phase_update_when_static && best_slot == last_updated_slot_ &&
-                 std::fabs(ekf_.state()(7)) < config_.static_rate_rad_s);
-            // 按槽位一致的相位更新：best_slot 已经被位置更新用掉了，相位更新
-            // 用同一个槽位，两者说的是同一件事。旋转目标上必须走这条——折叠版
-            // 只能修 45 度以内，锁不住槽位，实测 v4 上 yaw 单帧跳 140~215 度。
-            // 只在"同帧存在第二块同 id 板"时用槽位锁相位：那正是折叠版的
-            // 90 度歧义真正发作的地方（两块板都能解释观测，相位在解之间翻转）。
-            // 单板帧没有歧义，折叠版已经够用，不用槽位锁去打扰正常演化。
-            // 同帧里被接受进滤波器的观测数（含本帧前面已接受的那几块板）。
-            const bool two_plates_visible = accepted >= 2;
-            const bool slot_phase =
-                config_.slot_phase_update_enabled && best_slot >= 0 && two_plates_visible &&
-                std::fabs(ekf_.state()(7)) >= config_.slot_phase_min_rate_rad_s;
-            if (slot_phase || phase_from_yaw)
+            static const bool angle_update_disabled_by_env =
+                std::getenv("EKF_NO_ANGLE_UPDATE") != nullptr;
+            if (config_.reference_angle_update_enabled && !angle_update_disabled_by_env)
             {
-                // 反锚：先记下这块板在模型里的位置，改完 yaw 再把中心平移回去，
-                // 让板留在观测到的位置。单板可见时 (center, yaw) 是规范自由度，
-                // 不反锚就是"yaw 更新把板挪走、位置更新再拉回来"互相打架。
-                const Eigen::Vector3d plate_before =
-                    rotating_armor::platePosition(ekf_.state(), best_slot,
-                                                  ekf_.config().plate_count);
-                const bool phase_ok =
-                    slot_phase
-                        ? ekf_.updatePhaseForSlot(chosen.yaw, config_.phase_update_sigma_rad,
-                                                  best_slot)
-                        : ekf_.updatePhase(chosen.yaw, config_.phase_update_sigma_rad);
-                if (phase_ok)
+                // ===== 参考实现移植（sp_vision_25 target.cpp:187-222）=====
+                // 朝向角是每一帧的直接量测：槽位沿用本次位置更新的 best_slot
+                // （先匹配后更新，两者说同一件事），残差只折叠 ±pi，90° 四板
+                // 歧义由 slot 消除。σ 按斜视角对数放大——角度量测天生弱，
+                // 不会和位置更新打架（round-17 回归用的是 σ=0.12 的强锁）；
+                // w 由 Q 的 (a,w) 交叉协方差被角度残差连续拉拽。
+                double sigma = config_.angle_state_sigma_rad;
+                static const double angle_sigma_env = [] {
+                    const char *v = std::getenv("RMV_ANGLE_SIGMA");
+                    return v ? std::atof(v) : -1.0;
+                }();
+                if (angle_sigma_env > 0.0)
                 {
-                    const Eigen::Vector3d plate_after =
+                    sigma = angle_sigma_env; // 实验旋钮：覆盖斜视角公式
+                }
+                else if (config_.angle_state_obliquity_sigma)
+                {
+                    const double to_cam_yaw =
+                        std::atan2(-chosen.position.y(), -chosen.position.x());
+                    const double delta = std::fabs(wrapToPi(chosen.yaw - to_cam_yaw));
+                    sigma = std::sqrt(std::log(delta + 1.0) + 1.0);
+                }
+                ekf_.updateFaceYawForSlot(chosen.yaw, sigma, best_slot);
+                pushNormalHistory(best_slot, timestamp_s, chosen.yaw);
+            }
+            else
+            {
+                // 相位观测：板面法向直接约束车体 yaw（折叠掉 2pi/N 的换板歧义）。
+                // 它和位置观测吃的是同一帧的同一块板，但因为折叠，换板不会把
+                // 相位带歪——这正是位置关联最脆弱的地方。
+                const bool phase_from_yaw =
+                    config_.phase_update_enabled ||
+                    (config_.phase_update_when_static && best_slot == last_updated_slot_ &&
+                     std::fabs(ekf_.state()(7)) < config_.static_rate_rad_s);
+                // 按槽位一致的相位更新：best_slot 已经被位置更新用掉了，相位更新
+                // 用同一个槽位，两者说的是同一件事。旋转目标上必须走这条——折叠版
+                // 只能修 45 度以内，锁不住槽位，实测 v4 上 yaw 单帧跳 140~215 度。
+                // 只在"同帧存在第二块同 id 板"时用槽位锁相位：那正是折叠版的
+                // 90 度歧义真正发作的地方（两块板都能解释观测，相位在解之间翻转）。
+                // 单板帧没有歧义，折叠版已经够用，不用槽位锁去打扰正常演化。
+                // 同帧里被接受进滤波器的观测数（含本帧前面已接受的那几块板）。
+                const bool two_plates_visible = accepted >= 2;
+                const bool slot_phase =
+                    config_.slot_phase_update_enabled && best_slot >= 0 && two_plates_visible &&
+                    std::fabs(ekf_.state()(7)) >= config_.slot_phase_min_rate_rad_s;
+                if (slot_phase || phase_from_yaw)
+                {
+                    // 反锚：先记下这块板在模型里的位置，改完 yaw 再把中心平移回去，
+                    // 让板留在观测到的位置。单板可见时 (center, yaw) 是规范自由度，
+                    // 不反锚就是"yaw 更新把板挪走、位置更新再拉回来"互相打架。
+                    const Eigen::Vector3d plate_before =
                         rotating_armor::platePosition(ekf_.state(), best_slot,
                                                       ekf_.config().plate_count);
-                    if (config_.phase_anti_anchor)
+                    const bool phase_ok =
+                        slot_phase
+                            ? ekf_.updatePhaseForSlot(chosen.yaw, config_.phase_update_sigma_rad,
+                                                      best_slot)
+                            : ekf_.updatePhase(chosen.yaw, config_.phase_update_sigma_rad);
+                    if (phase_ok)
                     {
-                        ekf_.shiftCenter(plate_before - plate_after);
+                        const Eigen::Vector3d plate_after =
+                            rotating_armor::platePosition(ekf_.state(), best_slot,
+                                                          ekf_.config().plate_count);
+                        if (config_.phase_anti_anchor)
+                        {
+                            ekf_.shiftCenter(plate_before - plate_after);
+                        }
                     }
                 }
+                pushNormalHistory(best_slot, timestamp_s, chosen.yaw);
             }
-            pushNormalHistory(best_slot, timestamp_s, chosen.yaw);
         }
     }
 

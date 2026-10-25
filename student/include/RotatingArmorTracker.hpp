@@ -355,6 +355,20 @@ struct TrackerConfig
     double center_from_normal_gate_m{0.15};
     double center_from_normal_max_rate_rad_s{2.5};
     bool slot_phase_update_enabled{false};
+    // ===== 参考实现移植（sp_vision_25 target.cpp:187-222，2026-10-25）=====
+    // 朝向角直接量测进默认路径：每次位置更新用同一个 best_slot 做角度更新
+    // （updateFaceYawForSlot，残差折叠 ±pi）。σ 按斜视角对数放大
+    // （sqrt(log(|Δ|+1)+1)，Δ=板外法向与"板→相机"方向夹角，正对 ~1.0 rad）——
+    // 角度量测天生弱，与位置更新不打架（round-17 的回归用的是 σ=0.12 强锁）；
+    // w 由 Q 的 (a,w) 交叉协方差被连续拉拽（angular_accel 已对齐 400）。
+    // 环境变量 EKF_NO_ANGLE_UPDATE 可整体关闭。
+    bool reference_angle_update_enabled{true};
+    // σ 取 2.5 的依据（G 组扫参 2026-10-25）：1.0/1.55 在 ω=6/8 rad/s 上把相位
+    // 抖出 3cm 门（命中率 33~74%），2.5/4.0 全过（96~98%）。参考实现能扛 1.55
+    // 是因为它的法向经 optimize_yaw 统一到高质量、且 4 维量测一次性融合；
+    // 我们是顺序更新 + 换板瞬态，需要更弱的角度通道。
+    bool angle_state_obliquity_sigma{false};
+    double angle_state_sigma_rad{2.5};
     // 槽位相位更新的触发下界。用 static_rate_rad_s(1.2) 会让静止车上的 omega
     // 抖动也偶尔触发（实测 id=1 的 PIX 样本数 516 -> 279）。但取 3.0 会让转子
     // 低速段失去槽位锁定（id=3 82.2 -> 91.2），所以仍用 1.2。
@@ -460,8 +474,14 @@ struct TrackerConfig
     // 依据：v4 上固定 SPIN_Q 从 1 加到 100，EKF ω 从 1.18 涨到 3.64、PIX 91.5→84.5；
     // 而 v1 目标几乎不转，固定大 Q 反而变差，所以只能按实测转速自适应。
     bool adaptive_spin_q_enabled{true};
-    double adaptive_spin_rate_ref_rad_s{2.0}; // 参考转速：|ω| 每高这么多，Q 乘 4；低于它 Q 保持基础值（静止不放大）
-    double adaptive_spin_q_max{3.0e3};  // 角加速度上限 0.01*3000=30（sp_vision_25 用 400 常量）
+    // ===== 2026-10-25 参考对齐：Q 门改线性（0.01 → v2=400）=====
+    // 旧二次曲线 (|ω|/2)² 在实拍转速 4.72 rad/s 只给到 v2≈0.056——比参考
+    // sp_vision_25 的 400 小 7000 倍，是"纯 EKF 转速立不起来"的定量卡点
+    // （见 docs/spvision25转速跟随机制报告_2026-10-25.md §四）。现在角度
+    // 直接量测（updateFaceYawForSlot，σ=2.5 弱约束）每帧都在约束相位，
+    // 静态漂移风险远低于 §16 时代（那时角度观测是关的），门可以线性开满。
+    double adaptive_spin_rate_floor_rad_s{1.5}; // 低于它 Q 保持基值 0.01
+    double adaptive_spin_rate_full_rad_s{3.0};  // 高于它 Q 开满到 v2=400
     double adaptive_spin_alpha{0.25};
     double adaptive_spin_decay_rad_s{2.0}; // 没有可信量测时 EMA 每秒回落多少 rad/s
     double rate_tracklet_max_step_rad_s{0.4};

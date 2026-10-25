@@ -51,6 +51,10 @@ struct ProcessNoiseConfig {
     double accel_y{0.01};
     double accel_z{0.01};
     double angular_accel{0.01}; // (rad/s^2)^2 / Hz
+    // （移植实验记录 2026-10-25：直接对齐 sp_vision_25 v2=400 会破坏合成收敛
+    // 契约 dyaw=0.58/d_omega=-3.08——历史默认 4.0 也同样失败并被锁进
+    // ekf_model_convergence 断言。w 的拉拽强度需要与观测质量匹配，见
+    // docs/spvision25转速跟随机制报告_2026-10-25.md §四的照抄陷阱。）
     double radius_random_walk{1e-6}; // m^2/s
     double pair_radius_random_walk{1e-6}; // (m^2/s) radius_diff 的随机游走
     double pair_height_random_walk{1e-6}; // (m^2/s) height_diff 的随机游走

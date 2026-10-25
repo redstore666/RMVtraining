@@ -118,6 +118,10 @@ struct EkfConfig {
     double adaptive_scale_max{80.0};
     double adaptive_alpha{0.35};      // 每次更新的 EMA 系数
     double adaptive_decay{0.990};     // 每帧预测的缓慢回落
+    // 角度量测残差门（updateFaceYawForSlot）：|残差| 超过它判为槽位关联错误
+    // （换板歧义帧），拒收。默认 60°（半槽位 45° 留裕量）。大 Q 下这种残差
+    // 会把 w 拽飞（实测单帧冲 -41 rad/s）。
+    double face_yaw_max_residual_rad{1.05};
 };
 
 class RotatingArmorEkf {
@@ -185,6 +189,13 @@ public:
     // best_slot，两者说的是同一件事，不再打架。残差仍做 wrapToPi 折叠到
     // ±pi（cos/sin 的固有周期），但 90° 的四板歧义由 slot 明确消除。
     bool updatePhaseForSlot(double measured_world_yaw, double sigma_rad, int plate_slot);
+
+    // 参考实现移植（sp_vision_25 target.cpp:202-222）：朝向角直接量测。
+    // face_world_yaw = 观测到的板外法向 world yaw（= 槽位相位 + pi）；
+    // 残差 = fold(face − pi − slot·(2pi/N) − a, ±pi)，槽位歧义由 plate_slot
+    // 消除、换板不重置。与 updatePhaseForSlot 的区别：换算（−pi、−slot·period）
+    // 收进滤波器，调用方只给观测原始值，不存在槽位奇偶陷阱。
+    bool updateFaceYawForSlot(double face_world_yaw, double sigma_rad, int plate_slot);
 
     // 车体中心直接量测（同帧两块板的中点）。状态里中心三维在 0/2/4 行，
     // H = [e0; e2; e4]，与位置量测共用同一份协方差。

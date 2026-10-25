@@ -541,6 +541,57 @@ bool RotatingArmorEkf::updatePhaseForSlot(double measured_world_yaw, double sigm
     return true;
 }
 
+bool RotatingArmorEkf::updateFaceYawForSlot(double face_world_yaw, double sigma_rad,
+                                            int plate_slot) {
+    if (!initialized_ || !std::isfinite(face_world_yaw) || !std::isfinite(sigma_rad) ||
+        !(sigma_rad > 0.0) || config_.plate_count <= 0 || plate_slot < 0 ||
+        plate_slot >= config_.plate_count) {
+        return false;
+    }
+
+    // 参考实现对齐（sp_vision_25 target.cpp:202-222 的角度量测行）：
+    //   残差 = limit_rad(z_yaw − slot·(2pi/N) − a)，只折叠 ±pi。
+    // 本模型约定：板外法向 face = 槽位相位 + pi（plate = c − R·[cos,sin](phase)，
+    // 径向朝外），所以先减 pi 再减槽位偏移。与 updatePhaseForSlot 的
+    // "measured + slot·period" 语义不同——那个约定要求调用方自己做槽位奇偶
+    // 修正（round-17 直接传 face yaw，偶数槽位带 ±pi 偏差）；这里把换算收进
+    // 滤波器，调用方只给观测到的外法向角。
+    const double period = 2.0 * kPi / static_cast<double>(config_.plate_count);
+    const double residual = foldPeriod(face_world_yaw - kPi -
+                                           static_cast<double>(plate_slot) * period -
+                                           state_(6),
+                                       2.0 * kPi);
+    if (!std::isfinite(residual)) {
+        return false;
+    }
+    // 残差门：|残差| 超过半槽位多（默认 60°）说明槽位关联错了（换板歧义帧），
+    // 不是相位误差——大 Q 下这种残差会把 w 拽飞（实测单帧冲 -41 rad/s）。
+    // 拒收这一帧的角度量测，让位置更新和下一帧的关联去纠正。
+    if (std::fabs(residual) > config_.face_yaw_max_residual_rad) {
+        return false;
+    }
+
+    const double s = covariance_(6, 6) + sigma_rad * sigma_rad;
+    if (!(s > 0.0)) {
+        return false;
+    }
+    const Eigen::Matrix<double, kStateDim, 1> k = covariance_.col(6) / s;
+
+    state_ = state_ + k * residual;
+    state_(6) = wrapAngle(state_(6));
+    Eigen::Matrix<double, kStateDim, kStateDim> i_kh =
+        Eigen::Matrix<double, kStateDim, kStateDim>::Identity();
+    i_kh.row(6) -= k.transpose();
+    covariance_ =
+        i_kh * covariance_ * i_kh.transpose() + sigma_rad * sigma_rad * (k * k.transpose());
+
+    if (!state_.allFinite() || !covariance_.allFinite()) {
+        reset();
+        return false;
+    }
+    return true;
+}
+
 bool RotatingArmorEkf::updateCenter(const Eigen::Vector3d& measured_center_m, double sigma_m) {
     if (!initialized_ || !measured_center_m.allFinite() || !std::isfinite(sigma_m) ||
         !(sigma_m > 0.0)) {
