@@ -546,14 +546,23 @@ cv::Mat renderMiniTopDown(const MiniTopDownFrame &frame, const MiniTopDownOption
         {
             cv::line(canvas, a, b, cv::Scalar(255, 255, 255), 6, cv::LINE_AA);
         }
-        if (static_cast<int>(i) == frame.highlight_slot)
-        {
-            cv::line(canvas, a, b, cv::Scalar(0, 255, 255), 4, cv::LINE_AA); // 黄=在前方
-        }
-        else
-        {
-            cv::line(canvas, a, b, cv::Scalar(150, 150, 150), 3, cv::LINE_AA); // 灰=固定座位
-        }
+        // 固定座位：全部灰色（位置/朝向/大小不随任何估计变化）。
+        cv::line(canvas, a, b, cv::Scalar(150, 150, 150), 3, cv::LINE_AA);
+    }
+
+    // 相位标记：黄色短棒，按实测积分角度 Θ 在座位圈上连续滑动——不跳格，
+    // 速度=真实转速；Θ 每 90° 与下一个座位对齐（"选定板落在哪个座位"）。
+    if (frame.has_phase_marker)
+    {
+        const double mtx = -std::sin(frame.phase_marker_yaw);
+        const double mty = std::cos(frame.phase_marker_yaw);
+        const double mhalf =
+            0.45 * (frame.phase_marker_centre - frame.body_centre).head<2>().norm();
+        const cv::Point ma = to_px(frame.phase_marker_centre.x() - mhalf * mtx,
+                                   frame.phase_marker_centre.y() - mhalf * mty);
+        const cv::Point mb = to_px(frame.phase_marker_centre.x() + mhalf * mtx,
+                                   frame.phase_marker_centre.y() + mhalf * mty);
+        cv::line(canvas, ma, mb, cv::Scalar(0, 255, 255), 4, cv::LINE_AA);
     }
 
     // 本帧观测到的板：白色小十字 + 法向短线（12 px）。彩色模型板压在它上面还是

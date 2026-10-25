@@ -430,10 +430,13 @@ int main(int argc, char **argv)
     double disp_center_y{0.0};
     double disp_center_z{0.0};
     bool disp_center_has{false};
-    // 前方座位计数器：观测法向跳 ±90°（= 真实车转了 90°/检测换板）时 ±1。
-    double front_seat_last_yaw{0.0};
+    // 连续相位积分 Θ（"选定板"的实测角度）：前板绕 PnP 中心的角度 α 逐帧
+    // 连续积分（斜率=真实转速）；换板瞬间观测对象切换，|Δα|>45° 的跳变
+    // 跳过不积分——Θ 每前进 90° 对齐下一个座位，方向反转即时跟随，
+    // 对旋转波形零假设（正弦/变速/双向切换都适用）。
+    double front_theta{0.0};
+    double front_last_alpha{0.0};
     bool front_seat_has{false};
-    int front_seat_index{-1};
 
     if (conf_thres > 0.0F)
     {
@@ -626,7 +629,7 @@ int main(int argc, char **argv)
             obs_disp_init = false;
             disp_center_has = false;
             front_seat_has = false;
-            front_seat_index = -1;
+            front_theta = 0.0;
             pinned_last = pinned;
             pinned_last_seen_s = -1.0e9;
             std::cout << (pinned > 0 ? cv::format("[pin] 只看 id=%d（丢失也不自动切换）\n", pinned)
@@ -822,6 +825,64 @@ int main(int argc, char **argv)
             }
         }
 
+        // ===== 固定座位显示的实测锚（每处理帧更新，不进 60Hz 渲染门）=====
+        // 中心/相位全部 PnP 实测：中心 = 观测板位 + R·外法向（单板可解，
+        // EMA 去抖，无观测帧保持不外推）；Θ = 前板绕中心角度的连续积分，
+        // |Δα|>45° 的换板跳变（观测对象切换）跳过。前板 = 离相机最近的观测。
+        if (!tracked_poses.empty())
+        {
+            const ArmorPose *front = &tracked_poses.front();
+            for (const ArmorPose &p : tracked_poses)
+            {
+                if (Eigen::Vector3d(p.position_gimbal_m[0], p.position_gimbal_m[1],
+                                    p.position_gimbal_m[2])
+                        .norm() <
+                    Eigen::Vector3d(front->position_gimbal_m[0],
+                                    front->position_gimbal_m[1],
+                                    front->position_gimbal_m[2])
+                        .norm())
+                {
+                    front = &p;
+                }
+            }
+            const double fx = front->position_gimbal_m[0];
+            const double fy = front->position_gimbal_m[1];
+            const double fz = front->position_gimbal_m[2];
+            const double cx = fx + radius_display_m * std::cos(front->armor_yaw);
+            const double cy = fy + radius_display_m * std::sin(front->armor_yaw);
+            if (!disp_center_has)
+            {
+                disp_center_x = cx;
+                disp_center_y = cy;
+                disp_center_z = fz;
+                disp_center_has = true;
+            }
+            else
+            {
+                const double a = 0.20; // 显示去抖 EMA
+                disp_center_x += a * (cx - disp_center_x);
+                disp_center_y += a * (cy - disp_center_y);
+                disp_center_z += a * (fz - disp_center_z);
+            }
+            const double alpha_now =
+                std::atan2(fy - disp_center_y, fx - disp_center_x);
+            if (!front_seat_has)
+            {
+                front_seat_has = true;
+                front_theta = alpha_now;
+            }
+            else
+            {
+                double d = alpha_now - front_last_alpha;
+                while (d > M_PI) d -= 2.0 * M_PI;
+                while (d < -M_PI) d += 2.0 * M_PI;
+                if (std::abs(d) <= M_PI * 0.25)
+                    front_theta += d; // 换板跳变（±90°）= 观测对象切换，不积分
+            }
+            front_last_alpha = alpha_now;
+            SYSTEM_LOG("front_theta_deg", front_theta * 180.0 / M_PI);
+        }
+
         const double frame_dt_ms =
             last_frame_time_s > 0.0 ? (time_s - last_frame_time_s) * 1000.0 : 0.0;
         last_frame_time_s = time_s;
@@ -844,86 +905,11 @@ int main(int argc, char **argv)
                 mini.body_centre = Eigen::Vector3d(
                     state(0), state(2), state(4) + tracker.slotZOffsetMean());
                 const double radius = state(8);
-                // 固定座位显示 v2（用户方案）：中心与半径全锚 PnP 实测——
-                // 中心 = 观测板位 + R·外法向（单板即可解），小 EMA 去抖、
-                // 无观测帧保持（不外推）；半径 = --radius 常量；四条边的
-                // 半长 = R，首尾相连围成闭合矩形，全部灰色不转动。
-                // 高亮 = "选定的板之后落在哪个座位"：观测法向跳 ±90°
-                // （真实车转了 90°/检测换板）时座位 ±1，纯 PnP 事件驱动。
+                // 固定座位显示 v3（用户方案）：座位 = 车心 ± R 的四个基点，
+                // 中心/半径全锚 PnP 实测（中心在每处理帧块里更新），四条边
+                // 半长 = R 首尾相连闭合，全灰不转；黄色相位标记按实测 Θ
+                // 连续滑动——速度=真实转速，每 90° 对齐下一个座位。
                 const double R = radius_display_m;
-                if (!tracked_poses.empty())
-                {
-                    // 取离相机最近的观测 = 当前最正对的板（换板事件的主角）
-                    const ArmorPose *front = &tracked_poses.front();
-                    for (const ArmorPose &p : tracked_poses)
-                    {
-                        if (Eigen::Vector3d(p.position_gimbal_m[0], p.position_gimbal_m[1],
-                                            p.position_gimbal_m[2])
-                                .norm() <
-                            Eigen::Vector3d(front->position_gimbal_m[0],
-                                            front->position_gimbal_m[1],
-                                            front->position_gimbal_m[2])
-                                .norm())
-                        {
-                            front = &p;
-                        }
-                    }
-                    const double fx = front->position_gimbal_m[0];
-                    const double fy = front->position_gimbal_m[1];
-                    const double fz = front->position_gimbal_m[2];
-                    // 中心：板位 + R·外法向（armor_yaw 即外法向 world yaw）
-                    const double cx = fx + R * std::cos(front->armor_yaw);
-                    const double cy = fy + R * std::sin(front->armor_yaw);
-                    if (!disp_center_has)
-                    {
-                        disp_center_x = cx;
-                        disp_center_y = cy;
-                        disp_center_z = fz;
-                        disp_center_has = true;
-                    }
-                    else
-                    {
-                        const double a = 0.20; // 显示去抖 EMA
-                        disp_center_x += a * (cx - disp_center_x);
-                        disp_center_y += a * (cy - disp_center_y);
-                        disp_center_z += a * (fz - disp_center_z);
-                    }
-                    // 换板事件：法向差折叠到 ±180°，落在 90°±20° 记一次
-                    if (!front_seat_has)
-                    {
-                        front_seat_has = true;
-                        front_seat_last_yaw = front->armor_yaw;
-                        int best = 0; // 初始座位 = 离相机最近的固定座位
-                        double bd = 1e18;
-                        for (int k = 0; k < kPlateCount; ++k)
-                        {
-                            const double a0 = static_cast<double>(k) * M_PI * 0.5;
-                            const double sx = disp_center_x - R * std::cos(a0);
-                            const double sy = disp_center_y - R * std::sin(a0);
-                            const double d2 = sx * sx + sy * sy;
-                            if (d2 < bd)
-                            {
-                                bd = d2;
-                                best = k;
-                            }
-                        }
-                        front_seat_index = best;
-                    }
-                    else
-                    {
-                        double d = front->armor_yaw - front_seat_last_yaw;
-                        while (d > M_PI) d -= 2.0 * M_PI;
-                        while (d < -M_PI) d += 2.0 * M_PI;
-                        if (std::abs(std::abs(d) - M_PI * 0.5) < M_PI / 9.0)
-                        {
-                            front_seat_index =
-                                ((front_seat_index + (d > 0 ? 1 : -1)) % kPlateCount +
-                                 kPlateCount) %
-                                kPlateCount;
-                        }
-                        front_seat_last_yaw = front->armor_yaw;
-                    }
-                }
                 if (disp_center_has)
                 {
                     const Eigen::Vector3d c(disp_center_x, disp_center_y, disp_center_z);
@@ -937,7 +923,11 @@ int main(int argc, char **argv)
                         mini.plate_yaws.push_back(seat);
                         mini.plate_half_widths.push_back(R); // 半长=R → 四边首尾相连
                     }
-                    mini.highlight_slot = front_seat_index;
+                    mini.has_phase_marker = true;
+                    mini.phase_marker_centre = Eigen::Vector3d(
+                        c.x() - R * std::cos(front_theta),
+                        c.y() - R * std::sin(front_theta), c.z());
+                    mini.phase_marker_yaw = front_theta;
                 }
                 // 观测叠加：白十字 + 法向短线（只看选中的那条轨迹）。
                 for (const ArmorPose &pose : tracked_poses)

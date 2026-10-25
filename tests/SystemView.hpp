@@ -137,10 +137,12 @@ struct MiniTopDownFrame
     // 每块板的半宽（米）：缺省 0.0675（小板）。工具里传固定值，长度不随板型跳。
     std::vector<double> plate_half_widths;
 
-    // 固定座位显示下的高亮槽位：工具端按"EKF 相位下离相机最近的板"填 0..3，
-    // -1（默认）= 无高亮。四块板钉在固定座位上不随相位转，高亮绕座位轮转的
-    // 节奏 = 显示端"转速跟随"的直接读数（相位跳槽位会表现为高亮跳格）。
-    int highlight_slot{-1};
+    // 连续相位标记（黄色短棒）：工具端按 PnP 实测积分的"选定板"角度放置，
+    // 在固定座位圈上连续滑动（不跳格）——每转过 90° 与下一个座位对齐，
+    // 滑动速度 = 实测转速，方向反转即时跟随。has_phase_marker=false 不画。
+    bool has_phase_marker{false};
+    Eigen::Vector3d phase_marker_centre{Eigen::Vector3d::Zero()};
+    double phase_marker_yaw{0.0};
 
     // 本帧"看到的"板（白色小十字 + 一条法向短线），用来核对模型板有没有跟着真实
     // 板转：白十字贴在彩色板上 = 跟上了；白十字明显领先/落后 = 相位或 ω 有滞后。
