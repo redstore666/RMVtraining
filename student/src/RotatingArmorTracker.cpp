@@ -462,29 +462,126 @@ void RotatingArmorTracker::updateRateFromPhaseWindow(double timestamp_s)
 
     // 显著性检验，不是绝对阈值：静止时 slope≈0 而 σ_ω 覆盖 0，自动不更新；
     // 1.1 rad/s 与 8 rad/s 用同一条判据，不需要场景相关的门限。
-    const bool significant =
-        std::fabs(slope) > config_.rate_phase_significance * sigma_rate &&
-        std::fabs(slope) <= config_.rate_phase_max_abs_rad_s;
-    static const bool phase_dbg = std::getenv("RATE_DEBUG") != nullptr;
-    if (phase_dbg)
-    {
-        std::fprintf(stderr,
-                     "[pwr] t=%.3f slope=%+.2f ekf=%+.2f n=%zu span=%.3f sxx=%.4f "
-                     "sig_a=%.3f sig_w=%.2f %s\n",
-                     timestamp_s, slope, ekf_.state()(7), n, span, sxx, sigma_alpha, sigma_rate,
-                     significant ? "USE" : "skip");
-    }
-    if (!significant)
+    if (!(std::fabs(slope) > config_.rate_phase_significance * sigma_rate) ||
+        std::fabs(slope) > config_.rate_phase_max_abs_rad_s)
     {
         return;
     }
-    if (ekf_.updateRate(slope, sigma_rate))
+
+    // ===== 第二路：板面法向斜率 =====
+    //
+    // 这一路**不用车心**，所以对"车心漂移把方位角变成假转角"完全免疫；
+    // 代价是 PnP 法向噪声大（实测 ±35°），必须靠同样的窗口 LS 压下去。
+    // 90°（换板）与 180°（法向翻转）跳变都折掉——两者都是 90° 的整数倍。
+    double slope_normal = 0.0;
+    double sigma_normal = 0.0;
+    bool normal_ok = true;
+    {
+        std::vector<double> nl(n, 0.0);
+        double prev = 0.0;
+        double acc = 0.0;
+        for (std::size_t k = 0; k < n; ++k)
+        {
+            const double yaw = window[best_begin + k]->yaw;
+            if (!std::isfinite(yaw))
+            {
+                normal_ok = false;
+                break;
+            }
+            if (k == 0)
+            {
+                acc = yaw;
+            }
+            else
+            {
+                acc += foldPeriod(yaw - prev, half_pi);
+            }
+            prev = yaw;
+            nl[k] = acc;
+        }
+        if (normal_ok)
+        {
+            double sn = 0.0;
+            double stn = 0.0;
+            for (std::size_t k = 0; k < n; ++k)
+            {
+                sn += nl[k];
+                stn += ts[k] * nl[k];
+            }
+            const double sn_slope = (dn * stn - st * sn) / (dn * sxx);
+            const double sn_intercept = (sn - sn_slope * st) / dn;
+            double ss_n = 0.0;
+            for (std::size_t k = 0; k < n; ++k)
+            {
+                const double r = nl[k] - (sn_intercept + sn_slope * ts[k]);
+                ss_n += r * r;
+            }
+            const double sigma_alpha_n = std::sqrt(ss_n / dof);
+            slope_normal = sn_slope;
+            sigma_normal =
+                std::max(sigma_alpha_n / std::sqrt(sxx), config_.rate_phase_sigma_floor_rad_s);
+            normal_ok = std::isfinite(slope_normal) && std::isfinite(sigma_normal);
+        }
+    }
+
+    static const bool phase_dbg = std::getenv("RATE_DEBUG") != nullptr;
+    const bool normal_significant =
+        normal_ok &&
+        std::fabs(slope_normal) > config_.rate_phase_significance * sigma_normal &&
+        std::fabs(slope_normal) <= config_.rate_phase_max_abs_rad_s;
+    if (config_.rate_phase_require_normal && !normal_significant)
+    {
+        // 两路都要看见"在转"，且都站得住。缺一路就不更新：宁可少更新，
+        // 也不要让单路的盲区决定状态（这正是 §四十八 单路失败的形态）。
+        if (phase_dbg)
+        {
+            std::fprintf(stderr, "[pwr] t=%.3f phase=%+.2f(n=%zu,sig=%.2f) normal=%s skip\n",
+                         timestamp_s, slope, n, sigma_rate,
+                         normal_ok ? "insignificant" : "unavailable");
+        }
+        return;
+    }
+
+    // ===== 交叉校验：两个独立估计必须在各自不确定度内一致 =====
+    double rate_used = slope;
+    double sigma_used = sigma_rate;
+    if (normal_ok)
+    {
+        const double sigma_diff =
+            std::sqrt(sigma_rate * sigma_rate + sigma_normal * sigma_normal);
+        const double diff = std::fabs(slope - slope_normal);
+        const bool agree = diff <= config_.rate_phase_agreement_sigma * sigma_diff;
+        if (phase_dbg)
+        {
+            std::fprintf(stderr,
+                         "[pwr] t=%.3f phase=%+.2f±%.2f normal=%+.2f±%.2f diff=%.2f/%.2f %s\n",
+                         timestamp_s, slope, sigma_rate, slope_normal, sigma_normal, diff,
+                         config_.rate_phase_agreement_sigma * sigma_diff,
+                         agree ? "agree" : "CONFLICT");
+        }
+        if (!agree)
+        {
+            return;
+        }
+        // 一致 → 逆方差加权。两路误差来源正交，合并后的 σ 严格小于任一路。
+        const double wp = 1.0 / (sigma_rate * sigma_rate);
+        const double wn = 1.0 / (sigma_normal * sigma_normal);
+        rate_used = (wp * slope + wn * slope_normal) / (wp + wn);
+        sigma_used = std::sqrt(1.0 / (wp + wn));
+        sigma_used = std::max(sigma_used, config_.rate_phase_sigma_floor_rad_s);
+    }
+    else if (config_.rate_phase_require_normal)
+    {
+        return;
+    }
+
+    if (ekf_.updateRate(rate_used, sigma_used))
     {
         last_rate_update_s_ = timestamp_s;
         diagnostics_.rate_measurements += 1;
         diagnostics_.rate_obs_used = true;
-        diagnostics_.rate_obs_rad_s = slope;
-        diagnostics_.rate_obs_sigma_rad_s = sigma_rate;
+        diagnostics_.rate_obs_rad_s = rate_used;
+        diagnostics_.rate_obs_sigma_rad_s = sigma_used;
     }
 }
 

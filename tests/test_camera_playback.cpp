@@ -172,6 +172,8 @@ namespace
         // 只留"窗口相位斜率"这一条；1 = 旧通道全开（与历史行为一致）。
         // -1 = 不动，用 TrackerConfig 的默认值。A/B 用。
         int rate_legacy{-1};
+        // 窗口相位斜率通道（rate_phase_window_enabled）单开关。A/B 用。
+        int rate_phase{-1};
         double continuity_gate{-1.0};
         int pair_static{-1};
         int body_circle{-1};
@@ -369,6 +371,10 @@ namespace
             else if (arg == "--tracklet")
             {
                 args.tracklet = std::atoi(next("--tracklet").c_str());
+            }
+            else if (arg == "--rate-phase")
+            {
+                args.rate_phase = std::atoi(next("--rate-phase").c_str());
             }
             else if (arg == "--rate-legacy")
             {
@@ -1041,6 +1047,10 @@ int main(int argc, char **argv)
         tracker_config.rate_from_chord_enabled = on;
         tracker_config.rate_from_raw_normal_enabled = on;
         tracker_config.rate_window_enabled = on;
+    }
+    if (args.rate_phase >= 0)
+    {
+        tracker_config.rate_phase_window_enabled = args.rate_phase != 0;
     }
     if (args.antianchor >= 0)
     {
