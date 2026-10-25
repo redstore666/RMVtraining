@@ -381,7 +381,19 @@ void RotatingArmorTracker::collectWorldObservations(
                                        pose.normal_gimbal[2]};
         if (n_gimbal.allFinite() && n_gimbal.norm() > 0.5)
         {
-            const Eigen::Vector3d n_world = rotation * (n_gimbal / n_gimbal.norm());
+            Eigen::Vector3d n_world = rotation * (n_gimbal / n_gimbal.norm());
+            // 法向 180° 消歧（硬几何约束，不用时域记忆）：
+            // 平面 PnP 的孪生解给出两个互为 180° 的法向，solvePoseForTrack 只是按
+            // "上倾安装"先验挑了一个，并没有保证"朝外"。而板能被检出这一事实本身
+            // 就说明它的**外法向朝着相机**；相机在云台/世界系原点，板在 p，于是
+            //      外法向 · p < 0
+            // 必须成立。实测 v4（id=3）不满足该约束的观测约占 1/5，直接表现是
+            // 关联用的法向差呈 0°/180° 双峰（0~17° 占 26.9%，138~183° 占 21%），
+            // 相位量测被 π 污染——这是 ω 学不上去的直接来源之一。
+            if (n_world.dot(observation.position) > 0.0)
+            {
+                n_world = -n_world;
+            }
             if (n_world.allFinite() && std::hypot(n_world.x(), n_world.y()) > 1.0e-3)
             {
                 observation.has_yaw = true;
@@ -2588,6 +2600,8 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
         return 0;
     }
     const int plate_count = config_.ekf.plate_count;
+    // 关联诊断开关（只在置位时输出，默认零开销）。
+    static const bool assoc_debug = std::getenv("ASSOC_DEBUG") != nullptr;
     int accepted = 0;
     std::vector<bool> used(world.size(), false);
     std::vector<int> slot_of_observation(world.size(), -1);
@@ -2598,6 +2612,10 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
     diagnostics_.rejected_this_frame = 0;
     diagnostics_.best_gate_distance_m = std::numeric_limits<double>::infinity();
     diagnostics_.best_gate_nis = std::numeric_limits<double>::infinity();
+    diagnostics_.chosen_obs_has_yaw = false;
+    diagnostics_.chosen_obs_yaw_rad = 0.0;
+    diagnostics_.chosen_slot = -1;
+    diagnostics_.ring_obs_count = 0;
 
     // 同帧两块板的联合绑定：两块板是同一台车上的两块相邻面，它们的槽位差由
     // 几何决定，只有 4 种整体旋转可选。逐块"找最近的预测板"是各自独立决策，
@@ -2660,12 +2678,69 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
         }
     }
 
+    // ===== S1：环序配对诊断（RING_DEBUG=1，只打印，不改行为）=====
+    //
+    // 前提：凸车体上，同时可见的几块板在方位角上是连续的，且环序与槽位序一致。
+    // 于是"哪个观测是哪块板"不是每块各 N 选 1（N^k 种组合，只能靠打分挑一个），
+    // 而是**整帧一个循环移位 h**：
+    //         按方位角升序排第 r 个观测  ->  槽位 (h + r) mod N
+    // 与 rmcs robot.cpp:600-616 的 id±1 mod N 同构，但排序键换成方位角，
+    // 因此不需要像素域改造（tracker 层现有的 world.position 就够）。
+    //
+    // 这里只算 4 个 h 的归一化平方残差和（m²/σ²），用来回答一个前置问题：
+    // **实拍数据里这 4 个假设到底能不能分开？** 分不开则多假设方案整体作废。
+    static const bool ring_debug = std::getenv("RING_DEBUG") != nullptr;
+    if (ring_debug)
+    {
+        std::vector<std::pair<double, int>> by_bearing; // (方位角, world 下标)
+        const double cx_now = ekf_.state()(0);
+        const double cy_now = ekf_.state()(2);
+        for (std::size_t i = 0; i < world.size(); ++i)
+        {
+            if (target_id_ != 0 && world[i].target_id != target_id_)
+            {
+                continue;
+            }
+            by_bearing.emplace_back(
+                std::atan2(world[i].position.y() - cy_now, world[i].position.x() - cx_now),
+                static_cast<int>(i));
+        }
+        std::sort(by_bearing.begin(), by_bearing.end());
+        const int ring_k = static_cast<int>(by_bearing.size());
+        diagnostics_.ring_obs_count = ring_k;
+        for (int h = 0; h < plate_count && h < 4; ++h)
+        {
+            double cost = 0.0;
+            for (int r = 0; r < ring_k; ++r)
+            {
+                const int slot = (h + r) % plate_count;
+                const Eigen::Vector3d predicted = platePosition(ekf_.state(), slot, plate_count);
+                const WorldObservation &o =
+                    world[static_cast<std::size_t>(
+                        by_bearing[static_cast<std::size_t>(r)].second)];
+                const double sigma = std::max(o.sigma_position_m, 1.0e-3);
+                const Eigen::Vector3d e = o.position - predicted;
+                cost += e.squaredNorm() / (sigma * sigma);
+            }
+            // 单板时 4 个 h 全部同构（都能把这一块对到某个槽位），代价无意义。
+            diagnostics_.ring_cost[h] =
+                ring_k >= 2 ? cost : std::numeric_limits<double>::quiet_NaN();
+        }
+        std::fprintf(stderr, "[ring] t=%.4f k=%d c0=%.2f c1=%.2f c2=%.2f c3=%.2f\n",
+                     timestamp_s, ring_k, diagnostics_.ring_cost[0], diagnostics_.ring_cost[1],
+                     diagnostics_.ring_cost[2], diagnostics_.ring_cost[3]);
+    }
+
     while (accepted < std::max(config_.max_updates_per_frame, 1))
     {
         int best_observation = -1;
         int best_slot = -1;
         double best_distance = std::numeric_limits<double>::infinity();
         double best_nis = 0.0;
+        // 关联诊断（ASSOC_DEBUG=1）：记录次优，用来判断这次分配是不是"勉强赢"
+        double second_score = std::numeric_limits<double>::infinity();
+        int second_slot = -1;
+        int second_observation = -1;
         for (std::size_t i = 0; i < world.size(); ++i)
         {
             if (used[i])
@@ -2762,6 +2837,12 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                 // 板面法向直接把"是哪一面"告诉了我们：按角度差加一项代价，
                 // 让槽位选择同时满足位置近和朝向对。
                 double score = distance;
+                // 诊断用：把角度项的两个分量和"是否真的加了"留下来。
+                // 关键怀疑点是 world[i].has_yaw==false 会让整段 if 被跳过，
+                // score 退化成纯 distance（=纯最近邻），翻转就没人拦。
+                double dbg_normal_err = 0.0;
+                double dbg_bearing_err = 0.0;
+                bool dbg_angle_used = false;
                 if (config_.normal_tiebreak_weight > 0.0 && world[i].has_yaw &&
                     std::isfinite(world[i].yaw))
                 {
@@ -2789,21 +2870,62 @@ int RotatingArmorTracker::associateAndUpdate(const std::vector<WorldObservation>
                         std::fabs(wrapToPi(obs_bearing - pred_bearing));
                     score += config_.association_angle_weight_m_per_rad *
                              (normal_err + bearing_err);
+                    dbg_normal_err = normal_err;
+                    dbg_bearing_err = bearing_err;
+                    dbg_angle_used = true;
+                }
+                if (assoc_debug)
+                {
+                    // 每候选一行，可直接 awk 聚合。used=0 表示角度项没进 score，
+                    // 此时 score 恒等于 dist，关联退化成纯最近邻。
+                    std::fprintf(stderr,
+                                 "[assoc] t=%.4f obs=%zu id=%d slot=%d npl=%d has_yaw=%d "
+                                 "yaw=%+.3f dist=%.3f nerr=%.3f berr=%.3f used=%d "
+                                 "score=%.3f nis=%.2f\n",
+                                 timestamp_s, i, world[i].target_id, slot, plate_count,
+                                 world[i].has_yaw ? 1 : 0, world[i].yaw, distance,
+                                 dbg_normal_err, dbg_bearing_err, dbg_angle_used ? 1 : 0,
+                                 score, nis);
                 }
                 if (score < best_distance)
                 {
+                    second_score = best_distance;
+                    second_slot = best_slot;
+                    second_observation = best_observation;
                     best_distance = score;
                     best_observation = static_cast<int>(i);
                     best_slot = slot;
                     best_nis = nis;
                 }
+                else if (score < second_score)
+                {
+                    second_score = score;
+                    second_slot = slot;
+                    second_observation = static_cast<int>(i);
+                }
             }
+        }
+        if (assoc_debug)
+        {
+            // margin 直接回答"这次分配赢得有多勉强"：margin 小且 SLOT_DIFF，
+            // 就是翻转的前兆。next 是次优候选（可能是同一块观测的另一个槽位）。
+            std::fprintf(stderr,
+                         "[assoc] t=%.4f CHOSE obs=%d slot=%d score=%.3f | next obs=%d "
+                         "slot=%d score=%.3f margin=%.3f%s\n",
+                         timestamp_s, best_observation, best_slot, best_distance,
+                         second_observation, second_slot, second_score,
+                         second_score - best_distance,
+                         best_slot != second_slot ? " SLOT_DIFF" : "");
         }
         if (best_observation < 0)
         {
             break;
         }
         const WorldObservation &chosen = world[static_cast<std::size_t>(best_observation)];
+        // S0 诊断口径：记下 tracker 内部真正使用的法向与槽位。
+        diagnostics_.chosen_obs_has_yaw = chosen.has_yaw;
+        diagnostics_.chosen_obs_yaw_rad = chosen.yaw;
+        diagnostics_.chosen_slot = best_slot;
         slot_used[static_cast<std::size_t>(best_slot)] = true;
         // 学这个槽位相对车体中心的高度偏移（只在已初始化时才有意义）。纯显示量，
         // 不参与滤波；EMA 系数小一点，避免单帧深度野值把它带跑。

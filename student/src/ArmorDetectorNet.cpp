@@ -78,21 +78,48 @@ cv::Rect boundingRectOf(const std::array<cv::Point2f, 4> &corners)
                     static_cast<int>(max_x - min_x), static_cast<int>(max_y - min_y));
 }
 
-// 大小板几何判定（yolov5 输出不含大小类）：
-// 与传统路线 classifyArmorSize 同标准——外缘宽（上下边均值）/ 条高（左右边均值）
-// ≈2.37 小板 / ≈4.04 大板，取偏差小者。
-ArmorSize classifySizeByGeometry(const std::array<cv::Point2f, 4> &c)
+// ===== 大小板几何估计（yolov5 输出不含大小类）=====
+//
+// ratio = 外缘宽（上下边均值）/ 条高（左右边均值）
+// 理论值：小板 135/57 = 2.368，大板 230/57 = 4.035。
+//
+// 【关键性质】板绕竖轴转过 yaw 角 θ 后，横向被透视压缩 cosθ、竖向几乎不受影响：
+//       ratio_obs ≈ ratio_true · cosθ      (cosθ ≤ 1)
+// 即 ratio_obs 只会「偏小」，永远不可能超过真值——这是一个单向不等式。
+//
+// 旧实现在 2.37 / 4.04 之间取「偏差小者」，等价于在 (2.368+4.035)/2 = 3.20 处
+// 硬切，于是大板只要 cosθ < 3.20/4.035 = 0.793（θ > 37.5°）就被判成小板，
+// 板宽按 135mm 而不是 230mm 进 PnP，深度直接错 230/135 = 1.70 倍，位置跟着
+// 跳 0.3~0.8 m；θ 在 37.5° 附近抖动时尺寸逐帧翻，半径先验（0.20/0.25 m）、
+// half_width（0.0675/0.115 m）同时翻——这就是"观测源跳变"的机械来源。
+//
+// 因此这里只做单向判定：ratio 达标 => 必然大板；不达标 => 无法证明，先按小板
+// 占位，最终尺寸交给上层（编号先验 + 时域上包络），见 StudentTasks.cpp。
+constexpr double kLargePlateRatio = 230.0 / 57.0; // 4.035（大板正视图理论值）
+constexpr double kSmallPlateRatio = 135.0 / 57.0; // 2.368（小板正视图理论值）
+// 大板证书阈值：介于小板最大值 2.368 与旧硬切点 3.20 之间，取 3.00 ——
+// 往 2.368 一侧留 27% 余量吸收角点噪声，往 4.035 一侧仍能容忍
+// cosθ ≥ 3.00/4.035 = 0.743，即 |θ| ≤ 42°（旧阈值只有 37.5°）。
+constexpr double kLargeCertificateRatio = 3.00;
+// 证书阈值必须落在 (小板理论值, 大板理论值) 之间，否则单向性被破坏：
+// 低于 2.368 会把正对小板的帧判成大板，高于 4.035 则任何角度都不出证书。
+static_assert(kLargeCertificateRatio > kSmallPlateRatio &&
+                  kLargeCertificateRatio < kLargePlateRatio,
+              "大板证书阈值必须严格落在小板/大板理论比例之间");
+
+// 测量板面比例。返回 false 表示角点退化（贴图边、共线、NaN），调用方按
+// "无法判断" 处理，不要退回任何默认值。
+bool measurePlateRatio(const std::array<cv::Point2f, 4> &c, double &ratio)
 {
     const double outer_w = (cv::norm(c[0] - c[1]) + cv::norm(c[3] - c[2])) / 2.0;
     const double h_avg = (cv::norm(c[0] - c[3]) + cv::norm(c[1] - c[2])) / 2.0;
-    if (h_avg < 1.0)
+    // 条高 <4px 时角点量化误差就能把 ratio 翻倍，测了也没意义。
+    if (h_avg < 4.0 || !std::isfinite(outer_w) || !std::isfinite(h_avg))
     {
-        return ArmorSize::Small;
+        return false;
     }
-    const double ratio = outer_w / h_avg;
-    const double d_small = std::fabs(ratio - 2.37);
-    const double d_large = std::fabs(ratio - 4.04);
-    return d_large < d_small ? ArmorSize::Large : ArmorSize::Small;
+    ratio = outer_w / h_avg;
+    return std::isfinite(ratio) && ratio > 0.0;
 }
 
 } // namespace
@@ -265,7 +292,12 @@ ArmorDetectorNet::decodeYolov5(const ov::Tensor &output, double scale) const
         det.box = boundingRectOf(det.corners);
         det.color = color_id == 0 ? TeamColor::Blue : TeamColor::Red;
         det.target_id = target_id;
-        det.size = classifySizeByGeometry(det.corners);
+        // 尺寸不在本层定死：只输出测量值与单向证书，见文件头推导。
+        double ratio = 0.0;
+        det.ratio_valid = measurePlateRatio(det.corners, ratio);
+        det.plate_ratio = static_cast<float>(ratio);
+        det.size = (det.ratio_valid && ratio >= kLargeCertificateRatio) ? ArmorSize::Large
+                                                                       : ArmorSize::Small;
         det.confidence = score;
 
         candidates.push_back(det);
@@ -351,7 +383,16 @@ ArmorDetectorNet::decodeYolo11(const ov::Tensor &output, double scale) const
         det.box = boundingRectOf(det.corners);
         det.color = prop.color_id == 0 ? TeamColor::Red : TeamColor::Blue;
         det.target_id = prop.target_id;
+        // 尺寸由 38 类类别直接给出（颜色×编号×大小），这是唯一可靠的来路。
         det.size = prop.large ? ArmorSize::Large : ArmorSize::Small;
+        // ratio 仍测一份，但 ratio_valid=false 明确告诉上层"别用 ratio 反推"，
+        // 免得把模型给出的可靠尺寸又退回到几何猜测。
+        {
+            double ratio = 0.0;
+            measurePlateRatio(det.corners, ratio);
+            det.plate_ratio = static_cast<float>(ratio);
+            det.ratio_valid = false;
+        }
         det.confidence = score;
 
         candidates.push_back(det);

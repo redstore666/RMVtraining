@@ -24,8 +24,13 @@
 //   * 颜色：仅保留 red/blue，extinguish/purple 直接丢弃（不可击打状态）；
 //   * 编号：sentry->7(7guard)、one..five->1..5、outpost->6、base->8，
 //     not_armor 丢弃；
-//   * 大小板：yolo11 查 38 类属性表；yolov5 输出不含大小，
-//     用四角点几何 ratio（外缘宽/条高 ≈2.37 小 / 4.04 大）判定。
+//   * 大小板：yolo11 查 38 类属性表（模型直出，可靠）；
+//     yolov5 输出不含大小，只能由四角点几何 ratio（外缘宽/条高）估计——
+//     而 ratio 受 yaw 透视压缩（ratio_obs = ratio_true·cosθ），只能给出
+//     "必然是大板" 的单向证书，给不出 "必然是小板" 的结论，且 4 个共面点的
+//     单应本身就存在长宽比/深度耦合（8 方程 8 自由度，任何长宽比都能精确拟合）。
+//     所以本层只输出测量值 plate_ratio + 单向判定，最终尺寸由上层
+//     StudentTasks.cpp resolveArmorSize() 结合编号先验与时域上包络决定。
 //
 // 注意：detect() 复用内部 InferRequest，只应在单一（操作）线程调用。
 class ArmorDetectorNet
@@ -46,6 +51,13 @@ public:
         int target_id{0};                // 1..8（工程编号体系）
         ArmorSize size{ArmorSize::Small};
         float confidence{0.0F}; // objectness（yolov5）/ 38类分数（yolo11）
+
+        // 板面几何比例 ratio = 外缘宽/条高（仅 yolov5 路径测量）。
+        // 理论值：小板 135/57 = 2.368，大板 230/57 = 4.035；实测值受 yaw
+        // 透视压缩，恒 ≤ 真值。ratio_valid=false 表示该尺寸来自模型类别
+        // （yolo11），不需要也不应该用 ratio 反推。
+        float plate_ratio{0.0F};
+        bool ratio_valid{false};
     };
 
     // 加载 OpenVINO IR 模型（xml 路径，bin 同名换后缀自动查找）。

@@ -667,6 +667,18 @@ struct TrackerDiagnostics
     std::string stability; // 本帧 Stable/Unstable 的判定理由
     // 本帧预测出的瞄准点（世界系），离线回放评估用：与同帧检测到的板心比距离。
     Eigen::Vector3d predicted_aim_world{0.0, 0.0, 0.0};
+
+    // ===== 关联层诊断（S0）=====
+    // 本帧被选中的那个观测，在 tracker 内部实际使用的法向（世界系，已过符号消歧）。
+    // 与 dump 里的 oyaw（StudentTasks 的原始 ArmorPose）不是同一个量，两个都留着
+    // 才能判断"法向到底在链路哪一段被改坏"。
+    bool chosen_obs_has_yaw{false};
+    double chosen_obs_yaw_rad{0.0};
+    int chosen_slot{-1};
+    // 环序配对的 4 个假设代价（S1，RING_DEBUG 时填）。单位 m²/σ²，越小越好。
+    // 只有单板时可全为 nan（4 个 h 同构，没有意义）。
+    double ring_cost[4]{0.0, 0.0, 0.0, 0.0};
+    int ring_obs_count{0};
 };
 
 class RotatingArmorTracker

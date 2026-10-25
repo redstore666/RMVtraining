@@ -1165,7 +1165,8 @@ int main(int argc, char **argv)
     {
         dump_stream.open(args.dump_csv);
         dump_stream << "frame,t,det,target_id,aim_slot,obs_id,x,y,z,best_slot,best_dist,"
-                       "second_dist,cx,cy,cz,cyaw,R,oyaw,aimx,aimy,aimz,u,v,stab,upd,missed\n";
+                       "second_dist,cx,cy,cz,cyaw,R,oyaw,aimx,aimy,aimz,u,v,stab,upd,missed,"
+                       "tyaw,thasyaw,tslot,ringk,rc0,rc1,rc2,rc3\n";
     }
 
     // --only-id N 是"只研究一个板号"的单目标模式，跟多目标是互斥的：
@@ -1684,7 +1685,16 @@ int main(int argc, char **argv)
                                 }
                                 dump_stream << ',' << active_tracker->diagnostics().stability
                                             << ',' << active_tracker->diagnostics().updates_this_frame
-                                            << ',' << active_tracker->diagnostics().missed_frames
+                                            << ',' << active_tracker->diagnostics().missed_frames;
+                                // S0：tracker 内部真实使用的法向/槽位 + S1 环序 4 假设代价。
+                                // tyaw 与 oyaw 不同正是"链路某段改坏了法向"的直接证据。
+                                const auto &dg = active_tracker->diagnostics();
+                                dump_stream << ',' << dg.chosen_obs_yaw_rad
+                                            << ',' << (dg.chosen_obs_has_yaw ? 1 : 0)
+                                            << ',' << dg.chosen_slot
+                                            << ',' << dg.ring_obs_count
+                                            << ',' << dg.ring_cost[0] << ',' << dg.ring_cost[1]
+                                            << ',' << dg.ring_cost[2] << ',' << dg.ring_cost[3]
                                             << '\n';
                 }
                 if (std::isfinite(best))

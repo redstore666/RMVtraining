@@ -432,6 +432,81 @@ namespace
         return detector;
     }
 
+    // ===== 装甲板尺寸决策 =====
+    // 前置事实（决定了这里为什么不能只看单帧几何）：
+    //   4 个共面点的单应只有 8 个自由度，而 4 对点恰好给出 8 个方程——
+    //   任何长宽比都能被精确拟合成"另一个 yaw + 另一个深度"，重投影误差恒 ≈0。
+    //   也就是说尺寸根本不是单帧可观测量，armor_solve 的重投影自检在这里
+    //   一点忙帮不上（这也解释了为什么反复调重投影门禁对观测跳变无效）。
+    // 所以尺寸只能来自先验，按优先级三层：
+    //   1) 单向证书：plate_ratio ≥ 3.00 ⇒ 必然大板。yaw 只压缩横向比例
+    //      （ratio_obs = ratio_true·cosθ ≤ ratio_true），数学上不会误判。
+    //   2) 编号硬先验：RM 规则下 1(英雄) 只有大板；2(工程)/6(前哨站)/7(哨兵)
+    //      只有小板。3/4/5/8 两种板都可能，编号本身给不出结论。
+    //   3) 时域上包络：同一台车的 4 块板尺寸相同，且 ratio_obs(θ) = ratio_true·cosθ
+    //      是"真值乘一个 ≤1 的因子"。目标自转时 cosθ→1，所以按 target_id 维护
+    //      ratio 的历史最大值，会单调爬向 ratio_true，比任何单帧判据都稳。
+    // 锁存 + 1.5 s 失效：避免 θ 在 37.5° 附近抖动时尺寸、板宽(0.0675/0.115 m)、
+    // 半径先验(0.20/0.25 m) 三者一起逐帧翻——那会把观测源变成方波。
+    struct PlateSizeState
+    {
+        double ratio_max{0.0};
+        bool locked_large{false};
+        std::chrono::steady_clock::time_point last{};
+    };
+
+    // SIZE_POLICY=legacy 完全回到旧行为（检测层单帧几何硬切），供 A/B 与回滚。
+    const char *sizePolicy()
+    {
+        static const char *policy = std::getenv("SIZE_POLICY");
+        return policy != nullptr ? policy : "auto";
+    }
+
+    ArmorSize resolveArmorSize(const ArmorDetectorNet::Detection &det)
+    {
+        static const bool legacy = std::strcmp(sizePolicy(), "legacy") == 0;
+        // ratio_valid=false 表示尺寸来自模型类别（yolo11），别二次猜测。
+        if (legacy || !det.ratio_valid)
+        {
+            return det.size;
+        }
+        const double ratio = det.plate_ratio;
+        if (ratio >= 3.00) // 1) 单向证书，优先于编号
+        {
+            return ArmorSize::Large;
+        }
+        if (det.target_id == 1) // 2) 编号硬先验
+        {
+            return ArmorSize::Large;
+        }
+        if (det.target_id == 2 || det.target_id == 6 || det.target_id == 7)
+        {
+            return ArmorSize::Small;
+        }
+
+        // 3) 时域上包络
+        static std::map<int, PlateSizeState> states;
+        const auto now = std::chrono::steady_clock::now();
+        PlateSizeState &st = states[det.target_id];
+        if (st.last.time_since_epoch().count() != 0 &&
+            now - st.last > std::chrono::milliseconds(1500))
+        {
+            st = PlateSizeState{}; // 该编号离场超时，历史作废（不跨目标污染）
+        }
+        st.last = now;
+        // 只喂"够大"的框：条高 <12px 时角点量化噪声就能把 ratio 顶过阈值，
+        // 一旦污染上包络就永久锁成大板，再也退不回来。
+        if (det.box.height >= 12 && ratio > st.ratio_max)
+        {
+            st.ratio_max = ratio;
+        }
+        if (st.ratio_max >= 3.00)
+        {
+            st.locked_large = true;
+        }
+        return st.locked_large ? ArmorSize::Large : ArmorSize::Small;
+    }
+
     std::vector<ArmorDetection> armorDetectNn(const cv::Mat &pic, TeamColor enemy_color)
     {
         std::vector<ArmorDetection> detections;
@@ -476,9 +551,20 @@ namespace
 
             ArmorDetection out;
             out.corners = det.corners;
-            out.size = det.size;
+            out.size = resolveArmorSize(det);
             out.target_id = det.target_id;
             out.confidence = det.confidence;
+            if (std::getenv("SIZE_DEBUG") != nullptr)
+            {
+                // ratio 与两端理论值同屏：正对小板的帧应≈2.37，正对大板≈4.03；
+                // 明显低于 2.37 说明板在斜视（cosθ 压缩）或角点被裁掉。
+                std::fprintf(stderr,
+                             "[size] id=%d ratio=%.3f geo=%s -> %s conf=%.2f h=%d\n",
+                             det.target_id, det.plate_ratio,
+                             det.size == ArmorSize::Large ? "L" : "S",
+                             out.size == ArmorSize::Large ? "L" : "S", det.confidence,
+                             det.box.height);
+            }
             detections.push_back(out);
         }
         return detections;
