@@ -4,8 +4,8 @@ RoboMaster 自瞄视觉链路：相机取流 → 装甲板检测 → PnP 位姿�
 结果写回 64 字节通信结构体。题目只覆盖装甲板自瞄，串口、Web Debug 和双线程
 框架由教师提供，其余在 `student/` 实现。
 
-当前进度：取流、标定（内参）、检测、PnP、EKF 跟踪与预测均已实现；
-`ctest -E camera_grab` 8/8 通过。剩余实机项：相机→云台外参标定、全链路联机验收。
+当前进度：取流、标定（内参+外参，车上相机 2026-10-25 配置）、检测、PnP、EKF
+跟踪与预测均已实现，上车测试（精简）版。回归/单元测试套件在 `test` 分支。
 
 ## 目录结构
 
@@ -22,7 +22,8 @@ RoboMaster 自瞄视觉链路：相机取流 → 装甲板检测 → PnP 位姿�
 ├── serialPort/          串口读写（教师提供）
 ├── web_debug/           Web Debug 数值曲线（教师提供）
 ├── models/              离线模型与说明，见 models/README.md
-├── tests/               调试与验收工具 + 实验报告，见 tests/README.md
+├── tests/               现场调试工具（test_camera_live / test_camera_system）
+│                          与迷你俯视图网页组件（web_system / SystemView）
 ├── tools/               标定相关工具（棋盘格 PDF、内参标定、IR 手术脚本）
 ├── config/camera.yaml   2 号机内参（MATLAB 标定，均值重投影误差 0.07px）
 ├── calib_data/          标定用图（21 张）
@@ -51,19 +52,17 @@ Web Debug 在 `http://127.0.0.1:8080`。相机→云台外参尚未标定，`cam
 旋转重排坐标轴并在首帧打印一条警告，因此相对几何（中心/半径/角速度）可用，但绝对
 瞄准角仍有系统偏差。标定后填入真实 `R/t` 即自动走 `R*p + t`（见 `docs/云台外参.md`）。
 
-## 测试工具
+## 测试工具（精简版：上车现场用）
 
 | 工具 | 用途 |
 | --- | --- |
+| `rmv_training 串口 波特率 camera.yaml 8080` | 上车主程序；迷你俯视图网页自动开在 **8081** |
 | `test_camera_live [--red\|--blue] [--no-display]` | 实时相机全链路：取流+检测+PnP+显示；状态栏显示相机固件帧率 fps_cam 与实际帧率 fps_nodisp |
-| `test_detect 图 --red [--save out.png]` | 单图检测，输出角点叠加图 |
-| `test_batch 目录 --red` | 批量检出率评估（调参/回归用） |
-| `test_solve 图 --red` | 检测→PnP 全链路，打印距离/角度/重投影误差 |
-| `test_camera` | 相机取流自检（ctest camera_grab） |
-| `test_ekf_viewer [--world] [--out DIR]` | EKF 俯视图（上帝视角）演示：红点车心 + 四块模型板 + 绿点实测板 + 瞄准射线；`--no-show --out DIR` 无显示环境导出 PNG |
-| `test_camera_playback v.avi --red --ekf --topdown` | 视频回放 + 俯视图窗口（`--topdown-world` 固定原点、`--topdown-out DIR` 逐帧落盘） |
-| `test_camera_playback v.avi --red --ekf --multi` | 多目标：同一帧里的板按几何分给多辆车，各自跑 EKF（`--multi-primary N` 指定主目标） |
+| `test_camera_system [--red\|--blue] [--video v.avi] [--id N]` | 系统视图网页工作台（遥测 + 迷你俯视图，8081）；`--video` 可离线回放 |
 | `calib_capture` / `calibrate_intrinsics` | 标定采集 / 内参解算 |
+
+> 精简说明：本分支为上车测试版——合成回归/单元测试套件、离线分析工具与
+> 过程文档保留在 `test` 分支（含 docs/任务进度备份.md 全量记录），此处不携带。
 
 常用环境变量（检测器）：`RMV_DET_MODEL=yolo11` 切备选模型；
 `RMV_DET_SIZE` 切换推理输入（默认 `640x480`，与 4:3 画面同比例；`640` 回到正方形输入，`512` 再提速但远处角点抖动增大）；
@@ -80,13 +79,12 @@ Web Debug 在 `http://127.0.0.1:8080`。相机→云台外参尚未标定，`cam
 
 ## 文档
 
-- [实验报告（调试全过程记录）](./tests/README.md)
 - [模型说明](models/README.md)（yolov5/yolov5_512/yolo11，解码格式，A/B 记录）
 - [环境依赖](环境依赖.md)
 - [通信结构体](通信结构体.md)（64 字节帧，字段不得改）
 - [云台外参](云台外参.md)、[轨迹预测说明](轨迹预测说明.md)
 - [任务书](docs/大作业任务书.md)、[验收与评分](docs/验收与评分.md)
-- [EKF 设计说明](docs/EKF设计说明.md)、[实验报告](docs/实验报告.md)
+- 过程文档（实验报告、任务进度备份、EKF 设计说明等）在 `test` 分支，本精简版不携带
 
 ## 阶段规划
 
@@ -97,10 +95,8 @@ Web Debug 在 `http://127.0.0.1:8080`。相机→云台外参尚未标定，`cam
 
 ## 已知问题
 
-1. 相机→云台外参待标定填写（`config/camera.yaml` 的 `calibrated` 故意保持 0）；
-   未标定时 EKF 的相对几何仍自洽，但绝对距离/半径会偏移。
-2. EKF 的车体 yaw 只能确定到 `2*pi/N`（N 块板几何全同，属模型固有对称性），
-   详见 [EKF 设计说明](docs/EKF设计说明.md)。
+1. 相机→云台外参已填车上相机值（2026-10-25：R=90° 置换 + t=(70.82, 0, 84.31) mm，
+   来源见 config/camera.yaml 注释）；支架装配偏角如实测存在需另行手眼标定。
+2. EKF 的车体 yaw 只能确定到 `2*pi/N`（N 块板几何全同，属模型固有对称性）。
 3. EKF 是单半径、等高模型；前哨站交替高度/半径的目标需按槽位扩展状态。
-4. 推理输入默认 `640x480`（与画面同比例，省掉 25% 无效卷积），`640` 与 `512` 模型都保留；合成素材 `synth_small_1` 的绝对距离与文档预期不符（宽高比不自洽），属素材问题。
-5. 实拍素材目前只有哨兵单目标，多目标场景待补素材回归。
+4. 推理输入默认 `640x480`（与画面同比例，省掉 25% 无效卷积），`640` 与 `512` 模型都保留。
