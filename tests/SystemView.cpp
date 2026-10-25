@@ -524,13 +524,9 @@ cv::Mat renderMiniTopDown(const MiniTopDownFrame &frame, const MiniTopDownOption
     const auto to_px3 = [&](const Eigen::Vector3d &p) { return to_px(p.x(), p.y()); };
     const cv::Rect canvas_rect(0, 0, width, height);
 
-    // 板：一段粗线（长度 = 整板宽），aim 板多画一圈白描边。
-    static const cv::Scalar kPlateColours[4] = {
-        cv::Scalar(255, 160, 0),  // 蓝
-        cv::Scalar(0, 200, 255),  // 黄
-        cv::Scalar(0, 140, 255),  // 橙
-        cv::Scalar(255, 0, 200),  // 紫
-    };
+    // 板：一段粗线（长度 = 整板宽），aim 板多画一圈白描边。固定座位显示：
+    // 四块板一律灰色（不随相位转的座位），"当前在最前方"的槽位黄色高亮——
+    // 高亮轮转的节奏就是转速跟随的直接读数。
     for (std::size_t i = 0; i < frame.plate_centres.size(); ++i)
     {
         const double yaw = i < frame.plate_yaws.size() ? frame.plate_yaws[i] : 0.0;
@@ -550,7 +546,14 @@ cv::Mat renderMiniTopDown(const MiniTopDownFrame &frame, const MiniTopDownOption
         {
             cv::line(canvas, a, b, cv::Scalar(255, 255, 255), 6, cv::LINE_AA);
         }
-        cv::line(canvas, a, b, kPlateColours[i % 4], 3, cv::LINE_AA);
+        if (static_cast<int>(i) == frame.highlight_slot)
+        {
+            cv::line(canvas, a, b, cv::Scalar(0, 255, 255), 4, cv::LINE_AA); // 黄=在前方
+        }
+        else
+        {
+            cv::line(canvas, a, b, cv::Scalar(150, 150, 150), 3, cv::LINE_AA); // 灰=固定座位
+        }
     }
 
     // 本帧观测到的板：白色小十字 + 法向短线（12 px）。彩色模型板压在它上面还是
@@ -569,14 +572,6 @@ cv::Mat renderMiniTopDown(const MiniTopDownFrame &frame, const MiniTopDownOption
                                 cvRound(c.y - 12.0 * std::sin(yaw)));
             cv::line(canvas, c, tip, cv::Scalar(200, 200, 200), 1, cv::LINE_AA);
         }
-    }
-
-    // ω 方向箭头：绿色，slot 0 板外侧 → 板运动方向（尾/头工具端算好，米制）。
-    if (frame.has_omega_arrow)
-    {
-        cv::arrowedLine(canvas, to_px3(frame.omega_arrow_tail),
-                        to_px3(frame.omega_arrow_head), cv::Scalar(0, 255, 0), 2,
-                        cv::LINE_AA, 0, 0.35);
     }
 
     // 云台原点：灰色空心小圆（"相机装在云台前面一点"，两者要能分开看）。

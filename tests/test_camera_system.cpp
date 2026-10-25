@@ -815,47 +815,42 @@ int main(int argc, char **argv)
                 mini.body_centre = Eigen::Vector3d(
                     state(0), state(2), state(4) + tracker.slotZOffsetMean());
                 const double radius = state(8);
-                // 板相位：EKF yaw（最简基线——锁频通道已删；观测白十字仍直接
-                // 贴每帧检测法向，作对照显示）。
+                // 板固定座位显示（用户实验方案）：四块板灰色、钉在固定座位
+                // （车心 ± R 的四个基点）围成矩形，不随相位转动、大小不变；
+                // "当前在最前方"（EKF 相位下离相机最近的槽位）黄色高亮。
+                // 高亮绕座位的轮转节奏 = 转速跟随是否达成的直接读数。
                 const double body_phase_for_plates = state(6);
-                // 固定半宽：四块板画一样长。以前取"本帧检测到的板型"，两台车大小板
-                // 交替出现时长度会一格一格跳，看着很难受。
+                // 固定半宽：四块板画一样长（--plate-width）。
                 const double half_w = 0.5 * plate_width_m;
                 for (int slot = 0; slot < kPlateCount; ++slot)
                 {
-                    const double phase = body_phase_for_plates + M_PI * 0.5 * slot;
+                    const double seat = static_cast<double>(slot) * M_PI * 0.5;
                     mini.plate_centres.push_back(
-                        Eigen::Vector3d(state(0) - radius * std::cos(phase),
-                                        state(2) - radius * std::sin(phase),
+                        Eigen::Vector3d(state(0) - radius * std::cos(seat),
+                                        state(2) - radius * std::sin(seat),
                                         state(4) + tracker.slotZOffsetMean()));
-                    mini.plate_yaws.push_back(phase);
+                    mini.plate_yaws.push_back(seat);
                     mini.plate_half_widths.push_back(half_w);
                 }
-                // ω 方向箭头：方向 = slot 0 板位置对相位的导数 × sign(ω)——
-                // 板位置 = C − r·(cosφ, sinφ)，d/dφ = (sinφ, −cosφ)，与板在
-                // 图上的真实运动方向严格一致；数据与 caption w= 同源（EKF）。
-                const double ekf_w = static_cast<double>(prediction.body_yaw_velocity);
-                if (std::abs(ekf_w) > 0.15)
+                // 前方槽位：旋转位置 P_k = C − R(cos(φ+k·90°), sin(φ+k·90°))，
+                // 取离相机（云台原点）最近者。EKF 相位跳槽位会直接表现为高亮
+                // 跳格/倒退——这正是本显示方案要暴露的信号。
                 {
-                    const double phi0 = body_phase_for_plates;
-                    const double s = ekf_w > 0.0 ? 1.0 : -1.0;
-                    const double len_m = std::min(0.28, 0.08 + 0.03 * std::abs(ekf_w));
-                    const Eigen::Vector3d p0(state(0) - radius * std::cos(phi0),
-                                             state(2) - radius * std::sin(phi0),
-                                             state(4) + tracker.slotZOffsetMean());
-                    Eigen::Vector2d radial(p0.x() - state(0), p0.y() - state(2));
-                    const double r_norm = radial.norm();
-                    if (r_norm > 1e-6)
+                    int front_slot = -1;
+                    double best = 1e18;
+                    for (int slot = 0; slot < kPlateCount; ++slot)
                     {
-                        radial /= r_norm;
-                        mini.has_omega_arrow = true;
-                        mini.omega_arrow_tail =
-                            p0 + Eigen::Vector3d(0.05 * radial.x(), 0.05 * radial.y(), 0.0);
-                        mini.omega_arrow_head = mini.omega_arrow_tail +
-                                                Eigen::Vector3d(
-                                                    len_m * s * std::sin(phi0),
-                                                    -len_m * s * std::cos(phi0), 0.0);
+                        const double a0 = body_phase_for_plates + M_PI * 0.5 * slot;
+                        const double dx = state(0) - radius * std::cos(a0);
+                        const double dy = state(2) - radius * std::sin(a0);
+                        const double d2 = dx * dx + dy * dy;
+                        if (d2 < best)
+                        {
+                            best = d2;
+                            front_slot = slot;
+                        }
                     }
+                    mini.highlight_slot = front_slot;
                 }
                 // 观测叠加：白十字 + 法向短线（只看选中的那条轨迹）。
                 for (const ArmorPose &pose : tracked_poses)
