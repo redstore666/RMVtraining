@@ -259,6 +259,12 @@ int main(int argc, char** argv) {
     // 选项落全局（线程不传参，直接读全局，与 web_port 同一模式）。
     forced_enemy_color = options.forced_color;
     show_camera_window = options.show_camera;
+    if (show_camera_window && std::getenv("DISPLAY") == nullptr) {
+        // 车上一般 SSH 无图形环境，cv::imshow 会直接异常退出——提前拦下。
+        std::cerr << "警告: 当前无图形环境（DISPLAY 未设置），--show-camera 已禁用。"
+                     "需要画面时请在带桌面的会话里运行。\n";
+        show_camera_window = false;
+    }
     if (forced_enemy_color == 1) {
         std::cout << "敌方颜色: 强制红方（--red，忽略串口 status）\n";
     } else if (forced_enemy_color == 2) {
@@ -404,8 +410,11 @@ void *OperationFunction(void *arg) {
     int empty_frame_count = 0;
 
 #ifdef RMV_SYSTEM_WEB
-    // 迷你俯视图 60Hz 渲染门。
-    const int64_t mini_interval_ticks = cv::getTickFrequency() / 60;
+    // 迷你俯视图渲染门。实测车上操作循环 ~10ms/帧（约 100fps），原 60Hz 门限
+    // 会隔帧丢弃、实际只有 ~45Hz；画面又在网页侧被 30fps 轮询再压一档，视觉上
+    // 明显卡顿。画布仅 480x360，JPEG 编码 ~1ms，每帧发布成本可忽略——门限放宽
+    // 到 120Hz，让发布跟随循环逐帧更新；流畅度上限由网页轮询决定。
+    const int64_t mini_interval_ticks = cv::getTickFrequency() / 120;
     int64_t last_mini_tick = 0;
 #endif
 

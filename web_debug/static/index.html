@@ -696,44 +696,55 @@
         <img id="mini-frame" alt="top-down view">
     </div>
 
-    <script>
-        // /frame.jpg 是"最近一帧"通道：隐藏 Image 预加载，加载完再换到可见 <img>，
-        // 切帧不闪白。33 ms 一跳 ≈ 30 Hz。服务端没帧时返回 503，这里静默重试并把
-        // 状态标成 lost；拿到帧就恢复。
-        (function () {
-            const shown = document.getElementById("mini-frame");
-            const stateEl = document.getElementById("td-state");
-            const loader = new Image();
-            let busy = false;
-            let lastUrl = "";
-            let gotFrame = false;
+        <script>
+            // /frame.jpg 是"最近一帧"通道：fetch 预取后换 src，切帧不闪白。
+            // 16 ms 一跳 ≈ 60fps（服务端发布 ~45-100Hz，轮询就是显示上限）。
+            // X-Frame-Sequence 去重：服务端没有新帧时直接丢弃，不重绘。
+            // 服务端没帧时返回 503，这里静默重试并把状态标成 lost；拿到帧就恢复。
+            (function () {
+                const shown = document.getElementById("mini-frame");
+                const stateEl = document.getElementById("td-state");
+                let busy = false;
+                let gotFrame = false;
+                let lastSeq = "";
+                let lastUrl = "";
 
-            loader.addEventListener("load", () => {
-                shown.src = lastUrl;
-                busy = false;
-                if (!gotFrame) {
-                    gotFrame = true;
-                    stateEl.textContent = "live";
-                    stateEl.classList.remove("lost");
+                function markLost() {
+                    if (gotFrame) {
+                        gotFrame = false;
+                        stateEl.textContent = "lost";
+                        stateEl.classList.add("lost");
+                    }
                 }
-            });
-            loader.addEventListener("error", () => {
-                busy = false;
-                if (gotFrame) {
-                    gotFrame = false;
-                    stateEl.textContent = "lost";
-                    stateEl.classList.add("lost");
-                }
-            });
 
-            window.setInterval(() => {
-                if (busy || document.hidden) return;
-                busy = true;
-                // 时间戳参数保证每次都真的去取（服务端也设了 no-store）。
-                lastUrl = "/frame.jpg?t=" + Date.now();
-                loader.src = lastUrl;
-            }, 33);
-        })();
-    </script>
+                async function tick() {
+                    if (busy || document.hidden) return;
+                    busy = true;
+                    try {
+                        const res = await fetch("/frame.jpg", {cache: "no-store"});
+                        if (!res.ok) throw new Error(String(res.status));
+                        const seq = res.headers.get("X-Frame-Sequence") || "";
+                        if (seq !== lastSeq) {
+                            lastSeq = seq;
+                            const url = URL.createObjectURL(await res.blob());
+                            shown.src = url;
+                            if (lastUrl) URL.revokeObjectURL(lastUrl);
+                            lastUrl = url;
+                            if (!gotFrame) {
+                                gotFrame = true;
+                                stateEl.textContent = "live";
+                                stateEl.classList.remove("lost");
+                            }
+                        }
+                    } catch (e) {
+                        markLost();
+                    } finally {
+                        busy = false;
+                    }
+                }
+
+                window.setInterval(tick, 16);
+            })();
+        </script>
 </body>
 </html>
