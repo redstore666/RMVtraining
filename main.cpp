@@ -562,32 +562,48 @@ void *OperationFunction(void *arg) {
 
         // --show-camera：画好带检测框的画面放进共享缓冲，由主线程的显示泵
         // 负责 imshow/waitKey（GUI 必须在主线程，见全局变量处的说明）。
+        // 整段用 try/catch 包住：OpenCV 绘制失败的异常若逃出操作线程会直接
+        // std::terminate（不可捕获），"--show-camera 真车崩溃"就是这么来的。
+        // 显示是纯调试功能，任何异常都只禁用窗口一次，绝不拖垮控制程序。
         if (show_camera_window) {
-            cv::Mat display = pic.clone();
-            for (const ArmorDetection& detection : detections) {
-                const cv::Point2f* pts = detection.corners.data();
-                cv::polylines(display,
-                              std::vector<cv::Point2f>(pts, pts + 4), true,
-                              cv::Scalar(0, 255, 0), 2);
-                const cv::Point2f center =
-                    (detection.corners[0] + detection.corners[1] +
-                     detection.corners[2] + detection.corners[3]) * 0.25F;
+            try {
+                cv::Mat display = pic.clone();
+                for (const ArmorDetection& detection : detections) {
+                    // polylines 只接受 CV_32S（整数）点：直接喂 std::vector<Point2f>
+                    // 会在运行时抛 cv::Exception（Assertion p.checkVector(2, CV_32S)
+                    // 失败），而这条分支默认不构建、编译期发现不了，只能上车才炸。
+                    std::vector<cv::Point> polygon;
+                    polygon.reserve(detection.corners.size());
+                    for (const cv::Point2f& corner : detection.corners) {
+                        polygon.emplace_back(cvRound(corner.x), cvRound(corner.y));
+                    }
+                    cv::polylines(display, polygon, true, cv::Scalar(0, 255, 0), 2);
+                    const cv::Point2f center =
+                        (detection.corners[0] + detection.corners[1] +
+                         detection.corners[2] + detection.corners[3]) * 0.25F;
+                    cv::putText(display,
+                                cv::format("id=%d %.2f", detection.target_id,
+                                           static_cast<double>(detection.confidence)),
+                                cv::Point(cvRound(center.x), cvRound(center.y) - 12),
+                                cv::FONT_HERSHEY_SIMPLEX, 0.5,
+                                cv::Scalar(0, 255, 0), 1);
+                }
                 cv::putText(display,
-                            cv::format("id=%d %.2f", detection.target_id,
-                                       static_cast<double>(detection.confidence)),
-                            center + cv::Point2f(0.0F, -12.0F),
-                            cv::FONT_HERSHEY_SIMPLEX, 0.5,
-                            cv::Scalar(0, 255, 0), 1);
-            }
-            cv::putText(display,
-                        cv::format("enemy=%s fps=%.1f",
-                                   enemy_color == TeamColor::Red ? "RED" : "BLUE",
-                                   1.0 / std::max(frame_seconds, 1.0e-6)),
-                        cv::Point(10, 24), cv::FONT_HERSHEY_SIMPLEX, 0.7,
-                        cv::Scalar(255, 255, 255), 2);
-            {
-                std::lock_guard<std::mutex> lock(display_frame_mutex);
-                display_frame = std::move(display);
+                            cv::format("enemy=%s fps=%.1f",
+                                       enemy_color == TeamColor::Red ? "RED" : "BLUE",
+                                       1.0 / std::max(frame_seconds, 1.0e-6)),
+                            cv::Point(10, 24), cv::FONT_HERSHEY_SIMPLEX, 0.7,
+                            cv::Scalar(255, 255, 255), 2);
+                {
+                    std::lock_guard<std::mutex> lock(display_frame_mutex);
+                    display_frame = std::move(display);
+                }
+            } catch (const cv::Exception& e) {
+                std::cerr << "show-camera 绘制失败，已禁用窗口: " << e.what() << '\n';
+                show_camera_window = false; // 只报一次，之后不再尝试
+            } catch (const std::exception& e) {
+                std::cerr << "show-camera 绘制异常，已禁用窗口: " << e.what() << '\n';
+                show_camera_window = false;
             }
         }
 
