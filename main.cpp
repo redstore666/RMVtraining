@@ -71,6 +71,14 @@ int web_port = kDefaultWebPort;
 int forced_enemy_color = 0;
 bool show_camera_window = false;
 
+// --show-camera 的跨线程交接：操作线程只把画好的帧放进缓冲，GUI 调用
+// （imshow/waitKey）全部在主线程做。OpenCV 的 Qt 后端禁止非主线程 GUI，
+// 否则直接 abort（不可捕获）——这是"桌面环境下 --show-camera 运行失败"
+// 的最可能根因。GTK/headless 等其他后端同样由此一并覆盖。
+std::mutex display_frame_mutex;
+cv::Mat display_frame;
+std::atomic<bool> operation_running{false};
+
 struct Options {
     std::string serial_device;
     int baud_rate{115200};
@@ -328,6 +336,41 @@ int main(int argc, char** argv) {
         shutdown_requested.store(true, std::memory_order_relaxed);
     }
 
+    // --show-camera 的显示泵：GUI 必须在主线程（OpenCV Qt 后端禁止非主线程
+    // GUI 调用，会直接 abort）。操作线程只往共享缓冲放画好的帧，这里以
+    // ~60fps 取出显示；q / ESC 请求退出。显示失败不拖垮控制程序。
+    if (operation_started && show_camera_window) {
+        try {
+            cv::namedWindow("camera (--show-camera)", cv::WINDOW_AUTOSIZE);
+        } catch (const cv::Exception& e) {
+            std::cerr << "show-camera 无法创建窗口，已禁用: " << e.what() << '\n';
+            show_camera_window = false;
+        }
+    }
+    while (operation_started && show_camera_window &&
+           operation_running.load(std::memory_order_acquire) &&
+           !shutdown_requested.load(std::memory_order_relaxed)) {
+        cv::Mat frame;
+        {
+            std::lock_guard<std::mutex> lock(display_frame_mutex);
+            if (!display_frame.empty()) {
+                frame = display_frame; // 浅拷贝引用计数，锁内极短
+            }
+        }
+        if (!frame.empty()) {
+            cv::imshow("camera (--show-camera)", frame);
+        }
+        // waitKey 驱动窗口事件循环；q / ESC 请求退出。
+        const int key = cv::waitKey(16);
+        if (key == 'q' || key == 27) {
+            shutdown_requested.store(true, std::memory_order_relaxed);
+            break;
+        }
+    }
+    if (show_camera_window) {
+        cv::destroyAllWindows();
+    }
+
     // 先等待操作线程结束，再通知读线程退出，和原 main 的生命周期一致。
     if (operation_started) {
         pthread_join(operationThread, nullptr);
@@ -398,8 +441,10 @@ void *OperationFunction(void *arg) {
     SerialPort* serialPort = static_cast<SerialPort*>(arg);
     if (serialPort == nullptr) {
         shutdown_requested.store(true, std::memory_order_relaxed);
+        operation_running.store(false, std::memory_order_release);
         return nullptr;
     }
+    operation_running.store(true, std::memory_order_release);
 
     // Web 服务和相机 SDK 都属于操作线程的资源，生命周期与原工程一致。
     START_WEB_SERVER(web_port);
@@ -515,46 +560,34 @@ void *OperationFunction(void *arg) {
             WEB_LOG("pnp_reprojection_error", -1.0);
         }
 
-        // --show-camera：本地窗口显示相机画面 + 检测框（调车用，不开窗零开销）。
-        // 显示的是检测环节的原始输出，PnP/EKF 的问题一眼就能和检测区分开。
-        // 显示失败绝不能拖垮控制程序：任何异常都打印一次并永久禁用窗口。
-        // （已知失败模式：SSH 会话无 DISPLAY；OpenCV 为 Qt 后端时非主线程
-        // imshow 可能 abort；无 GUI 支持的 headless OpenCV 抛 not implemented。）
+        // --show-camera：画好带检测框的画面放进共享缓冲，由主线程的显示泵
+        // 负责 imshow/waitKey（GUI 必须在主线程，见全局变量处的说明）。
         if (show_camera_window) {
-            try {
-                cv::Mat display = pic.clone();
-                for (const ArmorDetection& detection : detections) {
-                    const cv::Point2f* pts = detection.corners.data();
-                    cv::polylines(display,
-                                  std::vector<cv::Point2f>(pts, pts + 4), true,
-                                  cv::Scalar(0, 255, 0), 2);
-                    const cv::Point2f center =
-                        (detection.corners[0] + detection.corners[1] +
-                         detection.corners[2] + detection.corners[3]) * 0.25F;
-                    cv::putText(display,
-                                cv::format("id=%d %.2f", detection.target_id,
-                                           static_cast<double>(detection.confidence)),
-                                center + cv::Point2f(0.0F, -12.0F),
-                                cv::FONT_HERSHEY_SIMPLEX, 0.5,
-                                cv::Scalar(0, 255, 0), 1);
-                }
+            cv::Mat display = pic.clone();
+            for (const ArmorDetection& detection : detections) {
+                const cv::Point2f* pts = detection.corners.data();
+                cv::polylines(display,
+                              std::vector<cv::Point2f>(pts, pts + 4), true,
+                              cv::Scalar(0, 255, 0), 2);
+                const cv::Point2f center =
+                    (detection.corners[0] + detection.corners[1] +
+                     detection.corners[2] + detection.corners[3]) * 0.25F;
                 cv::putText(display,
-                            cv::format("enemy=%s fps=%.1f",
-                                       enemy_color == TeamColor::Red ? "RED" : "BLUE",
-                                       1.0 / std::max(frame_seconds, 1.0e-6)),
-                            cv::Point(10, 24), cv::FONT_HERSHEY_SIMPLEX, 0.7,
-                            cv::Scalar(255, 255, 255), 2);
-                cv::imshow("camera (--show-camera)", display);
-                // waitKey 必须调用一次，窗口才会刷新；按 q 或 ESC 请求退出。
-                const int key = cv::waitKey(1);
-                if (key == 'q' || key == 27) {
-                    shutdown_requested.store(true, std::memory_order_relaxed);
-                }
-            } catch (const cv::Exception& e) {
-                std::cerr << "show-camera 显示失败，已自动禁用窗口: " << e.what()
-                          << '\n';
-                show_camera_window = false;
-                cv::destroyAllWindows();
+                            cv::format("id=%d %.2f", detection.target_id,
+                                       static_cast<double>(detection.confidence)),
+                            center + cv::Point2f(0.0F, -12.0F),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.5,
+                            cv::Scalar(0, 255, 0), 1);
+            }
+            cv::putText(display,
+                        cv::format("enemy=%s fps=%.1f",
+                                   enemy_color == TeamColor::Red ? "RED" : "BLUE",
+                                   1.0 / std::max(frame_seconds, 1.0e-6)),
+                        cv::Point(10, 24), cv::FONT_HERSHEY_SIMPLEX, 0.7,
+                        cv::Scalar(255, 255, 255), 2);
+            {
+                std::lock_guard<std::mutex> lock(display_frame_mutex);
+                display_frame = std::move(display);
             }
         }
 
@@ -686,5 +719,6 @@ void *OperationFunction(void *arg) {
     }
 
     STOP_WEB_SERVER();
+    operation_running.store(false, std::memory_order_release);
     return nullptr;
 }
