@@ -189,13 +189,9 @@ int main(int argc, char **argv)
     double plate_width_m = 0.0;   // --plate-width M：>0 时覆盖四块板的显示宽度（0=按板型真实尺寸）
     int initial_pin = 0;          // --id N：启动就只看这个 id（网页下拉菜单仍可改）
     float conf_thres = -1.0F;     // --conf T：检测置信度门限（<0 = 用库默认 0.7）
-    bool pair_body = false;       // --pair-body：打开"双板整车求解"（库默认关）
-    bool rate_pll = false;        // --rate-pll：打开残差 PLL 的转速量测（库默认关）
-    bool rate_tracklet = false;   // --rate-tracklet：打开 Tracklet 单板角速度（库默认关）
     bool oblique_fallback = false; // 斜视角旁路检测（--oblique 开启）。默认关：斜板亮度会改变面积谱的周期性（实测锁 6.09Hz 错频），面积谱通道需重新设计后再默认开
     bool cam2 = false;            // --cam2：二号机（台架）内参 + 平移清零（直接相机）
     bool no_realtime = false;     // --no-realtime：关闭视频实时节拍（离线吞吐测试用）
-    double pair_phase_err = -1.0; // --pair-phase-err RAD：覆盖双板解的相位差门限（默认 -1=用库值 0.35）
 
     for (int i = 1; i < argc; ++i)
     {
@@ -227,26 +223,10 @@ int main(int argc, char **argv)
                          "                   小板 0.135 / 大板 0.230，只在镜头太远时放大看用）\n"
                          "  --radius M       [已废弃] 半径现在取 EKF state(8)，该参数不生效\n"
                          "  --conf T         检测置信度门限（默认用库里的 0.7；调低会多出弱检\n"
-                         "  --pair-body      打开双板整车求解（两块相邻板闭式解 c/R/yaw，库默认关）\n"
-                         "  --rate-pll       打开残差 PLL 转速量测（库默认关；四板相位只有 mod 90 度可观测）\n"
-                         "  --rate-tracklet  打开 Tracklet 单板角速度量测（库默认关）\n"
-                         "  --pair-phase-err RAD  覆盖双板解的相位差门限（默认 0.35；实测法向有 45 度偏置）\n"
                          "  --show-camera    另开窗口显示相机画面（不影响网页帧率）\n"
                          "  --video-loop     视频放完从头循环\n"
                          "  浏览器: http://127.0.0.1:8081/  （右下角可切换跟踪的 id）\n";
             return 0;
-        }
-        else if (arg == "--pair-phase-err" && i + 1 < argc)
-        {
-            pair_phase_err = std::atof(argv[++i]);
-        }
-        else if (arg == "--rate-pll")
-        {
-            rate_pll = true;
-        }
-        else if (arg == "--rate-tracklet")
-        {
-            rate_tracklet = true;
         }
         else if (arg == "--oblique")
         {
@@ -259,10 +239,6 @@ int main(int argc, char **argv)
         else if (arg == "--no-realtime")
         {
             no_realtime = true;
-        }
-        else if (arg == "--pair-body")
-        {
-            pair_body = true;
         }
         else if (arg == "--conf")
         {
@@ -399,22 +375,7 @@ int main(int argc, char **argv)
     GimbalState gimbal{};
 
     rotating_armor::TrackerConfig tracker_config;
-    // 双板整车求解：两相邻板的闭式解直接给出 c/R/yaw，是"单板位置几乎不含相位信息"
-    // 的唯一补救；库里默认关着，这里留个开关做 A/B。
-    tracker_config.pair_body_solve_enabled = pair_body;
-    tracker_config.rate_from_residual_enabled = rate_pll;
-    tracker_config.tracklet_rate_enabled = rate_tracklet;
-    if (pair_phase_err >= 0.0)
-    {
-        tracker_config.pair_body_max_phase_error_rad = pair_phase_err;
-    }
     rotating_armor::RotatingArmorTracker tracker(tracker_config);
-    if (pair_body || rate_pll || rate_tracklet)
-    {
-        std::cout << cv::format("[tracker] pair_body=%d rate_pll=%d rate_tracklet=%d\n",
-                                pair_body ? 1 : 0, rate_pll ? 1 : 0, rate_tracklet ? 1 : 0);
-    }
-
     // ===== 迷你俯视图的显示状态（2026-10-25 整车建模后）=====
     //
     // 车心不再有"PnP 反推 + EMA"这一路：四块板全由 EKF 刚体 (车心, R, φ) 决定，
@@ -1007,10 +968,7 @@ int main(int argc, char **argv)
             }
             SYSTEM_LOG("yaw_poses", yaw_poses);
             SYSTEM_LOG("realigns", static_cast<double>(diagnostics.single_plate_realigns));
-            SYSTEM_LOG("pair_solves", static_cast<double>(diagnostics.pair_body_solves));
-            SYSTEM_LOG("body_refits", static_cast<double>(diagnostics.body_refits));
             SYSTEM_LOG("yaw_deg", prediction.body_yaw * 180.0 / M_PI);
-            SYSTEM_LOG("cont_rej", static_cast<double>(diagnostics.continuity_rejects));
             SYSTEM_LOG("rej_frame", static_cast<double>(diagnostics.rejected_this_frame));
             SYSTEM_LOG("updates", diagnostics.updates_this_frame);
             SYSTEM_LOG("missed", diagnostics.missed_frames);

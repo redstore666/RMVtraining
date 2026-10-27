@@ -1,0 +1,2530 @@
+// 离线回放测试：把录制的视频喂进完整链路（检测 -> PnP -> 可选 EKF）。
+//
+// 用途有两个：
+//   1) 没有人/没有相机时评估**视觉识别质量**：检测率、空帧率、编号/大小板分布、
+//      距离与重投影误差分布、同一目标连续帧的位置抖动（给 EKF 的 R 定初值）；
+//   2) 用**真实序列**做 EKF 关联/锁定/预测的离线评估与调参（之前只有合成真值）。
+//
+// 用法：
+//   ./build/test_camera_playback tmp/v4.avi --red --headless
+//   ./build/test_camera_playback tmp/v4.avi --red --ekf --headless --csv build/replay.csv
+//   ./build/test_camera_playback tmp/v4.avi --red                  # 带窗口回放
+//
+// 参数：
+//   --red | --blue   敌方颜色（默认 red）
+//   --ekf            启用旋转目标 EKF（关联 + 锁定 + 预测）
+//   --headless       无窗口（只统计，适合批量跑）
+//   --stride N       每 N 帧处理 1 帧（默认 1）
+//   --start N --end N  只处理 [start, end) 帧（挑片段用）
+//   --max-frames N   最多处理 N 帧
+//   --wait MS        每帧等待毫秒（慢速回放；窗口模式用 waitKey，headless 用 sleep）
+//   --fps N          等价于 --wait (1000/N)，按指定帧率慢放
+//   --csv PATH       逐帧导出 CSV（表头见文件第一行）
+//   --bias S         模拟控制器前馈补偿（秒），写入云台快照的 prediction_bias_s
+//   --config PATH    相机参数文件（默认 config/camera.yaml，或 RMV_CAMERA_CONFIG）
+//   --multi-primary N  强制把装甲板编号 N 那辆当主目标（0=自动：优先 Tracking、再近的）
+//   --single         关掉多目标（旧行为：全局只有一个 EKF，会在两台车之间跳）
+//   --multi          多目标（默认开启）：按几何把同一帧的板分给多辆车，各自跑一个 EKF，
+//                    俯视图里非主目标用暗色画，主目标仍是亮的
+//   --topdown        额外开一个"EKF 俯视图"窗口（红点车心 + 四块模型板 + 绿点实测板，
+//                    风格见 tmp/example.jpg）；跟随车心、自动缩放
+//   --topdown-world  俯视图改成固定原点（云台）视图，按 --topdown-ppm 缩放（默认 200）
+//   --topdown-ppm P  固定原点视图的像素/米（默认 200）
+//   --topdown-out D  把俯视图逐帧写成 D/t%06d.png（无需 --headless，也可不显示）
+//
+// 按键（窗口模式）：ESC/q 退出 | 空格 暂停/继续 | s 保存当前帧 | m 打印 EKF 状态
+//
+// 坐标系：回放没有云台角，约定"相机与云台同轴、视频中云台角为零"，于是云台系 =
+// 世界系；再用固定的光学系 -> 水平系旋转把坐标摆正：
+//   x_世界 = z_光学（前），y_世界 = -x_光学（左），z_世界 = -y_光学（上）。
+// 这样 EKF 里"车体绕 z 轴转"才和画面上的旋转对得上。
+// 注意：视频若是手持/云台晃动拍的，世界系会跟着晃，EKF 只能用在"相机基本静止"
+// 的片段——所以每帧都统计画面运动量（CSV 的 motion 列），用它挑片段。
+#include "AutoAimTypes.hpp"
+#include "RotatingArmorTracker.hpp"
+#include "MultiTargetTracker.hpp"
+#include "TopDownView.hpp"
+#include "StudentTasks.hpp"
+#include "WebLogger.hpp"
+#include <opencv2/calib3d.hpp>
+#include <filesystem>
+
+#include <algorithm>
+#include <chrono>
+#include <thread>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <iostream>
+#include <map>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <opencv2/highgui.hpp>
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
+#include <opencv2/videoio.hpp>
+
+namespace
+{
+
+    // 视频分辨率与标定分辨率不一致时按比例缩放内参（假设画面未被裁剪）。
+    void scaleIntrinsics(CameraParameters &camera, double sx, double sy)
+    {
+        if (!camera.camera_matrix.empty() && camera.camera_matrix.type() == CV_64FC1)
+        {
+            camera.camera_matrix.at<double>(0, 0) *= sx;
+            camera.camera_matrix.at<double>(1, 1) *= sy;
+            camera.camera_matrix.at<double>(0, 2) *= sx;
+            camera.camera_matrix.at<double>(1, 2) *= sy;
+        }
+        camera.image_width = static_cast<int>(std::lround(camera.image_width * sx));
+        camera.image_height = static_cast<int>(std::lround(camera.image_height * sy));
+    }
+
+    double fractionBelow(const std::vector<double> &values, double threshold)
+    {
+        if (values.empty())
+            return 0.0;
+        std::size_t count = 0;
+        for (double v : values)
+        {
+            if (v <= threshold)
+                ++count;
+        }
+        return static_cast<double>(count) / static_cast<double>(values.size());
+    }
+
+    double percentile(std::vector<double> values, double ratio)
+    {
+        if (values.empty())
+            return 0.0;
+        std::sort(values.begin(), values.end());
+        const std::size_t index = std::min(values.size() - 1,
+                                           static_cast<std::size_t>(ratio * static_cast<double>(values.size())));
+        return values[index];
+    }
+
+    double mean(const std::vector<double> &values)
+    {
+        if (values.empty())
+            return 0.0;
+        double sum = 0.0;
+        for (double value : values)
+            sum += value;
+        return sum / static_cast<double>(values.size());
+    }
+
+    struct Args
+    {
+        std::string video;
+        std::string csv_path;
+        std::string config_path;
+        TeamColor enemy{TeamColor::Red};
+        bool ekf{false};
+        bool headless{false};
+        int stride{1};
+        int start{0};
+        int end{-1};
+        int max_frames{0};
+        int wait_ms{0};
+        double bias_s{0.0};
+        int dump_every{0};
+    double chord_q{-1.0};
+    int rate_tracklet{-1};
+        int only_id{0};
+        double radius_prior{0.25};
+        double v_sigma{0.05};
+        bool adaptive_noise{true};
+        double noise_min{0.004};
+        double omega{0.0};
+        bool omega_given{false};
+        double q_scale{1.0};
+    bool web{false};
+    int web_port{8080};
+    double web_hold_s{0.0};
+        bool led_yaw{false};
+        bool roi_retry{false};
+        int roi_size{240};
+        double led_sigma{0.08};
+        double score{0.7};
+        bool score_given{false};
+        bool centered_switch{true};
+        double sigma_floor{0.06};
+        bool pair_center{true};
+        bool phase_yaw_static{false};
+        bool no_aim_extrapolate{false};
+        double realign_m{0.25};
+        double gate_m{0.0}; // >0 时覆盖 position_gate_m，用来扫门限
+        int antianchor{-1};
+        double normal_tiebreak{-1.0};
+        int joint_pair{-1};
+        int id_posterior{-1};
+        // 0 = 关掉全部旧转速通道（rate_update/tracklet/chord/raw_normal）；
+        // 1 = 旧通道全开（与历史行为一致）；-1 = 不动，用 TrackerConfig 默认值。
+        int rate_legacy{-1};
+        int pair_static{-1};
+        int pair_lh{-1};
+        int assoc_angle{-1};
+        bool pair_radius{false};
+        double aim_obs{0.012};
+        double aim_alpha{0.0};
+        int aim_fit{0};
+        double switch_margin{0.30};
+        double lock_span{0.18};
+        double lock_age{0.50};
+        bool radius_given{false};
+        bool refine_corners{false};
+        double nis_gate{14.86};
+        int max_updates{2};
+        bool nis_gate_given{false};
+        bool trace{false};
+    // 默认多目标：实拍里常常同时有两台车，用户要"两个车分别建模"。
+    // 想回到单目标（旧行为）用 --single。
+    bool multi{true};
+    int multi_primary{0};
+    double sigma_pos{0.03};
+    std::string dump_csv;
+    bool topdown{false};
+    // 本轮：只做"实测板 -> 整车"，隐藏 EKF 的四块模型板（蓝），保留 aim 点。
+    bool detected_body{false};
+    bool topdown_world{false};
+    bool topdown_follow{false};
+    double topdown_ppm{200.0};
+    std::string topdown_out;
+    };
+
+    bool parseArgs(int argc, char **argv, Args &args)
+    {
+        if (argc < 2)
+            return false;
+        args.video = argv[1];
+        for (int i = 2; i < argc; ++i)
+        {
+            const std::string arg = argv[i];
+            const auto next = [&](const char *name) -> std::string {
+                if (i + 1 >= argc)
+                {
+                    std::cerr << "参数 " << name << " 缺少取值\n";
+                    std::exit(2);
+                }
+                return argv[++i];
+            };
+            if (arg == "--red")
+                args.enemy = TeamColor::Red;
+            else if (arg == "--blue")
+                args.enemy = TeamColor::Blue;
+            else if (arg == "--ekf")
+                args.ekf = true;
+            else if (arg == "--headless")
+                args.headless = true;
+            else if (arg == "--stride")
+                args.stride = std::max(1, std::atoi(next("--stride").c_str()));
+            else if (arg == "--start")
+                args.start = std::max(0, std::atoi(next("--start").c_str()));
+            else if (arg == "--end")
+                args.end = std::atoi(next("--end").c_str());
+            else if (arg == "--max-frames")
+                args.max_frames = std::max(0, std::atoi(next("--max-frames").c_str()));
+            else if (arg == "--wait")
+                args.wait_ms = std::max(0, std::atoi(next("--wait").c_str()));
+            else if (arg == "--fps")
+            {
+                const double fps = std::atof(next("--fps").c_str());
+                args.wait_ms = fps > 0.0 ? static_cast<int>(1000.0 / fps + 0.5) : 0;
+            }
+            else if (arg == "--bias")
+                args.bias_s = std::atof(next("--bias").c_str());
+            else if (arg == "--csv")
+                args.csv_path = next("--csv");
+            else if (arg == "--rate-tracklet")
+            {
+                args.rate_tracklet = std::atoi(next("--rate-tracklet").c_str());
+            }
+            else if (arg == "--chord-q")
+            {
+                args.chord_q = std::atof(next("--chord-q").c_str());
+            }
+            else if (arg == "--dump-every")
+                args.dump_every = std::max(0, std::atoi(next("--dump-every").c_str()));
+            else if (arg == "--trace")
+                args.trace = true;
+            else if (arg == "--sigma-pos")
+                args.sigma_pos = std::stod(next("--sigma-pos"));
+            else if (arg == "--dump")
+                args.dump_csv = next("--dump");
+            else if (arg == "--only-id")
+                args.only_id = std::atoi(next("--only-id").c_str());
+            else if (arg == "--refine-corners")
+                args.refine_corners = true;
+            else if (arg == "--max-updates" && i + 1 < argc)
+                args.max_updates = std::atoi(argv[++i]);
+            else if (arg == "--nis-gate" && i + 1 < argc)
+                args.nis_gate = std::atof(argv[++i]), args.nis_gate_given = true;
+            else if (arg == "--radius")
+            {
+                args.radius_prior = std::atof(next("--radius").c_str());
+                args.radius_given = true;
+            }
+            else if (arg == "--aim-fit")
+            {
+                args.aim_fit = std::atoi(next("--aim-fit").c_str());
+            }
+            else if (arg == "--aim-alpha")
+            {
+                args.aim_alpha = std::atof(next("--aim-alpha").c_str());
+            }
+            else if (arg == "--aim-obs")
+            {
+                args.aim_obs = std::atof(next("--aim-obs").c_str());
+            }
+            else if (arg == "--sigma-floor")
+                args.sigma_floor = std::atof(next("--sigma-floor").c_str());
+            else if (arg == "--pair-radius")
+            {
+                args.pair_radius = true;
+            }
+            else if (arg == "--realign")
+            {
+                args.realign_m = std::atof(next("--realign").c_str());
+            }
+            else if (arg == "--gate")
+            {
+                args.gate_m = std::atof(next("--gate").c_str());
+            }
+            else if (arg == "--pair-lh")
+            {
+                args.pair_lh = std::atoi(next("--pair-lh").c_str());
+            }
+            else if (arg == "--assoc-angle")
+            {
+                args.assoc_angle = std::atoi(next("--assoc-angle").c_str());
+            }
+            else if (arg == "--pair-static")
+            {
+                args.pair_static = std::atoi(next("--pair-static").c_str());
+            }
+            else if (arg == "--rate-legacy")
+            {
+                args.rate_legacy = std::atoi(next("--rate-legacy").c_str());
+            }
+            else if (arg == "--joint-pair")
+            {
+                args.joint_pair = std::atoi(next("--joint-pair").c_str());
+            }
+            else if (arg == "--id-posterior")
+            {
+                // S2 板身份精确后验（穷举全部单射配对）。A/B 用开关，
+                // 语义写在 TrackerConfig 里，库代码自身不读环境变量。
+                args.id_posterior = std::atoi(next("--id-posterior").c_str());
+            }
+            else if (arg == "--normal-tiebreak")
+            {
+                args.normal_tiebreak = std::stod(next("--normal-tiebreak"));
+            }
+            else if (arg == "--no-antianchor")
+            {
+                args.antianchor = 0;
+            }
+            else if (arg == "--no-aim-extrapolate")
+            {
+                args.no_aim_extrapolate = true;
+            }
+            else if (arg == "--phase-yaw-static")
+            {
+                args.phase_yaw_static = true;
+            }
+            else if (arg == "--pair-center")
+                args.pair_center = true;
+            else if (arg == "--no-centered-switch")
+                args.centered_switch = false;
+            else if (arg == "--switch-margin")
+                args.switch_margin = std::atof(next("--switch-margin").c_str());
+            else if (arg == "--roi-retry")
+            {
+                args.roi_retry = true;
+            }
+            else if (arg == "--roi-size")
+            {
+                args.roi_size = std::atoi(next("--roi-size").c_str());
+            }
+            else if (arg == "--led-yaw")
+            {
+                args.led_yaw = true;
+            }
+            else if (arg == "--led-sigma")
+            {
+                args.led_sigma = std::atof(next("--led-sigma").c_str());
+            }
+            else if (arg == "--q-scale")
+            {
+                args.q_scale = std::atof(next("--q-scale").c_str());
+            }
+            else if (arg == "--web")
+            {
+                args.web = true;
+            }
+            else if (arg == "--web-port")
+            {
+                args.web_port = std::atoi(next("--web-port").c_str());
+            }
+            else if (arg == "--web-hold")
+            {
+                args.web_hold_s = std::atof(next("--web-hold").c_str());
+            }
+            else if (arg == "--score")
+            {
+                args.score = std::atof(next("--score").c_str());
+                args.score_given = true;
+            }
+            else if (arg == "--omega")
+            {
+                args.omega = std::atof(next("--omega").c_str());
+                args.omega_given = true;
+            }
+            else if (arg == "--noise-min")
+            {
+                args.noise_min = std::atof(next("--noise-min").c_str());
+            }
+            else if (arg == "--no-adaptive-noise")
+            {
+                args.adaptive_noise = false;
+            }
+            else if (arg == "--v-sigma")
+            {
+                args.v_sigma = std::atof(next("--v-sigma").c_str());
+            }
+            else if (arg == "--lock-span")
+            {
+                args.lock_span = std::atof(next("--lock-span").c_str());
+            }
+            else if (arg == "--lock-age")
+            {
+                args.lock_age = std::atof(next("--lock-age").c_str());
+            }
+            else if (arg == "--multi")
+                args.multi = true;
+            else if (arg == "--single")
+                args.multi = false;
+            else if (arg == "--multi-primary")
+                args.multi_primary = std::atoi(next("--multi-primary").c_str());
+            else if (arg == "--detected-body")
+            {
+                args.detected_body = std::atoi(next("--detected-body").c_str()) != 0;
+                args.topdown = true;
+            }
+            else if (arg == "--topdown")
+                args.topdown = true;
+            else if (arg == "--topdown-follow")
+            {
+                args.topdown_follow = true;
+            }
+            else if (arg == "--topdown-world")
+            {
+                args.topdown = true;
+                args.topdown_world = true;
+            }
+            else if (arg == "--topdown-ppm")
+            {
+                args.topdown_ppm = std::atof(next("--topdown-ppm").c_str());
+                args.topdown = true;
+            }
+            else if (arg == "--topdown-out")
+            {
+                args.topdown_out = next("--topdown-out");
+                args.topdown = true;
+            }
+            else if (arg == "--config")
+                args.config_path = next("--config");
+            else
+            {
+                std::cerr << "未知参数: " << arg << "\n";
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void printUsage(const char *program)
+    {
+        std::cerr << "用法: " << program << " <video> [--red|--blue] [--ekf] [--headless]\n"
+                  << "        [--stride N] [--start N] [--end N] [--max-frames N]\n"
+                  << "        [--wait MS] [--fps N] [--csv PATH] [--bias S] [--config PATH] [--dump-every N]\n"
+                  << "        [--topdown] [--topdown-world] [--topdown-ppm P] [--topdown-out DIR]\n";
+    }
+
+    const char *phaseName(rotating_armor::LockPhase phase)
+    {
+        switch (phase)
+        {
+        case rotating_armor::LockPhase::Idle:
+            return "idle";
+        case rotating_armor::LockPhase::Collecting:
+            return "collecting";
+        case rotating_armor::LockPhase::Tracking:
+            return "tracking";
+        }
+        return "?";
+    }
+
+    const char *stateName(TrackingState state)
+    {
+        switch (state)
+        {
+        case TrackingState::NoTarget:
+            return "NoTarget";
+        case TrackingState::Unstable:
+            return "Unstable";
+        case TrackingState::Stable:
+            return "Stable";
+        }
+        return "?";
+    }
+
+    // ---- 命中度量（三轴分解） ----
+    // 一次"到期对准"记录：云台在 t_cmd_s 时刻应该指向哪里。
+    struct AimTrace
+    {
+        double t_cmd_s{0.0};
+        Eigen::Vector3d aim_world{0.0, 0.0, 0.0};
+        int target_id{0};
+        double omega_rad_s{0.0}; // 下指令时的车体角速度（命中率分档用）
+        // 弹丸飞行时间（秒）：命中评估的参照时刻 = 开火时刻 + 飞行时间。
+        double flight_s{0.0};
+    };
+
+    // 一条实拍观测（世界系）。命中判定只用这些观测量，不碰任何模型状态，
+    // 所以"打没打中"和"滤波器算得对不对"是两个独立的口径。
+    struct HitObservation
+    {
+        double t_s{0.0};
+        int target_id{0};
+        Eigen::Vector3d position{0.0, 0.0, 0.0};
+        Eigen::Vector3d normal{0.0, 0.0, 0.0};
+        ArmorSize size{ArmorSize::Small};
+    };
+
+    // 到期对账：把 aim 与"同一个 target_id、t_cmd 前后 ±tolerance"的观测取均值比较。
+    // 单帧观测本身有 3~9 cm 噪声（v4 静止 1.3 cm / 自转 8.7 cm），拿单帧当参照等于
+    // 把观测噪声记成了预测误差；这里用 ±50 ms 的非因果平滑观测当参照（离线评估允许）。
+    void reportHitMetrics(const std::vector<AimTrace> &aims,
+                          const std::vector<HitObservation> &observations, double tolerance_s)
+    {
+        if (aims.empty())
+            return;
+        std::vector<double> abs_tangential, abs_vertical, abs_normal;
+        std::vector<double> signed_tangential, signed_vertical, signed_normal;
+        int evaluated = 0;
+        int uncovered = 0;
+        int hits = 0;
+        int hits_mean = 0;
+        int multi_window = 0;
+        int not_facing = 0;
+        // 按角速度分档（0: <1 rad/s，1: 1-5，2: >5）看"转得快时是不是更容易丢"。
+        std::array<int, 3> hits_by_rate{0, 0, 0};
+        std::array<int, 3> count_by_rate{0, 0, 0};
+        // 分档再看一次三轴误差：命中率低到底是"没对准"还是"时序/相位"。
+        std::array<std::vector<double>, 3> tangential_by_rate;
+        std::array<std::vector<double>, 3> vertical_by_rate;
+
+        for (const AimTrace &aim : aims)
+        {
+            std::vector<const HitObservation *> near;
+            for (const HitObservation &observation : observations)
+            {
+                if (aim.target_id != 0 && observation.target_id != aim.target_id)
+                    continue;
+                // 参照时刻 = 开火时刻 + 弹丸飞行时间：子弹到靶时板应该在哪。
+                const double reference_s = aim.t_cmd_s + aim.flight_s;
+                if (std::fabs(observation.t_s - reference_s) > tolerance_s)
+                    continue;
+                near.push_back(&observation);
+            }
+            if (near.empty())
+            {
+                ++uncovered;
+                continue;
+            }
+            // 参照板：取窗口内离瞄准点最近的同 id 板。窗口里 99.5% 的帧两块板同时在，
+            // 取均值等于把参照点放到两块板中间，会把"打中其中一块"判成没中。
+            const HitObservation *nearest = near.front();
+            double nearest_distance = std::numeric_limits<double>::infinity();
+            for (const HitObservation *observation : near)
+            {
+                const double distance = (observation->position - aim.aim_world).norm();
+                if (distance < nearest_distance)
+                {
+                    nearest_distance = distance;
+                    nearest = observation;
+                }
+            }
+            if (near.size() > 1)
+                ++multi_window;
+
+            // 旧口径（两板均值）留着对照：它把双板窗口平均到两板中间。
+            bool hit_mean = false;
+            {
+                Eigen::Vector3d mean_position = Eigen::Vector3d::Zero();
+                Eigen::Vector3d mean_normal = Eigen::Vector3d::Zero();
+                for (const HitObservation *observation : near)
+                {
+                    mean_position += observation->position;
+                    mean_normal += observation->normal;
+                }
+                mean_position /= static_cast<double>(near.size());
+                if (mean_normal.norm() < 1.0e-6)
+                    mean_normal = Eigen::Vector3d(mean_position.x(), mean_position.y(), 0.0);
+                if (mean_normal.norm() > 1.0e-9)
+                {
+                    mean_normal.normalize();
+                    Eigen::Vector3d mean_tangential = Eigen::Vector3d::UnitZ().cross(mean_normal);
+                    if (mean_tangential.norm() > 1.0e-6)
+                    {
+                        mean_tangential.normalize();
+                        const Eigen::Vector3d mean_vertical =
+                            mean_normal.cross(mean_tangential).normalized();
+                        const Eigen::Vector3d mean_error = aim.aim_world - mean_position;
+                        const double mean_half_width =
+                            (near.front()->size == ArmorSize::Large) ? 0.115 : 0.0675;
+                        hit_mean = mean_normal.dot(mean_position) < 0.0 &&
+                                   std::fabs(mean_error.dot(mean_tangential)) <= mean_half_width &&
+                                   std::fabs(mean_error.dot(mean_vertical)) <= 0.0285;
+                    }
+                }
+            }
+            hits_mean += hit_mean ? 1 : 0;
+
+            Eigen::Vector3d position = nearest->position;
+            Eigen::Vector3d normal = nearest->normal;
+            if (normal.norm() < 1.0e-6)
+            {
+                // PnP 没给出法向时用径向方向；对朝向相机的板，两者只差几度。
+                normal = Eigen::Vector3d(position.x(), position.y(), 0.0);
+            }
+            if (normal.norm() < 1.0e-9)
+                continue;
+            normal.normalize();
+            Eigen::Vector3d tangential_axis = Eigen::Vector3d::UnitZ().cross(normal);
+            if (tangential_axis.norm() < 1.0e-6)
+                continue;
+            tangential_axis.normalize();
+            const Eigen::Vector3d vertical_axis = normal.cross(tangential_axis).normalized();
+
+            const Eigen::Vector3d error = aim.aim_world - position;
+            const double tangential = error.dot(tangential_axis);
+            const double vertical = error.dot(vertical_axis);
+            const double normal_offset = error.dot(normal);
+            abs_tangential.push_back(std::fabs(tangential));
+            abs_vertical.push_back(std::fabs(vertical));
+            abs_normal.push_back(std::fabs(normal_offset));
+            signed_tangential.push_back(tangential);
+            signed_vertical.push_back(vertical);
+            signed_normal.push_back(normal_offset);
+
+            // 板朝相机：法向从板心指向车外，相机在云台系原点（世界系原点同位置）。
+            const bool facing = normal.dot(position) < 0.0;
+            const double half_width = (nearest->size == ArmorSize::Large) ? 0.115 : 0.0675;
+            const bool hit = facing && std::fabs(tangential) <= half_width &&
+                             std::fabs(vertical) <= 0.0285;
+            ++evaluated;
+            hits += hit ? 1 : 0;
+            not_facing += facing ? 0 : 1;
+            const int bucket = std::fabs(aim.omega_rad_s) < 1.0
+                                   ? 0
+                                   : (std::fabs(aim.omega_rad_s) < 5.0 ? 1 : 2);
+            ++count_by_rate[static_cast<std::size_t>(bucket)];
+            hits_by_rate[static_cast<std::size_t>(bucket)] += hit ? 1 : 0;
+            tangential_by_rate[static_cast<std::size_t>(bucket)].push_back(std::fabs(tangential));
+            vertical_by_rate[static_cast<std::size_t>(bucket)].push_back(std::fabs(vertical));
+        }
+
+        if (evaluated == 0)
+            return;
+        auto sign_percent = [](std::vector<double> values, double ratio) {
+            if (values.empty())
+                return 0.0;
+            std::sort(values.begin(), values.end());
+            const auto index = static_cast<std::size_t>(
+                std::clamp(ratio, 0.0, 1.0) * static_cast<double>(values.size() - 1));
+            return values[index];
+        };
+        const int total = static_cast<int>(aims.size());
+        std::printf("\n-- 命中评估（三轴分解，±%.0f ms 平滑观测参照，取最近板） --\n",
+                    1000.0 * tolerance_s);
+        std::printf("  到期对准 %d 次：可评估 %d（%.1f%%），无同 id 观测 %d（%.1f%%）\n", total,
+                    evaluated, 100.0 * evaluated / total, uncovered,
+                    100.0 * uncovered / total);
+        std::printf("  切向 |e_t|: p50 %.2f cm，p90 %.2f cm（板半宽 6.75 / 11.5 cm）\n",
+                    100.0 * sign_percent(abs_tangential, 0.50),
+                    100.0 * sign_percent(abs_tangential, 0.90));
+        std::printf("  竖直 |e_z|: p50 %.2f cm，p90 %.2f cm（板半高 2.85 cm）\n",
+                    100.0 * sign_percent(abs_vertical, 0.50),
+                    100.0 * sign_percent(abs_vertical, 0.90));
+        std::printf("  法向 |e_n|: p50 %.2f cm，p90 %.2f cm（深度，不计命中，仅诊断）\n",
+                    100.0 * sign_percent(abs_normal, 0.50),
+                    100.0 * sign_percent(abs_normal, 0.90));
+        std::printf("  带符号中位: 切向 %+.2f，竖直 %+.2f，法向 %+.2f cm\n",
+                    100.0 * sign_percent(signed_tangential, 0.50),
+                    100.0 * sign_percent(signed_vertical, 0.50),
+                    100.0 * sign_percent(signed_normal, 0.50));
+        std::printf("  命中率（切向+竖直在板内且板朝相机）: %d/%d = %.1f%%"
+                    "（其中板背向相机 %d 次）\n",
+                    hits, evaluated, 100.0 * hits / evaluated, not_facing);
+        std::printf("  旧口径（两板均值参照）: %d/%d = %.1f%%；窗口内 >1 块板的帧 %d（%.1f%%）\n",
+                    hits_mean, evaluated, 100.0 * hits_mean / evaluated, multi_window,
+                    100.0 * multi_window / evaluated);
+        std::printf("  命中率按 |omega|: <1 %.1f%%（%d）  1-5 %.1f%%（%d）  >5 %.1f%%（%d）\n",
+                    100.0 * hits_by_rate[0] / std::max(1, count_by_rate[0]), count_by_rate[0],
+                    100.0 * hits_by_rate[1] / std::max(1, count_by_rate[1]), count_by_rate[1],
+                    100.0 * hits_by_rate[2] / std::max(1, count_by_rate[2]), count_by_rate[2]);
+        for (int bucket = 0; bucket < 3; ++bucket)
+        {
+            const std::size_t index = static_cast<std::size_t>(bucket);
+            std::printf("    档 %s: 切向 p50 %.2f / p90 %.2f cm，竖直 p50 %.2f / p90 %.2f cm\n",
+                        bucket == 0 ? "<1 " : (bucket == 1 ? "1-5" : ">5 "),
+                        sign_percent(tangential_by_rate[index], 0.5) * 100.0,
+                        sign_percent(tangential_by_rate[index], 0.9) * 100.0,
+                        sign_percent(vertical_by_rate[index], 0.5) * 100.0,
+                        sign_percent(vertical_by_rate[index], 0.9) * 100.0);
+        }
+        // ---- 时间偏移扫描：命中率对"参照时刻误差"有多敏感 ----
+        // 参照时刻 = 开火 + 飞行 + offset。offset 的最优值 = 整条链路（曝光/处理/下发/
+        // 弹道）实际总延迟与跟踪器内部补偿量之差，测出来是正数就说明补偿少了。
+        // 曲线在某个 offset 上明显抬起 → 是时序问题；怎么扫都不抬 → 是预测/选板问题。
+        for (int bin = 0; bin < 3; ++bin)
+        {
+        std::printf("  偏移扫描 |omega| %s: ", bin == 0 ? "<1" : (bin == 1 ? "1-5" : ">5"));
+        for (int offset_ms = -120; offset_ms <= 200; offset_ms += 20)
+        {
+            const double offset = 0.001 * static_cast<double>(offset_ms);
+            int sweep_hits = 0;
+            int sweep_count = 0;
+            for (const AimTrace &aim : aims)
+            {
+                const double omega_abs = std::fabs(aim.omega_rad_s);
+                const int aim_bin = omega_abs < 1.0 ? 0 : (omega_abs < 5.0 ? 1 : 2);
+                if (aim_bin != bin)
+                    continue;
+                const double reference_s = aim.t_cmd_s + aim.flight_s + offset;
+                const HitObservation *nearest = nullptr;
+                double best_dt = 1.0e9;
+                for (const HitObservation &observation : observations)
+                {
+                    if (aim.target_id != 0 && observation.target_id != aim.target_id)
+                        continue;
+                    const double dt = std::fabs(observation.t_s - reference_s);
+                    if (dt <= 0.008 && dt < best_dt)
+                    {
+                        best_dt = dt;
+                        nearest = &observation;
+                    }
+                }
+                if (nearest == nullptr)
+                    continue;
+                Eigen::Vector3d normal = nearest->normal;
+                if (normal.norm() < 1.0e-6)
+                    normal = Eigen::Vector3d(nearest->position.x(), nearest->position.y(), 0.0);
+                if (normal.norm() < 1.0e-9)
+                    continue;
+                normal.normalize();
+                Eigen::Vector3d tangential = Eigen::Vector3d::UnitZ().cross(normal);
+                if (tangential.norm() < 1.0e-6)
+                    continue;
+                tangential.normalize();
+                const Eigen::Vector3d vertical = normal.cross(tangential).normalized();
+                const Eigen::Vector3d error = aim.aim_world - nearest->position;
+                const double half_width =
+                    (nearest->size == ArmorSize::Large) ? 0.115 : 0.0675;
+                const bool hit = normal.dot(nearest->position) < 0.0 &&
+                                 std::fabs(error.dot(tangential)) <= half_width &&
+                                 std::fabs(error.dot(vertical)) <= 0.0285;
+                ++sweep_count;
+                sweep_hits += hit ? 1 : 0;
+            }
+            std::printf("%+d:%.0f%% ", offset_ms,
+                        sweep_count > 0 ? 100.0 * sweep_hits / sweep_count : 0.0);
+        }
+        std::printf("\n");
+        }
+    }
+
+} // namespace
+
+// 诊断用：整车模型整体相位偏置（--模型四块板可能装在与半径成 45° 的菱形位置上）
+double g_model_phase_off{0.0};
+
+int main(int argc, char **argv)
+{
+    Args args;
+    if (!parseArgs(argc, argv, args))
+    {
+        printUsage(argv[0]);
+        return 2;
+    }
+    if (const char *env_off = std::getenv("MODEL_PHASE_DEG"))
+    {
+        g_model_phase_off = std::atof(env_off) * 3.141592653589793 / 180.0;
+    }
+
+    // 1. 相机参数：内参来自标定文件。外参不再在回放侧另写一份：
+    //    yaml 里 R 是单位阵占位时，armor_solve 会统一补上"光学系->云台系"
+    //    的固定旋转（与这里的 opticalToWorldRotation 同一个矩阵），标定后填真 R
+    //    也自动生效。平移置零，只因为回放不关心装车位置（t 是常数，不影响相对精度）。
+    CameraParameters camera;
+    {
+        std::string config_path = args.config_path;
+        if (config_path.empty())
+        {
+            const char *env = std::getenv("RMV_CAMERA_CONFIG");
+            config_path = (env != nullptr && env[0] != '\0') ? env : "config/camera.yaml";
+        }
+        std::string error;
+        if (!loadCameraParameters(config_path, camera, error))
+        {
+            std::cerr << "加载相机参数失败: " << error << "\n";
+            return 1;
+        }
+        camera.translation_camera_to_gimbal = cv::Mat::zeros(3, 1, CV_64F);
+    }
+
+    if (args.web)
+    {
+        START_WEB_SERVER(args.web_port);
+        std::cout << "[web] 曲线页面 http://127.0.0.1:" << args.web_port
+                  << "/  （回放结束后保持 " << args.web_hold_s << " s）\n";
+    }
+
+    // 2. 打开视频。
+    cv::VideoCapture capture(args.video);
+    if (!capture.isOpened())
+    {
+        std::cerr << "无法打开视频: " << args.video << "\n";
+        return 1;
+    }
+    const double fps = capture.get(cv::CAP_PROP_FPS) > 1.0 ? capture.get(cv::CAP_PROP_FPS) : 30.0;
+    const int total_frames = static_cast<int>(capture.get(cv::CAP_PROP_FRAME_COUNT));
+    const int video_width = static_cast<int>(capture.get(cv::CAP_PROP_FRAME_WIDTH));
+    const int video_height = static_cast<int>(capture.get(cv::CAP_PROP_FRAME_HEIGHT));
+    if (camera.image_width > 0 && camera.image_height > 0 &&
+        (video_width != camera.image_width || video_height != camera.image_height))
+    {
+        std::cout << "[回放] 视频分辨率 " << video_width << "x" << video_height
+                  << " 与标定分辨率 " << camera.image_width << "x" << camera.image_height
+                  << " 不一致，按比例缩放内参\n";
+        scaleIntrinsics(camera,
+                        static_cast<double>(video_width) / camera.image_width,
+                        static_cast<double>(video_height) / camera.image_height);
+    }
+    std::cout << "[回放] 视频: " << args.video << "  " << video_width << "x" << video_height
+              << "  " << fps << " fps  " << total_frames << " 帧  "
+              << "敌方颜色: " << (args.enemy == TeamColor::Red ? "red" : "blue") << "\n";
+    std::cout << "[回放] EKF: " << (args.ekf ? "启用" : "关闭")
+              << "  模式: " << (args.headless ? "无窗口" : "窗口") << "\n";
+
+    const int range_start = std::max(0, args.start);
+    const int range_end = (args.end > 0) ? std::min(args.end, total_frames > 0 ? total_frames : args.end)
+                                         : (total_frames > 0 ? total_frames : -1);
+    if (range_start > 0)
+        capture.set(cv::CAP_PROP_POS_FRAMES, range_start);
+
+    // 3. 统计容器。
+    struct TargetStats
+    {
+        long observations{0};
+        std::vector<double> distances;
+        std::vector<double> reprojections;
+        std::vector<double> yaws;
+        long big{0};
+        long small{0};
+        double confidence_sum{0.0};
+        double confidence_min{1.0};
+        double confidence_max{0.0};
+        // 连续帧位置差分（同一 id+size），用于估观测噪声量级。
+        bool has_last{false};
+        cv::Vec3d last_position{};
+        std::vector<double> step_distances;
+    };
+    std::map<std::pair<int, int>, TargetStats> targets; // (id, size) -> 统计
+    std::map<int, long> frame_histogram;                // 每帧检测数直方图
+    std::vector<double> frame_motions;
+    long frames_processed{0};
+    long frames_with_target{0};
+    long frames_empty{0};
+    double detect_ms_sum{0.0};
+    double solve_ms_sum{0.0};
+    double motion_sum{0.0};
+    long motion_count{0};
+    int detection_id_switches{0};
+    int last_frame_target_id{0};
+    cv::Mat previous_gray_small;
+
+    // EKF 侧统计。
+    rotating_armor::TrackerConfig tracker_config;
+    tracker_config.position_sigma_m = args.sigma_pos;
+    tracker_config.radius_prior_m = args.radius_prior;
+    if (args.score_given)
+    {
+        setArmorScoreThreshold(static_cast<float>(args.score));
+    }
+    tracker_config.velocity_sigma_m_s = args.v_sigma;
+    tracker_config.adaptive_observation_noise = args.adaptive_noise;
+    tracker_config.adaptive_noise_min_sigma_m = args.noise_min;
+    tracker_config.process_accel_scale = args.q_scale;
+    if (args.omega_given)
+    {
+        tracker_config.forced_omega_rad_s = args.omega;
+    }
+    tracker_config.association_sigma_floor_m = args.sigma_floor;
+    tracker_config.pair_center_update_enabled = args.pair_center;
+    tracker_config.prefer_centered_target = args.centered_switch;
+    tracker_config.target_switch_margin_rad = args.switch_margin;
+    tracker_config.max_updates_per_frame = args.max_updates;
+    if (args.nis_gate_given)
+        tracker_config.nis_gate = args.nis_gate;
+    tracker_config.lock_min_span_s = args.lock_span;
+    tracker_config.lock_max_age_s = args.lock_age;
+    // 显式 --radius 时以它为准（关掉按板型自动选），方便做 A/B。
+    if (args.radius_given)
+    {
+        tracker_config.radius_prior_from_size = false;
+    }
+    tracker_config.aim_observation_hold_s = args.aim_obs;
+    tracker_config.aim_smoothing_alpha = args.aim_alpha;
+    tracker_config.aim_fit_samples = args.aim_fit;
+    tracker_config.phase_update_when_static = args.phase_yaw_static;
+    tracker_config.aim_observation_extrapolate = !args.no_aim_extrapolate;
+    tracker_config.single_plate_realign_m = args.realign_m;
+    if (args.gate_m > 0.0)
+    {
+        tracker_config.position_gate_m = args.gate_m;
+    }
+    if (args.joint_pair >= 0)
+    {
+        tracker_config.joint_pair_binding_enabled = args.joint_pair != 0;
+    }
+    if (args.id_posterior >= 0)
+    {
+        // S2：精确身份后验取代"逐块贪心 argmin 判槽位"。开了之后逐块贪心在
+        // 多板帧不参与；单板帧按硬门槛仍走原路径。
+        tracker_config.identity_posterior_enabled = args.id_posterior != 0;
+        // 架构正确性判据：身份一旦由后验决定，靠手调标量的联合绑定就必须
+        // 让位（否则等于新旧两套并存）。这里跟随开关自动关掉。
+        if (args.joint_pair < 0)
+        {
+            tracker_config.joint_pair_binding_enabled = args.id_posterior == 0;
+        }
+    }
+    if (args.normal_tiebreak >= 0.0)
+    {
+        tracker_config.normal_tiebreak_weight = args.normal_tiebreak;
+    }
+    if (args.rate_legacy >= 0)
+    {
+        // 旧转速通道全家桶：Theil-Sen 法向/方位角窗、逐帧 tracklet、弦向、
+        // 原始法向、以及 0.35 s 的 rate_window。A/B 只想知道"新通道独立能不能
+        // 站住"，所以这里是全开/全关，不做逐条开关。
+        const bool on = args.rate_legacy != 0;
+        tracker_config.rate_update_enabled = on;
+        tracker_config.rate_from_tracklet_enabled = on;
+        tracker_config.rate_from_chord_enabled = on;
+        tracker_config.rate_from_raw_normal_enabled = on;
+    }
+    if (args.antianchor >= 0)
+    {
+        tracker_config.phase_anti_anchor = args.antianchor != 0;
+    }
+    if (args.pair_lh >= 0)
+    {
+        tracker_config.ekf.pair_offset_enabled = args.pair_lh != 0;
+    }
+    if (args.assoc_angle >= 0)
+    {
+        tracker_config.association_by_angle_enabled = args.assoc_angle != 0;
+    }
+    if (args.pair_static >= 0)
+    {
+        tracker_config.pair_center_min_static_frames = args.pair_static;
+    }
+    if (args.pair_radius)
+    {
+        tracker_config.pair_radius_update_enabled = true;
+        tracker_config.freeze_radius = false;
+    }
+    rotating_armor::RotatingArmorTracker tracker(tracker_config);
+    // 多目标模式下，下游（画模型板、trace、统计）统一走 active_tracker：
+    // 单目标时它就是 tracker 本身，多目标时是"当前主目标"那辆车的 tracker。
+    rotating_armor::RotatingArmorTracker *active_tracker = &tracker;
+    rotating_armor::MultiTargetTracker multi_tracker(rotating_armor::MultiTargetConfig{},
+                                                     tracker_config);
+    std::vector<rotating_armor::TopDownFrame> extra_bodies;
+    struct MultiStats
+    {
+        int target_id{0};
+        long frames{0};
+        long tracking{0};
+        long stable{0};
+        long observations{0};
+        double cx{0.0}, cy{0.0}, omega{0.0}, radius{0.0}, distance{0.0};
+    };
+    std::map<int, MultiStats> multi_stats;
+    long ekf_first_stable_frame{-1};
+    long ekf_stable_frames{0};
+    long ekf_accepted{0};
+    long refine_count{0};
+    long ekf_rejected{0};
+    int ekf_relock_count{0};
+    int ekf_realigns{0};
+    int last_realigns{0};
+
+    int ekf_target_switches{0};
+    int last_ekf_id{0};
+    std::string last_phase{"idle"};
+    std::string last_reject;
+    rotating_armor::TrackerDiagnostics final_diagnostics{};
+    PredictionResult final_prediction{};
+    std::vector<double> ekf_predicted_errors; // 仅记录"预测后到下一帧同 id 观测"的差（粗略）
+
+    // 预测精度评估：把"预测时刻 + 预测瞄准点（世界系）"存起来，等视频推进到
+    // 那个时刻，再和该帧实测板心比距离。这是"预测准不准"的客观指标——
+    // 比 Stable 帧数更接近验收口径（板真的在预测位置上吗）。
+    std::vector<AimTrace> pending_aims;
+    std::vector<AimTrace> all_aims; // 供离线三轴命中评估
+    std::vector<HitObservation> hit_observations;
+    std::vector<double> aim_errors_m;
+    // 真正的"预测准不准"：aim 在 t_cmd_s 时刻打到哪，就和那一刻实测板心比。
+    // （之前 aim_errors_m 装的是"模型解释度"，不是预测误差，两者被混在一起了。）
+    std::vector<double> prediction_errors_m;
+    std::vector<double> aim_slot_errors_m;
+
+    // 瞄准残差按"跟踪状态"分列：Idle / Collecting / Tracking。用户验收时最关心的
+    // 是"没锁上时的偏离"和"锁上后的偏离"是两个量，混在一起看不出改动的效果。
+    std::array<std::vector<double>, 3> aim_slot_by_phase;
+    // 预测质量单独看：没有观测的帧只能靠 EKF 外推（"瞄准偏离"主要发生在这里）。
+    std::array<std::vector<double>, 2> aim_slot_by_measurement; // 0=有观测 1=无观测
+    std::array<long, 2> aim_frames_by_measurement{{0, 0}};
+    std::array<long, 3> frames_by_phase{{0, 0, 0}};
+    std::array<long, 3> aim_frames_by_phase{{0, 0, 0}};
+    // 按 |omega| 分桶（<1 / 1-5 / 5-15 / >=15 rad/s）：高速自转单独看，
+    // 否则被大量静止帧的中位数掩盖。
+    std::array<std::vector<double>, 4> aim_slot_by_omega;
+    std::array<long, 4> aim_frames_by_omega{{0, 0, 0, 0}};
+
+    std::ofstream csv;
+    if (!args.csv_path.empty())
+    {
+        csv.open(args.csv_path);
+        if (!csv.is_open())
+        {
+            std::cerr << "无法写入 CSV: " << args.csv_path << "\n";
+            return 1;
+        }
+        // x/y/z 是 pose.position_camera_m，即 OpenCV 光学系（x 右 / y 下 / z 前），
+        // 既不是世界系也不是云台系。分析时最容易踩的坑：把 z 当成"高度"（它其实是
+        // 深度，数值≈dist_m），或把 y 当成"东西向位置"（它其实是图像向下的偏移）。
+        // 正确用法：仰角 = atan2(-y, z)，方位 = atan2(x, z)。实测两组目标都稳定在
+        // 0~5° 仰角，说明回放里 GimbalState{}(pitch=0) 的假设是自洽的。
+        csv << "frame,time_s,id,size,conf,x,y,z,dist_m,yaw_deg,reproj_px,box_w,box_h,motion,"
+               "c0x,c0y,c1x,c1y,c2x,c2y,c3x,c3y,"
+               "ekf_phase,ekf_state,ekf_aim,ekf_id,ekf_yaw_deg,ekf_pitch_deg,ekf_dist_m,ekf_fire\n";
+    }
+
+    std::ofstream dump_stream;
+    if (!args.dump_csv.empty())
+    {
+        dump_stream.open(args.dump_csv);
+        dump_stream << "frame,t,det,target_id,aim_slot,obs_id,x,y,z,best_slot,best_dist,"
+                       "second_dist,cx,cy,cz,cyaw,R,oyaw,aimx,aimy,aimz,u,v,stab,upd,missed,"
+                       "tyaw,thasyaw,tslot,ringk,rc0,rc1,rc2,rc3,"
+                       "ekfw,idact,idn,idwbest,idw2nd,idmargin\n";
+    }
+
+    // --only-id N 是"只研究一个板号"的单目标模式，跟多目标是互斥的：
+    // 多目标会按几何把两台车分开，各喂各的板号。
+    if (args.only_id != 0)
+        args.multi = false;
+
+    const bool show = !args.headless;
+    const std::string window = "camera playback";
+    if (show)
+        cv::namedWindow(window, cv::WINDOW_NORMAL);
+
+    // ---- 俯视图（Top-Down）：只是"把 EKF 结果画出来"，不参与任何估计逻辑 ----
+    if (args.multi && !args.ekf)
+    {
+        std::cout << "[多目标] 需要同时给 --ekf（多目标只是在 EKF 之上分组），已忽略 --multi"
+                  << std::endl;
+        args.multi = false;
+    }
+    const bool topdown_enabled = args.topdown && args.ekf;
+    if (args.topdown && !args.ekf)
+    {
+        std::cerr << "[俯视图] 需要同时给 --ekf，已忽略 --topdown\n";
+    }
+    rotating_armor::TopDownOptions topdown_options;
+    // 用户要求：默认固定相机（世界原点）坐标系，方便把车的抖动和相机抖动分开看。
+    // 想看"跟车放大"时用 --topdown-follow。
+    topdown_options.follow_target = args.topdown_follow && !args.topdown_world;
+    topdown_options.pixels_per_meter = args.topdown_ppm;
+    topdown_options.detected_body_only = args.detected_body;
+    rotating_armor::TopDownView topdown_view(topdown_options);
+    const std::string topdown_window = "EKF top-down";
+    if (topdown_enabled && show)
+        cv::namedWindow(topdown_window, cv::WINDOW_AUTOSIZE);
+    if (topdown_enabled && !args.topdown_out.empty())
+    {
+        std::error_code mkdir_error;
+        std::filesystem::create_directories(args.topdown_out, mkdir_error);
+        if (mkdir_error)
+        {
+            std::cerr << "无法创建俯视图目录 " << args.topdown_out << ": "
+                      << mkdir_error.message() << "\n";
+            return 1;
+        }
+    }
+
+    int led_yaw_updates = 0;
+    int roi_recovered = 0;
+    bool paused = false;
+    int frame_index = range_start;
+    cv::Mat frame;
+    for (; ; )
+    {
+        if (!paused && !capture.read(frame))
+            break;
+        if (frame.empty())
+            break;
+        if (range_end > 0 && frame_index >= range_end)
+            break;
+        if (args.max_frames > 0 && frames_processed >= args.max_frames)
+            break;
+
+        const double time_s = static_cast<double>(frame_index) / fps;
+
+        // 画面运动量：缩到 1/8 灰度后与上一帧的平均绝对差（0~255）。
+        double motion = 0.0;
+        {
+            cv::Mat gray_small;
+            cv::cvtColor(frame, gray_small, cv::COLOR_BGR2GRAY);
+            cv::resize(gray_small, gray_small, cv::Size(180, 135), 0, 0, cv::INTER_AREA);
+            if (!previous_gray_small.empty())
+                motion = cv::norm(gray_small, previous_gray_small, cv::NORM_L1) /
+                         static_cast<double>(gray_small.total());
+            gray_small.copyTo(previous_gray_small);
+            frame_motions.push_back(motion);
+            motion_sum += motion;
+            ++motion_count;
+        }
+
+        const auto t0 = std::chrono::steady_clock::now();
+        std::vector<ArmorDetection> detections = armor_detect(frame, args.enemy);
+
+        const auto t1 = std::chrono::steady_clock::now();
+        GimbalState gimbal{};
+        gimbal.prediction_bias_s = static_cast<float>(args.bias_s);
+        // ---- ROI 跟踪式复检 ----
+        // 网络整帧没出框时（小板侧视/贴画面边缘），用上一帧的预测板位裁一小块、
+        // 放大后再过一遍同一个网络。复检到的角点只当"普通检测"用，后面走同一条
+        // armor_solve -> WorldObservation -> tracker.step 流水线。
+        if (args.roi_retry && tracker.initialized() && tracker.diagnostics().phase == rotating_armor::LockPhase::Tracking &&
+            tracker.diagnostics().target_id != 0)
+        {
+            bool already = false;
+            for (const ArmorDetection &det : detections)
+            {
+                if (det.target_id == tracker.diagnostics().target_id)
+                {
+                    already = true;
+                    break;
+                }
+            }
+            if (!already && camera.valid() && !camera.camera_matrix.empty())
+            {
+                const auto &st = tracker.ekf().state();
+                const int slot = tracker.diagnostics().aim_slot >= 0 ? tracker.diagnostics().aim_slot : 0;
+                const Eigen::Vector3d p_world = rotating_armor::platePosition(st, slot, 4);
+                const Eigen::Vector3d p_gimbal = rotating_armor::toGimbal(gimbal, p_world);
+                const cv::Vec3d p_camera = gimbalToCameraPoint(camera, cv::Vec3d(p_gimbal.x(), p_gimbal.y(), p_gimbal.z()));
+                if (p_camera[2] > 0.4)
+                {
+                    std::vector<cv::Point3d> one{cv::Point3d(p_camera[0], p_camera[1], p_camera[2])};
+                    std::vector<cv::Point2d> px;
+                    cv::projectPoints(one, cv::Vec3d(0, 0, 0), cv::Vec3d(0, 0, 0),
+                                      camera.camera_matrix, cv::noArray(), px);
+                    const int half = std::max(40, args.roi_size / 2);
+                    int x0 = static_cast<int>(px[0].x) - half;
+                    int y0 = static_cast<int>(px[0].y) - half;
+                    x0 = std::max(0, std::min(x0, frame.cols - 2 * half));
+                    y0 = std::max(0, std::min(y0, frame.rows - 2 * half));
+                    if (x0 + 2 * half <= frame.cols && y0 + 2 * half <= frame.rows)
+                    {
+                        const cv::Rect roi_rect(x0, y0, 2 * half, 2 * half);
+                        cv::Mat crop = frame(roi_rect).clone();
+                        cv::Mat upscaled;
+                        cv::resize(crop, upscaled, cv::Size(), 2.0, 2.0, cv::INTER_LINEAR);
+                        const std::vector<ArmorDetection> roi_detections = armor_detect(upscaled, args.enemy);
+                        if (std::getenv("RMV_ROI_DBG") != nullptr)
+                        {
+                            std::fprintf(stderr, "[roi] f=%d rect=%d,%d px=%.0f,%.0f dets=%zu\n",
+                                         frame_index, x0, y0, px[0].x, px[0].y, roi_detections.size());
+                            for (const ArmorDetection &d : roi_detections)
+                            {
+                                std::fprintf(stderr, "      id=%d conf=%.2f\n", d.target_id, d.confidence);
+                            }
+                        }
+                        for (ArmorDetection det : roi_detections)
+                        {
+                            if (det.target_id != tracker.diagnostics().target_id)
+                            {
+                                continue;
+                            }
+                            for (cv::Point2f &corner : det.corners)
+                            {
+                                corner.x = corner.x * 0.5F + static_cast<float>(x0);
+                                corner.y = corner.y * 0.5F + static_cast<float>(y0);
+                            }
+                            detections.push_back(det);
+                            ++roi_recovered;
+                        }
+                    }
+                }
+            }
+        }
+        if (args.refine_corners && !detections.empty())
+        {
+            cv::Mat gray;
+            cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
+            refine_count += refineArmorCorners(gray, detections);
+        }
+        std::vector<ArmorPose> poses = armor_solve(detections, camera, gimbal);
+        if (args.only_id != 0)
+        {
+            // 调参用：只保留指定编号的观测，避免两台车的装甲板混进同一个跟踪器。
+            poses.erase(std::remove_if(poses.begin(), poses.end(),
+                                       [&](const ArmorPose &pose) {
+                                           return pose.detection.target_id != args.only_id;
+                                       }),
+                        poses.end());
+        }
+        // 命中度量用的原始观测（世界系位置 + 法向 + 板型），不经过任何滤波器：
+        // "打没打中"只用观测当参照，和滤波器算得对不对是两个独立口径。
+        {
+            const Eigen::Matrix3d world_from_gimbal = rotating_armor::gimbalToWorld(gimbal);
+            for (const ArmorPose &pose : poses)
+            {
+                if (pose.detection.target_id == 0)
+                {
+                    continue;
+                }
+                HitObservation observation;
+                observation.t_s = time_s;
+                observation.target_id = pose.detection.target_id;
+                observation.position = world_from_gimbal *
+                                       Eigen::Vector3d(pose.position_gimbal_m[0],
+                                                       pose.position_gimbal_m[1],
+                                                       pose.position_gimbal_m[2]);
+                observation.normal = world_from_gimbal *
+                                     Eigen::Vector3d(pose.normal_gimbal[0], pose.normal_gimbal[1],
+                                                     pose.normal_gimbal[2]);
+                observation.size = pose.detection.size;
+                hit_observations.push_back(observation);
+            }
+        }
+        const auto t2 = std::chrono::steady_clock::now();
+        const double detect_ms =
+            std::chrono::duration<double, std::milli>(t1 - t0).count();
+        const double solve_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
+        detect_ms_sum += detect_ms;        solve_ms_sum += solve_ms;
+
+        // ---- 帧级统计 ----
+        ++frames_processed;
+        ++frame_histogram[static_cast<int>(detections.size())];
+        if (detections.empty())
+            ++frames_empty;
+        else
+            ++frames_with_target;
+        int current_target_id = 0;
+        if (!poses.empty())
+            current_target_id = poses.front().detection.target_id;
+        if (detection_id_switches == 0)
+            last_frame_target_id = current_target_id;
+        if (current_target_id != 0 && last_frame_target_id != 0 &&
+            current_target_id != last_frame_target_id)
+            ++detection_id_switches;
+        if (current_target_id != 0)
+            last_frame_target_id = current_target_id;
+
+        // ---- 目标级统计 ----
+        const ArmorPose *nearest = nullptr;
+        double nearest_distance = 1e18;
+        for (const ArmorPose &pose : poses)
+        {
+            const cv::Vec3d &p = pose.position_camera_m;
+            const double distance = std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+            if (distance < nearest_distance)
+            {
+                nearest_distance = distance;
+                nearest = &pose;
+            }
+            if (std::getenv("OV_DEBUG") != nullptr && !pose.detection.corners.empty())
+            {
+                cv::Point2f box(0.0f, 0.0f);
+                for (const cv::Point2f &corner : pose.detection.corners) box += corner;
+                box /= static_cast<float>(pose.detection.corners.size());
+                const cv::Vec3d p_cam = gimbalToCameraPoint(
+                    camera, cv::Vec3d(pose.position_gimbal_m[0], pose.position_gimbal_m[1],
+                                      pose.position_gimbal_m[2]));
+                std::vector<cv::Point3d> pts{cv::Point3d(p_cam[0], p_cam[1], p_cam[2])};
+                std::vector<cv::Point2d> proj;
+                cv::projectPoints(pts, cv::Vec3d(0, 0, 0), cv::Vec3d(0, 0, 0),
+                                  camera.camera_matrix, cv::noArray(), proj);
+                std::fprintf(stderr, "[ov] f=%d id=%d box=(%.0f,%.0f) proj=(%.0f,%.0f) d=%.1f reproj=%.2f\n",
+                             frame_index, pose.detection.target_id, box.x, box.y,
+                             proj[0].x, proj[0].y, cv::norm(box - cv::Point2f(proj[0])),
+                             pose.reprojection_error);
+            }
+            const std::pair<int, int> key{pose.detection.target_id,
+                                          static_cast<int>(pose.detection.size)};
+            TargetStats &stats = targets[key];
+            ++stats.observations;
+            stats.distances.push_back(distance);
+            stats.reprojections.push_back(pose.reprojection_error);
+            stats.yaws.push_back(pose.armor_yaw * 180.0 / 3.141592653589793);
+            if (pose.detection.size == ArmorSize::Large)
+                ++stats.big;
+            else
+                ++stats.small;
+            stats.confidence_sum += pose.detection.confidence;
+            stats.confidence_min = std::min(stats.confidence_min,
+                                            static_cast<double>(pose.detection.confidence));
+            stats.confidence_max = std::max(stats.confidence_max,
+                                            static_cast<double>(pose.detection.confidence));
+            if (stats.has_last)
+            {
+                const cv::Vec3d &a = stats.last_position;
+                const cv::Vec3d &b = pose.position_camera_m;
+                stats.step_distances.push_back(std::sqrt((a[0] - b[0]) * (a[0] - b[0]) +
+                                                         (a[1] - b[1]) * (a[1] - b[1]) +
+                                                         (a[2] - b[2]) * (a[2] - b[2])));
+            }
+            stats.last_position = pose.position_camera_m;
+            stats.has_last = true;
+        }
+
+        // ---- EKF ----
+        rotating_armor::TrackerDiagnostics diagnostics{};
+        PredictionResult prediction{};
+        if (args.ekf)
+        {
+            extra_bodies.clear();
+            if (args.multi)
+            {
+                std::vector<rotating_armor::MultiTargetTrack> &tracks =
+                    multi_tracker.step(poses, gimbal, time_s, 0.0);
+                // 主目标按"能瞄、够近、够稳"挑：先比状态机，再比离准星的偏角。
+                rotating_armor::MultiTargetTrack *primary = nullptr;
+                double best_score = 1.0e9;
+                for (rotating_armor::MultiTargetTrack &track : tracks)
+                {
+                    if (!track.tracker)
+                        continue;
+                    double score = 0.0;
+                    if (track.diagnostics.phase == rotating_armor::LockPhase::Tracking)
+                        score -= 100.0;
+                    else if (track.result.state == TrackingState::Stable)
+                        score -= 50.0;
+                    if (track.tracker->initialized())
+                    {
+                        const rotating_armor::State &st = track.tracker->ekf().state();
+                        // 近的优先：多目标时最近那辆才是真正要处理的目标。
+                        score += 0.1 * std::hypot(st(0), st(2));
+                    }
+                    else
+                    {
+                        score += 100.0;
+                    }
+                    if (args.multi_primary > 0 && track.diagnostics.target_id == args.multi_primary)
+                        score -= 1000.0;
+                    if (score < best_score)
+                    {
+                        best_score = score;
+                        primary = &track;
+                    }
+                }
+                if (primary != nullptr)
+                {
+                    active_tracker = primary->tracker.get();
+                    prediction = primary->result;
+                    diagnostics = primary->diagnostics;
+                }
+                else
+                {
+                    active_tracker = &tracker;
+                    prediction = PredictionResult{};
+                    diagnostics = rotating_armor::TrackerDiagnostics{};
+                }
+                for (rotating_armor::MultiTargetTrack &track : tracks)
+                {
+                    if (&track == primary || !track.tracker || !track.tracker->initialized())
+                        continue;
+                    rotating_armor::TopDownFrame body;
+                    body.timestamp_s = time_s;
+                    body.has_state = true;
+                    // 没检测的旧轨迹不画模型：否则俯视图上会挂着"没有车却还有建模"。
+                    body.fresh = track.diagnostics.missed_frames <= 0;
+                    body.state = track.tracker->ekf().state();
+                    body.diagnostics = track.diagnostics;
+                    body.result = track.result;
+                    body.gimbal = gimbal;
+                    extra_bodies.push_back(body);
+                }
+                for (rotating_armor::MultiTargetTrack &track : tracks)
+                {
+                    MultiStats &entry = multi_stats[track.track_id];
+                    if (track.diagnostics.target_id > 0)
+                        entry.target_id = track.diagnostics.target_id;
+                    ++entry.frames;
+                    entry.observations = track.observations;
+                    if (track.diagnostics.phase == rotating_armor::LockPhase::Tracking)
+                        ++entry.tracking;
+                    if (track.result.state == TrackingState::Stable)
+                        ++entry.stable;
+                    if (track.tracker && track.tracker->initialized())
+                    {
+                        const rotating_armor::State &st = track.tracker->ekf().state();
+                        entry.cx = st(0);
+                        entry.cy = st(2);
+                        entry.omega = st(7);
+                        entry.radius = st(8);
+                        entry.distance = std::hypot(st(0), st(2));
+                    }
+                }
+                if (args.trace)
+                {
+                    std::printf("[multi] targets=%zu primary=%d\n", tracks.size(),
+                                primary != nullptr ? primary->track_id : 0);
+                }
+            }
+            else
+            {
+                active_tracker = &tracker;
+                prediction = active_tracker->step(poses, gimbal, time_s, 0.0);
+                diagnostics = active_tracker->diagnostics();
+            }
+            final_diagnostics = diagnostics;
+            if (args.web)
+            {
+                const auto &st = active_tracker->ekf().state();
+                WEB_LOG("frame", static_cast<double>(frame_index));
+                WEB_LOG("phase", static_cast<double>(static_cast<int>(diagnostics.phase)));
+                WEB_LOG("tracking", diagnostics.phase == rotating_armor::LockPhase::Tracking ? 1.0 : 0.0);
+                WEB_LOG("omega", st(7));
+                WEB_LOG("radius", st(8));
+                WEB_LOG("nis", diagnostics.last_nis);
+                WEB_LOG("updates", static_cast<double>(diagnostics.updates_this_frame));
+                WEB_LOG("missed", static_cast<double>(diagnostics.missed_frames));
+                WEB_LOG("cx", st(0));
+                WEB_LOG("cy", st(2));
+            }
+            if (args.trace)
+            {
+                const auto &st = active_tracker->ekf().state();
+                std::printf("[trace] f=%d t=%.3f det=%zu init=%d phase=%d id=%d ok=%llu rej=%d miss=%d "
+                            "relock=%d ls=%d omega=%.2f wobs=%+.2f±%.2f n=%d/%d R=%.3f yaw=%.2f mode=%s nis=%.1f why=%s stab=%s gd=%.2f gn=%.0f\n",
+                            frame_index, time_s, poses.size(), static_cast<int>(active_tracker->initialized()),
+                            static_cast<int>(diagnostics.phase), diagnostics.target_id,
+                            static_cast<unsigned long long>(diagnostics.accepted_updates),
+                            diagnostics.rejected_this_frame, diagnostics.missed_frames,
+                            diagnostics.relock_count, diagnostics.lock_samples, st(7),
+                            diagnostics.rate_obs_rad_s, diagnostics.rate_obs_sigma_rad_s,
+                            diagnostics.rate_obs_samples, diagnostics.rate_window_samples,
+                            st(8), st(6), rotating_armor::motionModeName(diagnostics.motion),
+                            diagnostics.last_nis,
+                            diagnostics.last_reject.c_str(), diagnostics.stability.c_str(),
+                            diagnostics.best_gate_distance_m, diagnostics.best_gate_nis);
+                        if (diagnostics.phase == rotating_armor::LockPhase::Tracking)
+                        {
+                            const auto &st = active_tracker->ekf().state();
+                            std::printf("   v=(%.2f,%.2f) c=(%.2f,%.2f)\n", st(1), st(3),
+                                        st(0), st(2));
+                        }
+            }
+        // 模型解释度：观测到的板心到 4 个"模型板位"里最近的那个的距离。
+        // 单看某一块板没意义（4 板对称，槽位标签本来就只能确定到 2pi/N），
+        // 但"每一块观测都能被模型解释"是状态对不对的硬指标：状态错 2R 时
+        // 这个残差就是 0.3 m 量级，状态对时是几厘米。
+        std::vector<double> frame_model_residuals;
+        std::vector<double> frame_aim_candidates;
+        std::vector<double> frame_aim_residuals;
+        if (args.ekf && active_tracker->initialized())
+        {
+            const rotating_armor::State &st = active_tracker->ekf().state();
+            // 先把本帧所有观测转到世界系，供"到期 aim 对账"使用。
+            std::vector<std::pair<int, Eigen::Vector3d>> frame_obs_world;
+            for (const ArmorPose &pose : poses)
+            {
+                if (pose.detection.target_id == 0)
+                {
+                    continue;
+                }
+                frame_obs_world.emplace_back(
+                    pose.detection.target_id,
+                    rotating_armor::gimbalToWorld(gimbal) *
+                        Eigen::Vector3d(pose.position_gimbal_m[0], pose.position_gimbal_m[1],
+                                        pose.position_gimbal_m[2]));
+            }
+            for (auto it = pending_aims.begin(); it != pending_aims.end();)
+            {
+                if (it->t_cmd_s > time_s)
+                {
+                    ++it;
+                    continue;
+                }
+                double best = std::numeric_limits<double>::infinity();
+                for (const auto &obs : frame_obs_world)
+                {
+                    if (it->target_id != 0 && obs.first != it->target_id)
+                    {
+                        continue;
+                    }
+                    best = std::min(best, (obs.second - it->aim_world).norm());
+                }
+                if (std::isfinite(best))
+                {
+                    prediction_errors_m.push_back(best);
+                }
+                it = pending_aims.erase(it);
+            }
+            for (const ArmorPose &pose : poses)
+            {
+                if (pose.detection.target_id == 0 ||
+                    pose.detection.target_id != active_tracker->diagnostics().target_id)
+                {
+                    continue; // 只评估当前跟踪的那辆车
+                }
+                // 观测是云台系的，模型板位是世界系的：必须先转过去再比，
+                // 否则残差里混进了"云台朝向"这一项（v4 里云台几乎朝正前，
+                // 只差 7 mm；换到侧向目标就会凭空多出几厘米）。
+                const Eigen::Vector3d observed =
+                    rotating_armor::gimbalToWorld(gimbal) *
+                    Eigen::Vector3d(pose.position_gimbal_m[0], pose.position_gimbal_m[1],
+                                    pose.position_gimbal_m[2]);
+                double best = std::numeric_limits<double>::infinity();
+                double second = std::numeric_limits<double>::infinity();
+                int best_slot = -1;
+                for (int slot = 0; slot < 4; ++slot)
+                {
+                    const double d =
+                        (observed - rotating_armor::platePosition(st, slot, 4)).norm();
+                    if (d < best)
+                    {
+                        second = best;
+                        best = d;
+                        best_slot = slot;
+                    }
+                    else if (d < second)
+                    {
+                        second = d;
+                    }
+                }
+                if (dump_stream.is_open())
+                {
+                    dump_stream << frame_index << ',' << time_s << ',' << poses.size() << ','
+                                << active_tracker->diagnostics().target_id << ','
+                                << active_tracker->diagnostics().aim_slot << ',' << pose.detection.target_id
+                                << ',' << observed.x() << ',' << observed.y() << ',' << observed.z()
+                                << ',' << best_slot << ',' << best << ',' << second << ','
+                                << st(0) << ',' << st(2) << ',' << st(4) << ','
+                                << st(6) << ',' << st(8) << ','
+                                << rotating_armor::wrapToPi(static_cast<double>(pose.armor_yaw) +
+                                                            static_cast<double>(gimbal.yaw))
+                                << ',' << active_tracker->diagnostics().predicted_aim_world.x()
+                                << ',' << active_tracker->diagnostics().predicted_aim_world.y()
+                                << ',' << active_tracker->diagnostics().predicted_aim_world.z();
+                                {
+                                    // 观测板心投影回像素：用来和 LED 灯条质心对比精度
+                                    // （世界 -> 云台 -> 相机 -> 像素）。
+                                    const Eigen::Vector3d p_gimbal = rotating_armor::toGimbal(gimbal, observed);
+                                    const cv::Vec3d p_camera = gimbalToCameraPoint(
+                                        camera, cv::Vec3d(p_gimbal.x(), p_gimbal.y(), p_gimbal.z()));
+                                    std::vector<cv::Point3d> one{cv::Point3d(p_camera[0], p_camera[1], p_camera[2])};
+                                    std::vector<cv::Point2d> px;
+                                    cv::projectPoints(one, cv::Vec3d(0, 0, 0), cv::Vec3d(0, 0, 0),
+                                                      camera.camera_matrix, cv::noArray(), px);
+                                    dump_stream << ',' << px[0].x << ',' << px[0].y;
+                                }
+                                dump_stream << ',' << active_tracker->diagnostics().stability
+                                            << ',' << active_tracker->diagnostics().updates_this_frame
+                                            << ',' << active_tracker->diagnostics().missed_frames;
+                                // S0：tracker 内部真实使用的法向/槽位 + S1 环序 4 假设代价。
+                                // tyaw 与 oyaw 不同正是"链路某段改坏了法向"的直接证据。
+                                const auto &dg = active_tracker->diagnostics();
+                                dump_stream << ',' << dg.chosen_obs_yaw_rad
+                                            << ',' << (dg.chosen_obs_has_yaw ? 1 : 0)
+                                            << ',' << dg.chosen_slot
+                                            << ',' << dg.ring_obs_count
+                                            << ',' << dg.ring_cost[0] << ',' << dg.ring_cost[1]
+                                            << ',' << dg.ring_cost[2] << ',' << dg.ring_cost[3];
+                                // S2：EKF 转速 + 身份后验运行态。未启用时 idact=0，
+                                // A/B 时能逐帧看出"这帧走的是后验配对还是原贪心路径、
+                                // 枚举了多少种配对、最优后验多强、次优差多少"。
+                                dump_stream << ',' << st(7)
+                                            << ',' << (dg.identity_active ? 1 : 0)
+                                            << ',' << dg.identity_assignment_count
+                                            << ',' << dg.identity_best_posterior
+                                            << ',' << dg.identity_second_posterior
+                                            << ',' << dg.identity_margin_rel
+                                            << '\n';
+                }
+                if (std::isfinite(best))
+                {
+                    frame_model_residuals.push_back(best);
+                }
+                // 只对"当前瞄准的那块板"算残差。min-over-4 对相位转 90 度完全
+                // 不敏感（四块板转到另一块板的位置上，集合不变），所以它看不出
+                // "瞄准点跑到别的板上去了"；要验收瞄准，必须单独看 aim 板。
+                // 用"实际发布出去的瞄准点"（diagnostics().predicted_aim_world），
+                // 而不是再用 EKF 状态重算一遍：后者会把 buildResult 里的
+                // 瞄准点后处理（观测直用 / 可见性窗口）全部绕过。
+                // 同帧可能有两块板同时可见（实拍 v4 自转车 209/742 帧）：瞄准点只
+                // 可能落在其中一块上，所以一帧只取"离瞄准点最近的那个观测"作为
+                // 该帧的瞄准残差；否则另一块板（离 0.35 m）会把中位数抬到无意义。
+                const Eigen::Vector3d &aim_world = active_tracker->diagnostics().predicted_aim_world;
+                if (aim_world.allFinite() && aim_world.squaredNorm() > 1.0e-6)
+                {
+                    frame_aim_candidates.push_back((observed - aim_world).norm());
+                }
+            }
+            if (!frame_aim_candidates.empty())
+            {
+                const double best_aim =
+                    *std::min_element(frame_aim_candidates.begin(), frame_aim_candidates.end());
+                frame_aim_residuals.push_back(best_aim);
+                if (args.web)
+                {
+                    WEB_LOG("aim_err_mm", best_aim * 1000.0);
+                }
+                const std::size_t measured = active_tracker->diagnostics().updates_this_frame > 0 ? 0 : 1;
+                aim_slot_by_measurement[measured].push_back(best_aim);
+                ++aim_frames_by_measurement[measured];
+            }
+        }
+
+            if (std::getenv("DUMP_STATE") != nullptr && frame_index % 20 == 0)
+            {
+                const auto &ekf_state = active_tracker->ekf().state();
+                std::printf("[state] 帧 %d t=%.3f z=%.4f h=%.4f R=%.4f omega=%.3f cx=%.3f cy=%.3f\n",
+                            frame_index, time_s, ekf_state(4), ekf_state(10), ekf_state(8),
+                            ekf_state(7), ekf_state(0), ekf_state(2));
+            }
+            final_prediction = prediction;
+            // accepted_updates 会在 dropTarget()->reset() 里清零，直接取末值会
+            // 只统计最后一段（v1 有 1 次重锁，曾把它显示成"接收 84"而实际每帧
+            // 都在更新）；这里按帧累计本帧真正吃进去的更新数。
+            ekf_accepted += diagnostics.updates_this_frame;
+            ekf_rejected += diagnostics.rejected_this_frame;
+            if (diagnostics.phase == rotating_armor::LockPhase::Tracking)
+            {
+                if (ekf_first_stable_frame < 0)
+                    ekf_first_stable_frame = frame_index;
+                if (prediction.state == TrackingState::Stable)
+                    ++ekf_stable_frames;
+            }
+            if (diagnostics.relock_count > ekf_relock_count)
+                ekf_relock_count = diagnostics.relock_count;
+            // 单板重锚是"硬对齐"：每次都把状态直接搬到观测上，观感就是
+            // "转一部分又卡回去"。它和 relock_count 一样会在 reset 里清零，
+            // 所以按单帧增量累加。
+            if (diagnostics.single_plate_realigns > last_realigns)
+                ekf_realigns += diagnostics.single_plate_realigns - last_realigns;
+            last_realigns = diagnostics.single_plate_realigns;
+            for (double r : frame_model_residuals)
+            {
+                aim_errors_m.push_back(r);
+            }
+            for (double r : frame_aim_residuals)
+            {
+                aim_slot_errors_m.push_back(r);
+            }
+            {
+                const int phase_index = std::clamp(static_cast<int>(diagnostics.phase), 0, 2);
+                ++frames_by_phase[static_cast<std::size_t>(phase_index)];
+                for (double r : frame_aim_residuals)
+                {
+                    aim_slot_by_phase[static_cast<std::size_t>(phase_index)].push_back(r);
+                    ++aim_frames_by_phase[static_cast<std::size_t>(phase_index)];
+                }
+                const double omega_abs = std::fabs(active_tracker->ekf().state()(7));
+                const int omega_bucket = omega_abs < 1.0 ? 0 : (omega_abs < 5.0 ? 1 : (omega_abs < 15.0 ? 2 : 3));
+                for (double r : frame_aim_residuals)
+                {
+                    aim_slot_by_omega[static_cast<std::size_t>(omega_bucket)].push_back(r);
+                    ++aim_frames_by_omega[static_cast<std::size_t>(omega_bucket)];
+                }
+            }
+            if (prediction.state != TrackingState::NoTarget &&
+                std::isfinite(prediction.distance_m) && prediction.distance_m > 0.0f)
+            {
+                const double yaw = prediction.target_yaw;
+                const double pitch = prediction.target_pitch;
+                const double range = prediction.distance_m;
+                AimTrace trace;
+                trace.t_cmd_s = time_s + static_cast<double>(args.bias_s) + 0.0;
+                trace.aim_world = Eigen::Vector3d(range * std::cos(pitch) * std::cos(yaw),
+                                                  range * std::cos(pitch) * std::sin(yaw),
+                                                  range * std::sin(pitch));
+                trace.flight_s = static_cast<double>(range) / 30.0; // 弹速 30 m/s
+                trace.target_id = prediction.target_id;
+                trace.omega_rad_s = active_tracker->ekf().state()(7);
+                pending_aims.push_back(trace);
+                all_aims.push_back(trace);
+            }
+            const int ekf_id = prediction.target_id;
+            if (last_ekf_id != 0 && ekf_id != 0 && ekf_id != last_ekf_id)
+            {
+                ++ekf_target_switches;
+                std::cout << "[EKF] 帧 " << frame_index << " 目标 " << last_ekf_id
+                          << " -> " << ekf_id << "\n";
+            }
+            if (ekf_id != 0)
+                last_ekf_id = ekf_id;
+            const std::string phase = phaseName(diagnostics.phase);
+            if (phase != last_phase)
+            {
+                std::cout << "[EKF] 帧 " << frame_index << " 阶段 " << last_phase << " -> "
+                          << phase << "（样本 " << diagnostics.lock_samples
+                          << "，半径 " << (diagnostics.radius_from_data ? "估" : "先验")
+                          << " " << diagnostics.locked_radius_m
+                          << "，omega " << diagnostics.locked_spin_rad_s
+                          << " 误差 " << diagnostics.lock_rate_error_rad_s
+                          << "，来源 " << (diagnostics.lock_spin_from_positions ? "位置圆拟合" : "法向序列")
+                          << "，圆R " << diagnostics.lock_circle_radius_m
+                          << " 残差 " << diagnostics.lock_circle_residual_m
+                          << " 有效步 " << diagnostics.lock_step_ratio << "）\n";
+                last_phase = phase;
+            }
+            if (diagnostics.last_reject != last_reject)
+            {
+                std::cout << "[EKF] 帧 " << frame_index << " 拒绝原因: "
+                          << diagnostics.last_reject << "\n";
+                last_reject = diagnostics.last_reject;
+            }
+        }
+
+        // ---- CSV：一行一个观测（多目标时同一帧多行）----
+        if (csv.is_open())
+        {
+            for (const ArmorPose &pose : poses)
+            {
+                const cv::Vec3d &p = pose.position_camera_m;
+                const double distance = std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+                csv << frame_index << ',' << time_s << ',' << pose.detection.target_id << ','
+                    << (pose.detection.size == ArmorSize::Large ? "L" : "S") << ','
+                    << pose.detection.confidence << ',' << p[0] << ',' << p[1] << ',' << p[2]
+                    << ',' << distance << ','
+                    << pose.armor_yaw * 180.0 / 3.141592653589793 << ','
+                    << pose.reprojection_error << ','
+                    // 检测框的像素宽高（诊断用：判断 PnP 深度是否被框大小抖动带偏）
+                    << (cv::norm(pose.detection.corners[1] - pose.detection.corners[0])) << ','
+                    << (cv::norm(pose.detection.corners[3] - pose.detection.corners[0])) << ',' << motion
+                    << ',';
+                for (int c = 0; c < 4; ++c)
+                {
+                    csv << pose.detection.corners[c].x << ',' << pose.detection.corners[c].y << ',';
+                }
+                if (args.ekf)
+                {
+                    csv << phaseName(diagnostics.phase) << ',' << stateName(prediction.state) << ','
+                        << diagnostics.aim_slot << ',' << static_cast<int>(prediction.target_id) << ','
+                        << prediction.target_yaw * 180.0 / 3.141592653589793 << ','
+                        << prediction.target_pitch * 180.0 / 3.141592653589793 << ','
+                        << prediction.distance_m << ',' << prediction.fire_allowed << '\n';
+                }
+                else
+                {
+                    csv << ",,,,,,,\n";
+                }
+            }
+        }
+
+            // ---- 模型板投影：可视化验收的核心 ----
+            // 把 EKF 状态推出的 4 块板（世界系）转回相机系再投影到图像：
+            // 模型板压在真实板上 = 状态对；偏出去多少，眼睛直接量。
+            if (args.ekf && diagnostics.phase == rotating_armor::LockPhase::Tracking)
+            {
+                const auto &ekf_state = active_tracker->ekf().state();
+                std::vector<cv::Point3d> model_points;
+                for (int slot = 0; slot < 4; ++slot)
+                {
+                    const Eigen::Vector3d p_world = rotating_armor::platePosition(ekf_state, slot, 4);
+                    const Eigen::Vector3d p_gimbal = rotating_armor::toGimbal(gimbal, p_world);
+                    const cv::Vec3d p_camera = gimbalToCameraPoint(
+                        camera, cv::Vec3d(p_gimbal.x(), p_gimbal.y(), p_gimbal.z()));
+                    model_points.emplace_back(p_camera[0], p_camera[1], p_camera[2]);
+                }
+                std::vector<cv::Point2d> projected;
+                cv::projectPoints(model_points, cv::Vec3d(0, 0, 0), cv::Vec3d(0, 0, 0),
+                                  camera.camera_matrix, cv::noArray(), projected);
+                // 四块模型板按"板面切线"画成短条：条压在亮着的板上 = 状态对；
+                // 偏出多少，用眼睛就能量。瞄准板画黄、其它三块画蓝细条。
+                // 一辆车的四块模型板 + 车心；aim_slot < 0 表示不标瞄准板。
+                const auto draw_body = [&](const rotating_armor::State &st, int aim_slot,
+                                           cv::Scalar plate_color, cv::Scalar aim_color,
+                                           int thickness, cv::Scalar center_color,
+                                           const rotating_armor::RotatingArmorTracker *owner) {
+                    rotating_armor::State st_off = st;
+                    st_off(6) = st(6) + g_model_phase_off;
+                    for (int slot = 0; slot < 4; ++slot)
+                    {
+                        const double phase = st_off(6) + 2.0 * 3.141592653589793 * slot / 4.0;
+                        const Eigen::Vector3d tangent(-std::sin(phase), std::cos(phase), 0.0);
+                        Eigen::Vector3d center_world =
+                            rotating_armor::platePosition(st_off, slot, 4);
+                        // 实拍里四块板不在同一高度：补上每个槽位学到的 z 偏移，
+                        // 模型板才会压在真实板上（这只影响显示）。
+                        if (owner != nullptr)
+                        {
+                            center_world.z() += owner->slotZOffset(slot);
+                            const double dr = owner->slotRadiusOffset(slot);
+                            const double dph = owner->slotAngleOffset(slot);
+                            const Eigen::Vector2d dir(std::cos(phase + dph), std::sin(phase + dph));
+                            center_world.head<2>() -= dr * dir;
+                        }
+                        std::vector<cv::Point3d> ends;
+                        bool in_front = true;
+                        for (double sign : {-1.0, 1.0})
+                        {
+                            const Eigen::Vector3d p_world =
+                                center_world + sign * 0.0675 * tangent;
+                            const Eigen::Vector3d p_gimbal =
+                                rotating_armor::toGimbal(gimbal, p_world);
+                            const cv::Vec3d p_camera = gimbalToCameraPoint(
+                                camera, cv::Vec3d(p_gimbal.x(), p_gimbal.y(), p_gimbal.z()));
+                            if (!(p_camera[2] > 0.3) || p_camera[2] > 20.0)
+                            {
+                                in_front = false;
+                                break;
+                            }
+                            ends.emplace_back(p_camera[0], p_camera[1], p_camera[2]);
+                        }
+                        if (!in_front)
+                            continue;
+                        std::vector<cv::Point2d> ends_px;
+                        cv::projectPoints(ends, cv::Vec3d(0, 0, 0), cv::Vec3d(0, 0, 0),
+                                          camera.camera_matrix, cv::noArray(), ends_px);
+                        const bool is_aim = slot == aim_slot;
+                        cv::line(frame, ends_px[0], ends_px[1],
+                                 is_aim ? aim_color : plate_color,
+                                 is_aim ? thickness + 1 : thickness, cv::LINE_AA);
+                    }
+                    if (center_color[0] >= 0.0)
+                    {
+                        // 中心抬到四块板高偏移的均值上：state(4) 本身跟着"最近
+                        // 更新的那块板"的 z 走，直接用它会画出一个随板上下跳的白叉。
+                        const Eigen::Vector3d c_world(
+                            st(0), st(2),
+                            st(4) + (active_tracker != nullptr ? active_tracker->slotZOffsetMean() : 0.0));
+                        const Eigen::Vector3d c_gimbal = rotating_armor::toGimbal(gimbal, c_world);
+                        const cv::Vec3d c_camera = gimbalToCameraPoint(
+                            camera, cv::Vec3d(c_gimbal.x(), c_gimbal.y(), c_gimbal.z()));
+                        if (c_camera[2] > 0.3 && c_camera[2] < 20.0)
+                        {
+                            std::vector<cv::Point2d> c_px;
+                            cv::projectPoints(std::vector<cv::Point3d>{cv::Point3d(
+                                                  c_camera[0], c_camera[1], c_camera[2])},
+                                              cv::Vec3d(0, 0, 0), cv::Vec3d(0, 0, 0),
+                                              camera.camera_matrix, cv::noArray(), c_px);
+                            cv::drawMarker(frame, c_px[0], center_color, cv::MARKER_CROSS, 14, 1);
+                        }
+                    }
+                };
+                // 只有已经锁定（Tracking 且 EKF 初始化）时才画模型板：collecting
+                // 阶段 ekf().state() 还是零向量（R=0），四块板会全塌在世界原点，
+                // 投影出一堆与真实板无关的线段——看起来就像"蓝板和绿板对不上"。
+                // 检测点余辉：绿框每帧都在跳（单板 PnP 有 5–8 cm 抖动），把最近
+                // 十几帧的检测中心画成渐隐小点，一眼能看出模型板是不是落在这一团
+                // 点的中心——这比"某一帧绿框偏了几十像素"更能说明问题。
+                static std::map<int, std::deque<cv::Point2f>> detection_trail;
+                for (const ArmorPose &pose_t : poses)
+                {
+                    if (pose_t.detection.corners.empty())
+                    {
+                        continue;
+                    }
+                    cv::Point2f center(0.0f, 0.0f);
+                    for (const cv::Point2f &corner : pose_t.detection.corners)
+                    {
+                        center += corner;
+                    }
+                    center /= static_cast<float>(pose_t.detection.corners.size());
+                    std::deque<cv::Point2f> &trail = detection_trail[pose_t.detection.target_id];
+                    trail.push_back(center);
+                    while (trail.size() > 18)
+                    {
+                        trail.pop_front();
+                    }
+                }
+                for (const auto &entry : detection_trail)
+                {
+                    if (entry.first != diagnostics.target_id)
+                    {
+                        continue;
+                    }
+                    const std::size_t total = entry.second.size();
+                    for (std::size_t i = 0; i < total; ++i)
+                    {
+                        const double fade = static_cast<double>(i + 1) / static_cast<double>(total);
+                        const cv::Scalar color(80.0 * fade + 40.0, 200.0 * fade + 30.0,
+                                               120.0 * fade + 30.0);
+                        cv::circle(frame, entry.second[i], 2, color, -1, cv::LINE_AA);
+                    }
+                }
+                if (diagnostics.phase == rotating_armor::LockPhase::Tracking &&
+                    active_tracker->initialized())
+                {
+                    if (std::getenv("PIX_DEBUG") != nullptr)
+                    {
+                        for (const ArmorPose &pose_x : poses)
+                        {
+                            if (pose_x.detection.target_id != diagnostics.target_id ||
+                                pose_x.detection.corners.empty())
+                            {
+                                continue;
+                            }
+                            const Eigen::Vector3d obs_world(pose_x.position_gimbal_m[0],
+                                                            pose_x.position_gimbal_m[1],
+                                                            pose_x.position_gimbal_m[2]);
+                            // 只统计"真的属于这条轨迹"的观测：同帧可能有两块同 id 的板
+                            // 属于两台不同的车，把别人的板算进来会让 PIX 中位数变成两车
+                            // 间距（0.4~1 m，即 100 px 量级），看着像模型全错。
+                            int slot_best = -1;
+                            double d_best = 1.0e9;
+                            Eigen::Vector3d best_p = Eigen::Vector3d::Zero();
+                            rotating_armor::State ekf_off = ekf_state;
+                            ekf_off(6) = ekf_state(6) + g_model_phase_off;
+                            for (int slot = 0; slot < 4; ++slot)
+                            {
+                                Eigen::Vector3d p = rotating_armor::platePosition(ekf_off, slot, 4);
+                                p.z() += active_tracker->slotZOffset(slot);
+                                {
+                                    const double dr = active_tracker->slotRadiusOffset(slot);
+                                    const double dph = active_tracker->slotAngleOffset(slot);
+                                    const double ph = ekf_off(6) + 2.0 * 3.141592653589793 * slot / 4.0 + dph;
+                                    p.head<2>() -= dr * Eigen::Vector2d(std::cos(ph), std::sin(ph));
+                                }
+                                const double d = (p - obs_world).norm();
+                                if (d < d_best)
+                                {
+                                    d_best = d;
+                                    slot_best = slot;
+                                    best_p = p;
+                                }
+                            }
+                            const Eigen::Vector3d g = rotating_armor::toGimbal(gimbal, best_p);
+                            const cv::Vec3d c_cam =
+                                gimbalToCameraPoint(camera, cv::Vec3d(g[0], g[1], g[2]));
+                            std::vector<cv::Point3d> pts{cv::Point3d(c_cam[0], c_cam[1], c_cam[2])};
+                            std::vector<cv::Point2d> px;
+                            cv::projectPoints(pts, cv::Vec3d(0, 0, 0), cv::Vec3d(0, 0, 0),
+                                              camera.camera_matrix, cv::noArray(), px);
+                            cv::Point2f box(0.0f, 0.0f);
+                            for (const cv::Point2f &corner : pose_x.detection.corners)
+                            {
+                                box += corner;
+                            }
+                            box /= static_cast<float>(pose_x.detection.corners.size());
+                            // d_best 是这块观测到模型最近板的 3-D 距离。超过 0.25 m
+                            // 就不是"同一条轨迹上的这块板"，多半是同 id 的另一台车，
+                            // 单独记成 [pixx]，不计入 [pix] 的统计。
+                            if (d_best > 0.25)
+                            {
+                                // 单独一行、单独一套格式参数：混用同一份参数列表会把
+                                // 浮点塞进 %d，print 出来是 -544.9 这种垃圾值。
+                                std::fprintf(stderr, "[pixx] f=%d id=%d res=%.3f\n",
+                                             frame_index, pose_x.detection.target_id, d_best);
+                                continue;
+                            }
+                            // 法向反推车心：c = p - R*n（n = 板外法向，云台 yaw=0 时与
+                            // position_gimbal_m 同系，world 与之只差一个绕 z 的旋转）。
+                            double cn_x = 0.0;
+                            double cn_y = 0.0;
+                            {
+                                const Eigen::Vector3d p_g(pose_x.position_gimbal_m[0],
+                                                          pose_x.position_gimbal_m[1],
+                                                          pose_x.position_gimbal_m[2]);
+                                const Eigen::Vector3d n_g(pose_x.normal_gimbal[0],
+                                                          pose_x.normal_gimbal[1],
+                                                          pose_x.normal_gimbal[2]);
+                                const double nn = std::hypot(n_g.x(), n_g.y());
+                                if (nn > 1.0e-6)
+                                {
+                                    const double r_now = ekf_state(8);
+                                    cn_x = p_g.x() - r_now * n_g.x() / nn;
+                                    cn_y = p_g.y() - r_now * n_g.y() / nn;
+                                }
+                            }
+                            const double nd_dbg =
+                                pose_x.normal_gimbal[0] * pose_x.position_gimbal_m[0] +
+                                pose_x.normal_gimbal[1] * pose_x.position_gimbal_m[1];
+                            const int aim_slot_dbg = diagnostics.aim_slot;
+                            const double aim_period_dbg = 2.0 * 3.141592653589793 / 4.0;
+                            const double aim_phase_dbg =
+                                ekf_state(6) + aim_period_dbg * std::max(aim_slot_dbg, 0);
+                            const double aim_px_dbg = ekf_state(0) - ekf_state(8) * std::cos(aim_phase_dbg);
+                            const double aim_py_dbg = ekf_state(2) - ekf_state(8) * std::sin(aim_phase_dbg);
+                            // 相位残差：观测板相对车心的角度 vs 最近那块模型板的角度。
+                            // 只差 ±90° 折叠以内的部分——折到 ±45°。用来区分
+                            // "槽位选错（跳一格，约 ±90°）" 和 "omega 有偏（缓慢漂移）"。
+                            double aerr_dbg = 0.0;
+                            {
+                                const double period = 2.0 * 3.141592653589793 / 4.0;
+                                const double a_obs = std::atan2(
+                                    pose_x.position_gimbal_m[1] - ekf_state(2),
+                                    pose_x.position_gimbal_m[0] - ekf_state(0));
+                                const double phase_obs = a_obs - 3.141592653589793;
+                                const double phase_model =
+                                    ekf_state(6) + period * std::max(slot_best, 0);
+                                double diff = phase_obs - phase_model;
+                                while (diff > 3.141592653589793) diff -= 2.0 * 3.141592653589793;
+                                while (diff < -3.141592653589793) diff += 2.0 * 3.141592653589793;
+                                // 折到 ±period/2，剩下的才是真正的相位误差
+                                while (diff > period * 0.5) diff -= period;
+                                while (diff < -period * 0.5) diff += period;
+                                aerr_dbg = diff * 180.0 / 3.141592653589793;
+                            }
+                            const double aim_dc_dbg = std::hypot(ekf_state(0), ekf_state(2));
+                            const double aim_dp_dbg = std::hypot(aim_px_dbg, aim_py_dbg);
+                            std::fprintf(stderr,
+                                         "[pix] f=%d id=%d dx=%+.1f dy=%+.1f d=%.1f slot=%d "
+                                         "bx=%.0f by=%.0f u=%d rj=%d nis=%.1f gd=%.3f "
+                                         "c=(%.2f,%.2f,%.2f) R=%.3f yaw=%+.2f om=%+.2f lh=(%+.3f,%+.3f) cn=(%.2f,%.2f) p=(%.2f,%.2f) as=%d dc=%.3f dp=%.3f nd=%+.3f ae=%+.1f\n",
+                                         frame_index, pose_x.detection.target_id,
+                                         px[0].x - box.x, px[0].y - box.y,
+                                         cv::norm(cv::Point2f(px[0]) - box), slot_best, box.x, box.y,
+                                         diagnostics.updates_this_frame,
+                                         diagnostics.rejected_this_frame,
+                                         diagnostics.last_nis,
+                                         diagnostics.best_gate_distance_m,
+                                         ekf_state(0), ekf_state(2), ekf_state(4), ekf_state(8),
+                                         ekf_state(6), ekf_state(7),
+                                         ekf_state(9), ekf_state(10),
+                                         cn_x, cn_y,
+                                         pose_x.position_gimbal_m[0], pose_x.position_gimbal_m[1],
+                                         aim_slot_dbg, aim_dc_dbg, aim_dp_dbg, nd_dbg,
+                                         aerr_dbg);
+                        }
+                    }
+                    if (!args.detected_body)
+                    draw_body(ekf_state, diagnostics.aim_slot, cv::Scalar(235, 120, 60),
+                              cv::Scalar(0, 200, 255), 2, cv::Scalar(-1, -1, -1),
+                              active_tracker);
+                    // 把"整车模型认为的旋转圆"投到图上：圆心 = 状态里的 (cx, cy, z)，
+                    // 半径 = 状态里的 R。用户说的"绿色板旋转圆心偏上"可以直接用它
+                    // 对照：这个圈应该正好套住绿色检测框转一圈扫过的那些位置。
+                    {
+                        std::vector<cv::Point> ring;
+                        bool ring_ok = true;
+                        const double ring_r = ekf_state(8);
+                        for (int k = 0; k <= 24; ++k)
+                        {
+                            const double th = 2.0 * 3.141592653589793 * k / 24.0;
+                            const Eigen::Vector3d p_world(
+                                ekf_state(0) + ring_r * std::cos(th),
+                                ekf_state(2) + ring_r * std::sin(th),
+                                ekf_state(4) + (active_tracker != nullptr
+                                                    ? active_tracker->slotZOffsetMean()
+                                                    : 0.0));
+                            const Eigen::Vector3d p_gimbal = rotating_armor::toGimbal(gimbal, p_world);
+                            const cv::Vec3d p_camera = gimbalToCameraPoint(
+                                camera, cv::Vec3d(p_gimbal.x(), p_gimbal.y(), p_gimbal.z()));
+                            if (!(p_camera[2] > 0.3))
+                            {
+                                ring_ok = false;
+                                break;
+                            }
+                            std::vector<cv::Point3d> one{cv::Point3d(p_camera[0], p_camera[1], p_camera[2])};
+                            std::vector<cv::Point2d> one_px;
+                            cv::projectPoints(one, cv::Vec3d(0, 0, 0), cv::Vec3d(0, 0, 0),
+                                              camera.camera_matrix, cv::noArray(), one_px);
+                            ring.emplace_back(cv::Point(cvRound(one_px[0].x), cvRound(one_px[0].y)));
+                        }
+                        if (ring_ok && ring.size() > 2)
+                        {
+                            cv::polylines(frame, std::vector<std::vector<cv::Point>>{ring}, false,
+                                          cv::Scalar(255, 200, 0), 1, cv::LINE_AA);
+                        }
+                    }
+                }
+                // 多目标：其它车也画出来（细线、紫灰），一眼看出"两台都被跟住了"。
+                for (const rotating_armor::TopDownFrame &body : extra_bodies)
+                {
+                    if (!args.detected_body)
+                    draw_body(body.state, -1, cv::Scalar(160, 110, 160), cv::Scalar(160, 110, 160),
+                              1, cv::Scalar(150, 60, 150), nullptr);
+                }
+                // 只把"跟踪中的那块板"(aim slot) 画实：另外 3 块是模型外推到车体
+                // 背面的，本来就看不见，画出来会像"满天飞的点"，容易误判成状态错了。
+                // LED 灯条独立相位量测：两灯条连线 = 板面内水平轴，与竖直轴叉乘得法向。
+                if (args.led_yaw && diagnostics.aim_slot >= 0 && diagnostics.aim_slot < 4)
+                {
+                    const cv::Point2d aim_px = projected[diagnostics.aim_slot];
+                    const double depth = model_points[diagnostics.aim_slot].z;
+                    if (aim_px.x > 0.0 && aim_px.y > 0.0 && depth > 0.3 && depth < 20.0 &&
+                        !camera.camera_matrix.empty())
+                    {
+                        const std::vector<LedArmorMeasurement> leds = detect_led_armors(frame, args.enemy);
+                        const LedArmorMeasurement *best_led = nullptr;
+                        double best_px = 70.0;
+                        for (const LedArmorMeasurement &led : leds)
+                        {
+                            const double d = cv::norm(led.center - cv::Point2f(static_cast<float>(aim_px.x),
+                                                                              static_cast<float>(aim_px.y)));
+                            if (d < best_px)
+                            {
+                                best_px = d;
+                                best_led = &led;
+                            }
+                        }
+                        if (best_led != nullptr)
+                        {
+                            const cv::Mat k_inv = camera.camera_matrix.inv();
+                            auto back_project = [&](const cv::Point2f &px) {
+                                cv::Mat ray = k_inv * cv::Mat(cv::Vec3d(px.x, px.y, 1.0));
+                                const double scale = depth / ray.at<double>(2);
+                                const cv::Vec3d p_camera(ray.at<double>(0) * scale,
+                                                         ray.at<double>(1) * scale, depth);
+                                // 相机 -> 云台：p_gimbal = R * p_camera + t
+                                cv::Vec3d p_gimbal = p_camera;
+                                if (!camera.translation_camera_to_gimbal.empty())
+                                {
+                                    for (int i = 0; i < 3; ++i)
+                                    {
+                                        p_gimbal[i] += camera.translation_camera_to_gimbal.at<double>(i);
+                                    }
+                                }
+                                const cv::Mat p_g = camera.rotation_camera_to_gimbal * cv::Mat(p_gimbal);
+                                return rotating_armor::toWorld(
+                                    gimbal, Eigen::Vector3d(p_g.at<double>(0), p_g.at<double>(1),
+                                                            p_g.at<double>(2)));
+                            };
+                            const Eigen::Vector3d bar_l = back_project(best_led->left_bar);
+                            const Eigen::Vector3d bar_r = back_project(best_led->right_bar);
+                            Eigen::Vector3d baseline = bar_r - bar_l;
+                            baseline.z() = 0.0;
+                            if (baseline.norm() > 1e-6)
+                            {
+                                baseline.normalize();
+                                Eigen::Vector3d normal =
+                                    baseline.cross(Eigen::Vector3d(0.0, 0.0, 1.0));
+                                const Eigen::Vector3d plate_center =
+                                    rotating_armor::platePosition(active_tracker->ekf().state(),
+                                                                  diagnostics.aim_slot, 4);
+                                const Eigen::Vector3d camera_world =
+                                    rotating_armor::toWorld(gimbal, Eigen::Vector3d::Zero());
+                                if (normal.dot(camera_world - plate_center) < 0.0)
+                                {
+                                    normal = -normal;
+                                }
+                                const double led_yaw_world = std::atan2(normal.y(), normal.x());
+                                if (active_tracker->applyPhaseMeasurement(led_yaw_world, args.led_sigma))
+                                {
+                                    ++led_yaw_updates;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                for (int slot = 0; slot < 4; ++slot)
+                {
+                    if (slot == diagnostics.aim_slot)
+                    {
+                        continue;
+                    }
+                    cv::drawMarker(frame, projected[slot], cv::Scalar(120, 120, 120),
+                                   cv::MARKER_TILTED_CROSS, 8, 1);
+                }
+                if (diagnostics.aim_slot >= 0 && diagnostics.aim_slot < 4)
+                {
+                    // 瞄准点用颜色区分可信度：
+                    //   绿实心 = 锁定且本帧刚用真实观测更新过（稳）；
+                    //   橙空心 = 锁定但本帧没有观测，靠模型外推（预测）；
+                    //   灰     = 未锁定/刚起步，只有先验，别当真。
+                    const bool tracking = diagnostics.phase == rotating_armor::LockPhase::Tracking;
+                    const bool measured = tracking && diagnostics.updates_this_frame > 0;
+                    cv::Scalar color(150, 150, 150);
+                    const char *label = "PRED";
+                    if (measured)
+                    {
+                        color = cv::Scalar(0, 255, 0);
+                        label = "AIM";
+                    }
+                    else if (tracking)
+                    {
+                        color = cv::Scalar(0, 170, 255);
+                        label = "AIM-P";
+                    }
+                    const cv::Point2d p = projected[diagnostics.aim_slot];
+                    // 提前量可视化：白色细十字 = 模型此刻的板心（不前推），
+                    // 连线指向 AIM 圈 = 外推到开火时刻的瞄准点。高速自转时
+                    // 两者本来就会差出 ω·(bias+latency)·R，不是画错。
+                    const Eigen::Vector3d plate_now =
+                        rotating_armor::platePosition(ekf_state, diagnostics.aim_slot, 4);
+                    const Eigen::Vector3d g_now = rotating_armor::toGimbal(gimbal, plate_now);
+                    const cv::Vec3d c_now = gimbalToCameraPoint(
+                        camera, cv::Vec3d(g_now.x(), g_now.y(), g_now.z()));
+                    std::vector<cv::Point2d> now_proj;
+                    cv::projectPoints(std::vector<cv::Point3d>{cv::Point3d(
+                                          c_now[0], c_now[1], c_now[2])},
+                                      cv::Vec3d(0, 0, 0), cv::Vec3d(0, 0, 0),
+                                      camera.camera_matrix, cv::noArray(), now_proj);
+                    const cv::Point2d q = now_proj[0];
+                    const double lead_px = cv::norm(p - q);
+                    if (lead_px > 1.5)
+                    {
+                        cv::drawMarker(frame, q, cv::Scalar(255, 255, 255),
+                                       cv::MARKER_TILTED_CROSS, 10, 1);
+                        cv::line(frame, q, p, cv::Scalar(200, 200, 200), 1);
+                    }
+                    cv::circle(frame, p, 10, color, measured ? -1 : 2);
+                    char aim_text[64];
+                    std::snprintf(aim_text, sizeof(aim_text), "%s lead %.0fpx", label, lead_px);
+                    cv::putText(frame, aim_text, p + cv::Point2d(13, -13),
+                                cv::FONT_HERSHEY_SIMPLEX, 0.55, color, 2);
+                }
+                // 车体中心
+                // 状态排布是 [x, vx, y, vy, z, vz, theta, omega, R]，中心是 (0,2,4)。
+                // 之前取 head<3>() 等于拿 (x, vx, y) 当中心，十字会画到图像下方去。
+                const Eigen::Vector3d c_world(ekf_state(0), ekf_state(2), ekf_state(4));
+                const Eigen::Vector3d c_gimbal = rotating_armor::toGimbal(gimbal, c_world);
+                const cv::Vec3d c_camera =
+                    gimbalToCameraPoint(camera, cv::Vec3d(c_gimbal.x(), c_gimbal.y(), c_gimbal.z()));
+                std::vector<cv::Point2d> c_proj;
+                cv::projectPoints(std::vector<cv::Point3d>{cv::Point3d(c_camera[0], c_camera[1],
+                                                                      c_camera[2])},
+                                  cv::Vec3d(0, 0, 0), cv::Vec3d(0, 0, 0), camera.camera_matrix,
+                                  cv::noArray(), c_proj);
+                cv::drawMarker(frame, c_proj[0], cv::Scalar(255, 0, 255), cv::MARKER_CROSS, 20, 2);
+            }
+        // ---- 俯视图：把 EKF 状态/诊断 + 本帧实测板画成一张上帝视角图 ----
+        if (topdown_enabled)
+        {
+            rotating_armor::TopDownFrame topdown_frame;
+            topdown_frame.timestamp_s = time_s;
+            topdown_frame.has_state = active_tracker->initialized();
+            if (topdown_frame.has_state)
+                topdown_frame.state = active_tracker->ekf().state();
+            topdown_frame.diagnostics = diagnostics;
+            topdown_frame.result = prediction;
+            topdown_frame.gimbal = gimbal;
+            const Eigen::Matrix3d gimbal_to_world = rotating_armor::gimbalToWorld(gimbal);
+            for (const ArmorPose &pose : poses)
+            {
+                if (pose.detection.target_id == 0)
+                    continue;
+                rotating_armor::TopDownObservation observation;
+                observation.position = gimbal_to_world *
+                                       Eigen::Vector3d(pose.position_gimbal_m[0],
+                                                       pose.position_gimbal_m[1],
+                                                       pose.position_gimbal_m[2]);
+                observation.normal_yaw =
+                    rotating_armor::wrapToPi(pose.armor_yaw + gimbal.yaw);
+                observation.target_id = pose.detection.target_id;
+                topdown_frame.observations.push_back(observation);
+            }
+            const cv::Mat canvas = topdown_view.render(topdown_frame, extra_bodies).clone();
+            if (!args.topdown_out.empty())
+            {
+                char path[512];
+                std::snprintf(path, sizeof(path), "%s/t%06d.png", args.topdown_out.c_str(),
+                              frame_index);
+                cv::imwrite(path, canvas);
+            }
+            if (show)
+                cv::imshow(topdown_window, canvas);
+        }
+
+        // ---- 落盘标注帧（给报告/答辩留证据）----
+        if (args.dump_every > 0 && frame_index % args.dump_every == 0)
+        {
+            std::error_code mkdir_error;
+            std::filesystem::create_directories("build/replay_marks", mkdir_error);
+            cv::Mat marked = frame.clone();
+            drawDetections(marked, detections);
+            char line[256];
+            std::snprintf(line, sizeof(line), "frame %d  t=%.2fs  det=%d  motion=%.1f",
+                          frame_index, time_s, static_cast<int>(detections.size()), motion);
+            cv::putText(marked, line, cv::Point(12, 40), cv::FONT_HERSHEY_SIMPLEX, 1.0,
+                        cv::Scalar(0, 255, 255), 2);
+            char path[96];
+            std::snprintf(path, sizeof(path), "build/replay_marks/f%06d.png", frame_index);
+            cv::imwrite(path, marked);
+        }
+
+        // ---- 显示 ----
+        if (show)
+        {
+            drawDetections(frame, detections);
+            char line[256];
+            std::snprintf(line, sizeof(line), "frame %d  t=%.2fs  det=%d  motion=%.1f  %.1f+%.1fms",
+                          frame_index, time_s, static_cast<int>(detections.size()), motion,
+                          detect_ms, solve_ms);
+            cv::putText(frame, line, cv::Point(12, 34), cv::FONT_HERSHEY_SIMPLEX, 0.8,
+                        cv::Scalar(0, 255, 255), 2);
+            int y = 70;
+            for (const ArmorPose &pose : poses)
+            {
+                const double distance = std::sqrt(pose.position_camera_m[0] * pose.position_camera_m[0] +
+                                                  pose.position_camera_m[1] * pose.position_camera_m[1] +
+                                                  pose.position_camera_m[2] * pose.position_camera_m[2]);
+                std::snprintf(line, sizeof(line), "id=%d %s  d=%.2fm  yaw=%.1f  reproj=%.2fpx  conf=%.2f",
+                              pose.detection.target_id,
+                              pose.detection.size == ArmorSize::Large ? "B" : "S", distance,
+                              pose.armor_yaw * 180.0 / 3.141592653589793,
+                              pose.reprojection_error, pose.detection.confidence);
+                cv::putText(frame, line, cv::Point(12, y), cv::FONT_HERSHEY_SIMPLEX, 0.7,
+                            cv::Scalar(0, 255, 0), 2);
+                y += 30;
+            }
+            if (args.ekf)
+            {
+                std::snprintf(line, sizeof(line), "EKF: %s %s aim=%d fire=%d yaw=%.1f pitch=%.1f d=%.2f",
+                              phaseName(diagnostics.phase), stateName(prediction.state),
+                              prediction.target_id, static_cast<int>(prediction.fire_allowed),
+                              prediction.target_yaw * 180.0 / 3.141592653589793,
+                              prediction.target_pitch * 180.0 / 3.141592653589793,
+                              prediction.distance_m);
+                cv::putText(frame, line, cv::Point(12, y + 10), cv::FONT_HERSHEY_SIMPLEX, 0.7,
+                            cv::Scalar(255, 200, 0), 2);
+            }
+            if (frame.cols > 1920)
+                cv::resize(frame, frame, cv::Size(), 0.5, 0.5);
+            cv::imshow(window, frame);
+            const int key = cv::pollKey();
+            if (key == 27 || key == 'q')
+                break;
+            if (key == ' ')
+                paused = !paused;
+            if (key == 's')
+            {
+                char path[64];
+                std::snprintf(path, sizeof(path), "./tmp/replay_%06d.png", frame_index);
+                cv::imwrite(path, frame);
+                std::cout << "已保存 " << path << "\n";
+            }
+            if (key == 'm' && args.ekf)
+            {
+                const rotating_armor::State &state = active_tracker->ekf().state();
+                std::cout << "EKF state: cx=" << state(0) << " vx=" << state(1)
+                          << " cy=" << state(2) << " vy=" << state(3)
+                          << " z=" << state(4) << " vz=" << state(5)
+                          << " yaw=" << state(6) << " omega=" << state(7)
+                          << " R=" << state(8) << "\n";
+            }
+            if (args.wait_ms > 0)
+                cv::waitKey(args.wait_ms);
+        }
+        else if (frames_processed % 50 == 0)
+        {
+            std::cout << "[回放] " << frames_processed << " 帧  det=" << detections.size()
+                      << "  detect " << detect_ms << "ms  solve " << solve_ms << "ms\n";
+        }
+        // 无窗口时的慢速回放：--wait 在 headless 下同样生效，用 sleep 而不是 waitKey。
+        if (!show && args.wait_ms > 0)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(args.wait_ms));
+        }
+
+        frame_index += args.stride;
+        if (args.stride > 1)
+            capture.set(cv::CAP_PROP_POS_FRAMES, frame_index);
+    }
+
+    // 4. 汇总。
+    std::cout << "\n================ 回放汇总 ================\n";
+    std::cout << "处理帧数 " << frames_processed << "（有目标 " << frames_with_target
+              << "，空帧 " << frames_empty << "）\n";
+    if (topdown_enabled && !args.topdown_out.empty())
+        std::cout << "俯视图已逐帧写入 " << args.topdown_out << "/t%06d.png\n";
+    std::cout << "耗时: detect " << (frames_processed > 0 ? detect_ms_sum / frames_processed : 0.0)
+              << " ms/帧，solve " << (frames_processed > 0 ? solve_ms_sum / frames_processed : 0.0)
+              << " ms/帧\n";
+    std::cout << "画面运动量 motion: 平均 " << (motion_count > 0 ? motion_sum / motion_count : 0.0)
+              << "（越小越接近静止；CSV 的 motion 列可挑片段）\n";
+
+    std::cout << "\n-- 每帧检测数分布 --\n";
+    for (const auto &entry : frame_histogram)
+        std::cout << "  " << entry.first << " 块: " << entry.second << " 帧 ("
+                  << (frames_processed > 0 ? 100.0 * entry.second / frames_processed : 0.0) << "%)\n";
+
+    std::cout << "\n-- 各目标观测统计（id=8 表示掉编号，单独一行）--\n";
+    std::cout << "  id size 观测数  big  small  距离(m) min/中位/max   重投影(px) 中位/最大   "
+                 "yaw(deg) 中位  置信 中位/最小  帧间位移(m) 中位\n";
+    for (const auto &entry : targets)
+    {
+        const TargetStats &stats = entry.second;
+        const double conf_mean = stats.observations > 0
+                                     ? stats.confidence_sum / static_cast<double>(stats.observations)
+                                     : 0.0;
+        std::cout << "  " << entry.first.first << "  " << (entry.first.second == 1 ? "L" : "S")
+                  << "  " << stats.observations << "  " << stats.big << "  " << stats.small
+                  << "  " << percentile(stats.distances, 0.0) << "/"
+                  << percentile(stats.distances, 0.5) << "/"
+                  << percentile(stats.distances, 0.999) << "  "
+                  << percentile(stats.reprojections, 0.5) << "/"
+                  << percentile(stats.reprojections, 0.999) << "  "
+                  << percentile(stats.yaws, 0.5) << "  "
+                  << conf_mean << "/" << stats.confidence_min << "  "
+                  << percentile(stats.step_distances, 0.5) << "\n";
+    }
+
+    std::cout << "\n-- armor_solve 拒绝计数 --\n"
+              << "  重投影超限 " << g_rej_reproj << "，深度越界 " << g_rej_depth
+              << "，解非有限 " << g_rej_finite << "，PnP 失败 " << g_pnp_fail << "\n";
+    std::cout << "检测编号跳变（相邻有目标帧 id 不同）次数: " << detection_id_switches << "\n";
+
+    if (args.ekf)
+    {
+        std::cout << "\n-- EKF 汇总 --\n";
+        std::cout << "  首次 Tracking 帧: " << ekf_first_stable_frame
+                  << "，Stable 帧数: " << ekf_stable_frames << "/" << frames_processed << "\n";
+        std::cout << "  接收更新 " << ekf_accepted << "，未用于更新的观测 " << ekf_rejected
+                  << "（含其它目标的板），重锁 " << ekf_relock_count
+                  << "，目标切换 " << ekf_target_switches
+                  << "，单板重锚 " << ekf_realigns << "\n";
+        std::cout << "  末态阶段: " << phaseName(final_diagnostics.phase)
+                  << "，锁定半径 " << final_diagnostics.locked_radius_m
+                  << "（" << (final_diagnostics.radius_from_data ? "数据估计" : "先验") << "）";
+        if (active_tracker->initialized())
+        {
+            // 锁定时刻的半径是"先验"，跟踪中会被双板/位置更新改掉（v4 从 0.25
+            // 修到 0.308），汇总里两个都给，免得看先验误判"半径一直没变"。
+            std::cout << "，当前 R " << active_tracker->ekf().state()(8);
+        }
+        std::cout << "，omega " << final_diagnostics.locked_spin_rad_s << "\n";
+        if (args.ekf && !aim_errors_m.empty())
+        {
+            std::cout << "  预测命中评估: " << aim_errors_m.size() << " 帧，"
+                      << "|误差| p25 " << percentile(aim_errors_m, 0.25) << " 中位 "
+                      << percentile(aim_errors_m, 0.50) << " p75 "
+                      << percentile(aim_errors_m, 0.75) << " m，"
+                      << "p90 " << percentile(aim_errors_m, 0.90) << " m，"
+                      << "p99 " << percentile(aim_errors_m, 0.99) << " m，"
+                      << "≤2cm " << 100.0 * fractionBelow(aim_errors_m, 0.02) << "% ，"
+                      << "≤5cm " << 100.0 * fractionBelow(aim_errors_m, 0.05) << "%\n";
+        }
+        if (args.ekf && !aim_slot_errors_m.empty())
+        {
+            if (!prediction_errors_m.empty())
+            {
+                std::cout << "  预测瞄准误差(到期对账): " << prediction_errors_m.size()
+                          << " 帧，中位 " << percentile(prediction_errors_m, 0.50) << " m，p90 "
+                          << percentile(prediction_errors_m, 0.90) << " m，≤5cm "
+                          << 100.0 * fractionBelow(prediction_errors_m, 0.05) << "%\n";
+            }
+            std::cout << "  瞄准板残差: " << aim_slot_errors_m.size() << " 帧，中位 "
+                      << percentile(aim_slot_errors_m, 0.50) << " m，p90 "
+                      << percentile(aim_slot_errors_m, 0.90) << " m，≤2cm "
+                      << 100.0 * fractionBelow(aim_slot_errors_m, 0.02) << "% ，≤5cm "
+                      << 100.0 * fractionBelow(aim_slot_errors_m, 0.05) << "%\n";
+            const char *phase_names[3] = {"Idle(未追踪)", "Collecting(攒样本)", "Tracking(已锁定)"};
+            std::cout << "  瞄准板残差分状态:\n";
+            for (std::size_t i = 0; i < 3; ++i)
+            {
+                if (aim_slot_by_phase[i].empty())
+                {
+                    std::cout << "    " << phase_names[i] << ": 帧数 " << frames_by_phase[i]
+                              << "，无瞄准点\n";
+                    continue;
+                }
+                std::cout << "    " << phase_names[i] << ": 帧数 " << frames_by_phase[i]
+                          << "，瞄准样本 " << aim_slot_by_phase[i].size() << "，中位 "
+                          << percentile(aim_slot_by_phase[i], 0.50) << " m，p90 "
+                          << percentile(aim_slot_by_phase[i], 0.90) << " m，≤5cm "
+                          << 100.0 * fractionBelow(aim_slot_by_phase[i], 0.05) << "%\n";
+            }
+            {
+                static const char *const names[2] = {"本帧有观测", "本帧无观测(纯预测)"};
+                std::cout << "  瞄准板残差分测量状态:\n";
+                for (std::size_t i = 0; i < 2; ++i)
+                {
+                    if (aim_slot_by_measurement[i].empty())
+                    {
+                        std::cout << "    " << names[i] << ": 帧数 "
+                                  << aim_frames_by_measurement[i] << "，无瞄准点\n";
+                        continue;
+                    }
+                    std::cout << "    " << names[i] << ": 帧数 " << aim_frames_by_measurement[i]
+                              << "，中位 " << percentile(aim_slot_by_measurement[i], 0.50)
+                              << " m，p90 " << percentile(aim_slot_by_measurement[i], 0.90)
+                              << " m，≤5cm "
+                              << 100.0 * fractionBelow(aim_slot_by_measurement[i], 0.05) << "%\n";
+                }
+            }
+            const char *omega_names[4] = {"|w|<1", "|w|1-5", "|w|5-15", "|w|>=15"};
+            std::cout << "  瞄准板残差按角速度:\n";
+            for (std::size_t i = 0; i < 4; ++i)
+            {
+                if (aim_slot_by_omega[i].empty())
+                {
+                    std::cout << "    " << omega_names[i] << ": 样本 0\n";
+                    continue;
+                }
+                std::cout << "    " << omega_names[i] << ": 样本 " << aim_slot_by_omega[i].size()
+                          << "，中位 " << percentile(aim_slot_by_omega[i], 0.50) << " m，p90 "
+                          << percentile(aim_slot_by_omega[i], 0.90) << " m\n";
+            }
+        }
+        if (!multi_stats.empty())
+        {
+            std::cout << "  多目标（--multi）：累计新建 " << multi_tracker.createdTracks()
+                      << " 辆，末帧同时在跟踪 " << multi_tracker.tracks().size() << " 辆\n";
+            for (const auto &item : multi_stats)
+            {
+                const MultiStats &entry = item.second;
+                const double tracking_ratio =
+                    entry.frames > 0 ? 100.0 * static_cast<double>(entry.tracking) / entry.frames
+                                     : 0.0;
+                std::cout << "    track " << item.first << "  id " << entry.target_id
+                          << "  观测 " << entry.observations << "  Tracking "
+                          << tracking_ratio << "%  Stable " << entry.stable
+                          << "  末态 cx=" << entry.cx << " cy=" << entry.cy
+                          << " R=" << entry.radius << " omega=" << entry.omega
+                          << " 距离 " << entry.distance << " m\n";
+            }
+        }
+        std::cout << "  末帧预测: " << stateName(final_prediction.state)
+                  << " id " << static_cast<int>(final_prediction.target_id)
+                  << " yaw " << final_prediction.target_yaw * 180.0 / 3.141592653589793
+                  << " pitch " << final_prediction.target_pitch * 180.0 / 3.141592653589793
+                  << " 距离 " << final_prediction.distance_m
+                  << " 发射 " << final_prediction.fire_allowed << "\n";
+        const rotating_armor::State &state = active_tracker->ekf().state();
+        std::cout << "  末帧状态: cx=" << state(0) << " vx=" << state(1)
+                  << " cy=" << state(2) << " vy=" << state(3)
+                  << " z=" << state(4) << " yaw=" << state(6)
+                  << " omega=" << state(7) << " R=" << state(8) << "\n";
+
+        // 验收口径：三轴命中评估（±50 ms 平滑观测参照）。放在 EKF 汇总末尾，
+        // 与上面的"单帧对账"并列，方便看清两者差多少。
+        reportHitMetrics(all_aims, hit_observations, 0.010);
+    }
+    if (csv.is_open())
+    {
+        csv.close();
+        std::cout << "\nCSV 已写入 " << args.csv_path << "\n";
+    }
+    if (args.web)
+    {
+        if (args.web_hold_s > 0.0)
+        {
+            std::cout << "\n[web] 回放结束，服务器保持 " << args.web_hold_s
+                      << " s：http://127.0.0.1:" << args.web_port << "/\n" << std::flush;
+            std::this_thread::sleep_for(std::chrono::duration<double>(args.web_hold_s));
+        }
+        STOP_WEB_SERVER();
+    }
+    return 0;
+}
