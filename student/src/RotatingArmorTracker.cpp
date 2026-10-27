@@ -885,7 +885,17 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
     // 半径是"按板型的物理常数"。短弧上圆拟合/相位回归对 R 是病态的（实拍见过
     // 0.055、0.145 这种解），所以任何"数据估出来的 R"都必须落在先验附近才采信；
     // 偏太远就退回先验——宁可板位整体偏一点，也不要让半径塌掉后整段跟踪都错。
-    const double data_radius_tolerance = 0.35 * size_prior;
+    //
+    // 【2026-10-27 二轮实车 → 加绝对上限】原来只有 0.35*size_prior 这个**等比**容差，
+    // 于是"先验调大 → 容差跟着放大"，把更歪的解也放进来了。实测 sinspeed.avi：
+    //   先验 0.20 → 容差 ±0.070，接受区间 [0.130, 0.270]，拟合的 0.3673 被拒 → 命中率 32.4%
+    //   先验 0.28 → 容差 ±0.098，接受区间 [0.182, 0.378]，拟合的 0.3673 **被采信**
+    //              → 锁定半径 0.367（真值 0.28，偏 31%），omega 从 5.66 掉到 2.30，
+    //                命中率 32.4% → 26.1%
+    // 也就是说"把先验改对"反而让半径被数据带到更错的地方。先验是我们唯一可信的
+    // 物理常识，容差必须有一个**绝对值**兜住，不能让它随先验一起膨胀。
+    const double data_radius_tolerance =
+        std::min(0.35 * size_prior, config_.data_radius_tolerance_max_m);
 
     double radius =
         std::clamp(config_.radius_prior_m, config_.radius_min_m, config_.radius_max_m);

@@ -1306,6 +1306,10 @@ TopDownSnapshot ekf_topdown_snapshot() {
     snap.center_z_m = st(4) + tracker.slotZOffsetMean();
     snap.body_yaw_rad = st(6);
     snap.radius_m = st(8);
+    // 车体中心速度：state(1)=vx、state(3)=vy（世界系，见 RotatingArmorModel.hpp 的
+    // 状态定义 [cx, vx, cy, vy, z, vz, yaw, yaw_rate, radius, ...]）。
+    snap.velocity_x_m_s = st(1);
+    snap.velocity_y_m_s = st(3);
     for (int slot = 0; slot < kPlateCount; ++slot) {
         const double phase = st(6) + 2.0 * M_PI * static_cast<double>(slot) / kPlateCount +
                              tracker.slotAngleOffset(slot);

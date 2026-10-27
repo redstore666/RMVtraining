@@ -152,7 +152,10 @@ namespace
         double led_sigma{0.08};
         double score{0.7};
         bool score_given{false};
-        bool centered_switch{true};
+        // 跟随 TrackerConfig 的新默认值（2026-10-27 起单道具场景关闭"更靠近准星就换
+        // 目标"）。这里原先硬写 true 会把这个开关偷偷改回打开，让回放和上车行为不一致。
+        // 想要旧行为仍可用 --centered-switch 显式打开做 A/B。
+        bool centered_switch{false};
         double sigma_floor{0.06};
         bool pair_center{true};
         bool phase_yaw_static{false};
@@ -887,9 +890,14 @@ int main(int argc, char **argv)
     tracker_config.lock_min_span_s = args.lock_span;
     tracker_config.lock_max_age_s = args.lock_age;
     // 显式 --radius 时以它为准（关掉按板型自动选），方便做 A/B。
+    // 三处先验一起写：只关 radius_prior_from_size 的话，锁定时后面那段
+    // "按板型选先验"虽然跳过，但 size_prior 仍可能从 small/large 取值参与容差
+    // 判断，导致 --radius 在不同板型上表现不一致。统一写死最不容易踩。
     if (args.radius_given)
     {
         tracker_config.radius_prior_from_size = false;
+        tracker_config.radius_prior_small_m = args.radius_prior;
+        tracker_config.radius_prior_large_m = args.radius_prior;
     }
     tracker_config.aim_observation_hold_s = args.aim_obs;
     tracker_config.aim_smoothing_alpha = args.aim_alpha;

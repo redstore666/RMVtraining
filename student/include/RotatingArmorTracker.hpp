@@ -122,11 +122,20 @@ struct TrackerConfig
     int lock_min_samples{8};         // 至少攒到的帧数（只收带法向的观测）
     double lock_min_span_s{0.18};     // 至少覆盖的时间跨度（短了圆拟合与转速都不可辨）
     double lock_max_age_s{0.50};      // 更早的样本丢掉（目标可能已经换了）
-    double radius_prior_m{0.25};      // 无板型信息时的兜底先验：实车按底盘实测
-    // 按板型给的半径先验（车体中心到装甲板面的距离）。实测 v4 的 3 号小装甲车
-    // 是 0.197 m，用 0.20 比 0.25 的残差中位从 114 mm 降到 87 mm。
-    double radius_prior_small_m{0.20};
-    double radius_prior_large_m{0.25};
+    // 【2026-10-27 二轮实车】三处统一改 0.28 = 本次验收道具的实测半径真值。
+    //
+    // 为什么必须三处一起改：radius_prior_from_size 默认 true，锁定时按板型取
+    // small/large 分支（见 RotatingArmorTracker.cpp 里 size_prior 的那段），
+    // radius_prior_m 根本不参与。二轮数据里 sin.csv 的 R 全程精确 0.20000，
+    // 就是"只改了 radius_prior_m、实际走的还是 small=0.20"的铁证。
+    //
+    // 为什么改先验就够：半径在锁定那一刻定下来、之后被 freeze 闸门钉死，
+    // 锁错就只能等重锁（sin.csv 实测：半径首次变化 t=24.66s，正是板号切回
+    // 3 的那一帧，中间 24.7 秒一位没动）。所以"把答案告诉滤波器"是当前架构下
+    // 最省事也最可靠的做法——起点给对，冻结就冻结在真值上。
+    double radius_prior_m{0.28};        // 无板型信息时的兜底先验
+    double radius_prior_small_m{0.28};  // 小装甲板（本次道具走这条）
+    double radius_prior_large_m{0.28};  // 大装甲板
     // 是否按板型选半径先验。关掉（或用 --radius 显式给值）时一律用 radius_prior_m。
     bool radius_prior_from_size{true};
     double radius_sigma_m{0.10};
@@ -329,9 +338,24 @@ struct TrackerConfig
     // 就是 for-each-armor 依次 update）。四板车体同帧最多可能看到 2~3 块，
     // 上限设 4 等于不设限，仍保留一个上限防止病态输入。
     int max_updates_per_frame{4}; // 同一帧最多用几块板更新（防止病态约束）
-    // 允许"锁定号消失、画面里出现别的号"时换目标（单目标模式用）。
-    // 多目标模式必须关：一辆车的 EKF 不许自己改板号。
+    // 允许"锁定号消失、画面里出现别的号"时换目标。
+    //
+    // 【2026-10-27 二轮实车 → 保持 true，不要关】
+    // 一开始我把它和 prefer_centered_target 一起关了，结果 test_rotating_armor_tracker
+    // 的 E 场景立刻挂掉："换目标时先输出无目标（不允许带着旧状态开火）"。
+    // 原因：这条不只是"换目标"的选择逻辑，它还承担一项**安全保护**——
+    // 一旦锁定号对不上了，必须先 dropTarget 输出 NoTarget，绝不允许带着旧状态
+    // 继续开火。关掉它就等于拆掉这道刹车，代价远大于收益。
+    //
+    // 而 sin.csv 那 15.8 秒串板的真正推手是 prefer_centered_target（"另一块板更靠近
+    // 准星就重锁"），它才是需要关的那条。两条性质不同，别一起关。
     bool target_switch_enabled{true};
+    // 半径是"按板型的物理常数"。锁定时"数据估出来的 R"必须落在先验附近才采信，
+    // 偏太远就退回先验。容差 = min(0.35*size_prior, data_radius_tolerance_max_m)：
+    // 等比项照顾"先验本身就不准"的场合，绝对上限防止先验调大后容差跟着膨胀、
+    // 把更歪的解放进来（2026-10-27 sinspeed.avi 实测：先验 0.28 时容差 ±0.098
+    // 放行了拟合的 0.3673，半径偏 31%，omega 被带偏，命中率 32.4% → 26.1%）。
+    double data_radius_tolerance_max_m{0.08};
     // 半径的"慢"估计：>0 时用一阶滤波把每次锁定解出的半径平均进去（每次锁定的
     // alpha），重锁不清零。半径要稳定（偏平均），速度要跟手（偏瞬时）。
     double radius_track_smooth_alpha{0.06};
@@ -454,6 +478,12 @@ struct TrackerConfig
     // 视频目标切换 0 次、接收 1385 次、命中中位 6.8 mm、p90 1.5 cm。
     // 目标真的消失时走另一条路（锁定编号连续两帧检测不到）照样会切换，
     // 所以更大的迟滞不会"锁死在看不见的车上"。
+    //
+    // 【2026-10-27 二轮实车 → 关闭】上面这段结论来自 v4.avi 的"两台真车"场景。
+    // 现在打的是单个道具，判据里要比较的 another target_id 只可能来自数字识别
+    // 抖动，意义完全变了：它会把"识别器偶尔读错数字"当成"旁边有另一台车更靠近
+    // 准星"，进而丢目标重锁。sin.csv 那 15.8 秒串板就是这套逻辑在起作用。
+    // 单道具场景没有"该瞄哪台车"的选择问题，关掉它。
     bool prefer_centered_target{true};
     double target_switch_margin_rad{0.30};
 };

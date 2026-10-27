@@ -120,6 +120,13 @@ struct MiniTopDownOptions
     // false（默认）= 只用车体定尺度，相机落在画面外时贴边画箭头 + 距离；
     // true = 相机与车一起装进画面（车会小很多，但距离关系是字面的）。
     bool fit_camera{false};
+
+    // 速度箭头代表多少秒的位移（世界系米）。和 TopDownView::velocity_arrow_s 同一口径：
+    // 箭头长度 = |v| × 这个值，所以 2 m/s 时箭头 = 0.5×2 = 1 m 长。
+    // 太短会缩成一点看不见，渲染时再兜一个最小像素长度。
+    double velocity_arrow_s{0.5};
+    // false = 完全不画速度（箭头 + caption 里的分量都不写），给不想要这块信息的场景留退路。
+    bool show_velocity{true};
 };
 
 struct MiniTopDownFrame
@@ -152,6 +159,16 @@ struct MiniTopDownFrame
     std::vector<Eigen::Vector3d> detected_centres;
     std::vector<double> detected_yaws;
     std::vector<double> detected_half_widths;
+
+    // 车体速度（EKF 状态 vx/vy，世界系 m/s）。has_velocity=false 时不画箭头，
+    // 也不在 caption 里报速度——锁定期没有可信速度，不能凭空写个 0。
+    //
+    // 画法：从车心出发的橙色箭头 = velocity_arrow_s 秒内的位移（和 TopDownView
+    // 同一口径），箭头尖端标 |v|；左下角 caption 追加 vx/vy 分量。
+    // 作业任务书 3.7 要求 webdebug 能看到"EKF 车体中心、速度、yaw、角速度、半径及状态"，
+    // 前几项在俯视图上，速度就是这一项。
+    Eigen::Vector2d velocity{Eigen::Vector2d::Zero()};
+    bool has_velocity{false};
 
     // 高亮座位：**默认 -1（不画）**。整车建模后四块板本来就在转，
     // 不需要再用"某一格变黄"来表达相位；哪块板在被瞄由 aim_slot 的白色描边表达。

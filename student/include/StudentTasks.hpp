@@ -85,6 +85,11 @@ struct TopDownSnapshot {
     double center_x_m{0.0}, center_y_m{0.0}, center_z_m{0.0};
     double body_yaw_rad{0.0};
     double radius_m{0.0};
+    // 车体中心速度（EKF state(1)/state(3)，世界系 m/s）。俯视图的速度箭头和
+    // caption 分量都读这两个值；valid=false 时不使用。
+    // 作业任务书 3.7 要求 webdebug 可见"EKF 车体中心、速度、yaw、角速度、
+    // 半径及状态"，速度这一项原本漏在俯视图之外（只有 8080 的曲线图有）。
+    double velocity_x_m_s{0.0}, velocity_y_m_s{0.0};
     double seat_centre_m[4][3]{};
     double seat_face_yaw_rad[4]{};
     int aim_slot{-1};

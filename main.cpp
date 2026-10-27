@@ -641,6 +641,10 @@ void *OperationFunction(void *arg) {
                     mini.has_body = true;
                     mini.body_centre = Eigen::Vector3d(snap.center_x_m, snap.center_y_m,
                                                        snap.center_z_m);
+                    // 车体速度（作业 3.7 要求俯视图能看到 EKF 速度）：橙色箭头 +
+                    // caption 里的 vx/vy 分量。锁定期之外才有意义，snap.valid 已经保证。
+                    mini.velocity = Eigen::Vector2d(snap.velocity_x_m_s, snap.velocity_y_m_s);
+                    mini.has_velocity = true;
                     constexpr int kPlateCount = 4;
                     for (int slot = 0; slot < kPlateCount; ++slot)
                     {
@@ -713,6 +717,12 @@ void *OperationFunction(void *arg) {
                     WEB_TOPDOWN_FRAME(jpeg);
                 WEB_LOG("topdown_omega", static_cast<double>(prediction.body_yaw_velocity));
                 WEB_LOG("topdown_distance_m", static_cast<double>(prediction.distance_m));
+                // 俯视图上的速度（世界系 vx/vy + 模长），与图上橙色箭头同一数据源，
+                // 便于事后用 CSV 复核"图上箭头长度对不对"。
+                WEB_LOG("topdown_vx_m_s", snap.valid ? snap.velocity_x_m_s : 0.0);
+                WEB_LOG("topdown_vy_m_s", snap.valid ? snap.velocity_y_m_s : 0.0);
+                WEB_LOG("topdown_speed_m_s",
+                        snap.valid ? std::hypot(snap.velocity_x_m_s, snap.velocity_y_m_s) : 0.0);
             }
         }
 #endif

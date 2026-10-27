@@ -630,6 +630,53 @@ cv::Mat renderMiniTopDown(const MiniTopDownFrame &frame, const MiniTopDownOption
         cv::drawMarker(canvas, body, cv::Scalar(0, 0, 255), cv::MARKER_CROSS, 14, 1);
     }
 
+    // 车体速度箭头（橙）：从车心指向"velocity_arrow_s 秒后的位置"，尖端标 |v|。
+    // 口径与 TopDownView 的 kVelocityColor 一致（BGR 0,130,255 = 橙）。
+    //
+    // 为什么必须画在俯视图上而不是只写进 caption：速度是一个**矢量**，矢量的
+    // 方向（车在往哪走）和大小同样重要，纯数字看不出来。而且车体中心和速度
+    // 落在同一张俯视图上，能直接看出"中心在漂但速度是 0"这种自相矛盾的状态
+    // ——那正是 EKF 被单板观测带飞的典型表现。
+    if (options.show_velocity && frame.has_velocity && frame.has_body)
+    {
+        const double vx = frame.velocity.x();
+        const double vy = frame.velocity.y();
+        const double speed = std::hypot(vx, vy);
+        if (std::isfinite(speed) && speed > 0.02)
+        {
+            const cv::Point body = to_px3(frame.body_centre);
+            // 箭头代表 velocity_arrow_s 秒位移；若太短（慢速目标），兜底成 0.02 m 的位移，
+            // 再不够就由下面的最小像素长度兜住，保证方向永远看得见。
+            const double arrow_s = std::max(options.velocity_arrow_s, 0.02 / speed);
+            cv::Point tip = to_px(frame.body_centre.x() + vx * arrow_s,
+                                  frame.body_centre.y() + vy * arrow_s);
+            const double length_px = cv::norm(tip - body);
+            constexpr double kMinPx = 16.0;
+            // 方向退化（速度极小）时不画箭头；反过来画的会是一个随机朝向的箭头。
+            // 注意这里不能 return——后面还有瞄准点/准星要画。
+            const bool degenerate = length_px < kMinPx && length_px < 1e-6;
+            if (!degenerate)
+            {
+                if (length_px < kMinPx)
+                {
+                    const cv::Point2d dir = (cv::Point2d(tip) - cv::Point2d(body)) / length_px;
+                    tip = cv::Point(cvRound(body.x + dir.x * kMinPx),
+                                    cvRound(body.y + dir.y * kMinPx));
+                }
+                const double tip_len = std::clamp(14.0 / std::max(length_px, 1.0), 0.12, 0.40);
+                cv::arrowedLine(canvas, body, tip, cv::Scalar(0, 130, 255), 2, cv::LINE_AA, 0,
+                                tip_len);
+                // |v| 标在箭头尖端外侧，别压住箭身。
+                const cv::Point2d d = cv::Point2d(tip) - cv::Point2d(body);
+                const double dn = std::max(std::hypot(d.x, d.y), 1e-6);
+                const cv::Point label(cvRound(tip.x + d.x / dn * 6.0 + 3),
+                                      cvRound(tip.y + d.y / dn * 6.0 - 3));
+                cv::putText(canvas, cv::format("%.2f", speed), label, cv::FONT_HERSHEY_SIMPLEX,
+                            0.36, cv::Scalar(0, 130, 255), 1, cv::LINE_AA);
+            }
+        }
+    }
+
     // 瞄准：青 = 有效（当前板位，不含提前量），黄 = 预测（含提前量/飞行时间）。
     // 允许开火时预测点变绿并画一条相机→瞄准点的虚线，一眼看出"现在能不能打"。
     if (frame.has_predicted_aim)
@@ -664,9 +711,22 @@ cv::Mat renderMiniTopDown(const MiniTopDownFrame &frame, const MiniTopDownOption
     }
 
     // 左下角小字：距离/半径/角速度；没有目标时明确写 no target。
-    const std::string caption = frame.caption.empty()
+    std::string caption = frame.caption.empty()
         ? (frame.has_body ? std::string() : std::string("no target"))
         : frame.caption;
+    // 速度分量追加在 caption 末尾（矢量的模长已在箭头尖端标过，这里补 vx/vy）。
+    // 用 " | " 分隔而不是另起一行：caption 只有一行的高度预算，换行会压到画面里。
+    if (options.show_velocity && frame.has_velocity && frame.has_body)
+    {
+        const double vx = frame.velocity.x();
+        const double vy = frame.velocity.y();
+        if (std::isfinite(vx) && std::isfinite(vy))
+        {
+            const std::string vel = cv::format("vx%+.2f vy%+.2f |v|%.2f m/s", vx, vy,
+                                               std::hypot(vx, vy));
+            caption = caption.empty() ? vel : caption + "  " + vel;
+        }
+    }
     if (!caption.empty())
     {
         cv::putText(canvas, caption, cv::Point(8, height - 8), cv::FONT_HERSHEY_SIMPLEX, 0.45,
