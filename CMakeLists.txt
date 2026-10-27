@@ -15,7 +15,23 @@ find_package(Threads REQUIRED)
 
 # OpenVINO 运行时（神经网络四点检测路线，ArmorDetectorNet 依赖）。
 # 安装：python3 -m pip install openvino
-# 然后用 -DOpenVINO_DIR=<venv>/lib/python3.X/site-packages/openvino/cmake 指向配置目录。
+# pip 装的运行时不在系统路径里。未显式给 -DOpenVINO_DIR 时，自动搜索常见
+# site-packages 位置（venv / 用户目录 / 系统包），免去每次手动传路径。
+if(NOT OpenVINO_DIR)
+    file(GLOB _openvino_hints
+        "$ENV{HOME}/.workbuddy/binaries/python/envs/*/lib/python*/site-packages/openvino/cmake"
+        "$ENV{HOME}/.local/lib/python*/site-packages/openvino/cmake"
+        "/usr/lib/python3*/dist-packages/openvino/cmake"
+        "/usr/local/lib/python3*/dist-packages/openvino/cmake"
+        "/opt/venv/lib/python*/site-packages/openvino/cmake")
+    foreach(_hint IN LISTS _openvino_hints)
+        if(EXISTS "${_hint}")
+            set(OpenVINO_DIR "${_hint}")
+            message(STATUS "OpenVINO: 使用自动找到的 pip 安装位置 ${OpenVINO_DIR}")
+            break()
+        endif()
+    endforeach()
+endif()
 find_package(OpenVINO REQUIRED COMPONENTS Runtime)
 
 add_subdirectory(serialPort)
