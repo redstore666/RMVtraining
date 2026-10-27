@@ -28,6 +28,9 @@
 #include <pthread.h>
 #include <string>
 #include <thread>
+
+#include <opencv2/highgui.hpp> // --show-camera: imshow/waitKey
+#include <opencv2/imgproc.hpp> // --show-camera: polylines/putText
 #include <vector>
 
 // 这个文件有意保留 aimbot_26/main.cpp 的组织方式：
@@ -61,10 +64,19 @@ std::chrono::steady_clock::time_point message_received_at{};
 
 int web_port = kDefaultWebPort;
 
+// 命令行选项的全局副本（与 web_port 同一模式：pthread 线程不传参，直接读全局）。
+// forced_enemy_color: 0 = 敌方颜色跟串口状态（默认，原行为）；
+//                     1 = 强制敌方为红方（--red），2 = 强制敌方为蓝方（--blue）。
+// show_camera_window: --show-camera 时在本地窗口显示相机画面 + 检测框。
+int forced_enemy_color = 0;
+bool show_camera_window = false;
+
 struct Options {
     std::string serial_device;
     int baud_rate{115200};
     std::string camera_config;
+    int forced_color{0}; // 0=跟串口, 1=--red, 2=--blue
+    bool show_camera{false};
 };
 
 void request_shutdown(int) {
@@ -73,9 +85,13 @@ void request_shutdown(int) {
 
 void printUsage(const char* program) {
     std::cout << "用法: " << program
-              << " <串口设备> <波特率> <相机标定文件> [Web端口]\n"
+              << " <串口设备> <波特率> <相机标定文件> [Web端口] [选项]\n"
+              << "选项:\n"
+              << "  --red           强制敌方为红方（默认跟串口 status）\n"
+              << "  --blue          强制敌方为蓝方（默认跟串口 status）\n"
+              << "  --show-camera   本地窗口显示相机画面 + 检测框（调车用）\n"
               << "示例: " << program
-              << " /dev/ttyACM0 115200 config/camera.yaml 8080\n";
+              << " /dev/ttyACM0 115200 config/camera.yaml 8080 --blue --show-camera\n";
 }
 
 bool parsePositiveInt(const char* text, int& value) {
@@ -97,19 +113,40 @@ bool parseOptions(int argc, char** argv, Options& options) {
         printUsage(argv[0]);
         return false;
     }
-    if (argc < 4 || argc > 5) {
+
+    // 位置参数与标志混排：标志可放在任意位置，其余按顺序是
+    // <串口设备> <波特率> <相机标定文件> [Web端口]。
+    std::vector<const char*> positional;
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--help") {
+            printUsage(argv[0]);
+            return false;
+        }
+        if (arg == "--red") {
+            options.forced_color = 1;
+        } else if (arg == "--blue") {
+            options.forced_color = 2;
+        } else if (arg == "--show-camera") {
+            options.show_camera = true;
+        } else {
+            positional.push_back(argv[i]);
+        }
+    }
+
+    if (positional.size() < 3 || positional.size() > 4) {
         printUsage(argv[0]);
         return false;
     }
 
-    options.serial_device = argv[1];
-    options.camera_config = argv[3];
-    if (!parsePositiveInt(argv[2], options.baud_rate)) {
-        std::cerr << "波特率无效: " << argv[2] << '\n';
+    options.serial_device = positional[0];
+    options.camera_config = positional[2];
+    if (!parsePositiveInt(positional[1], options.baud_rate)) {
+        std::cerr << "波特率无效: " << positional[1] << '\n';
         return false;
     }
-    if (argc == 5 && !parsePositiveInt(argv[4], web_port)) {
-        std::cerr << "Web端口无效: " << argv[4] << '\n';
+    if (positional.size() == 4 && !parsePositiveInt(positional[3], web_port)) {
+        std::cerr << "Web端口无效: " << positional[3] << '\n';
         return false;
     }
     return true;
@@ -217,6 +254,17 @@ int main(int argc, char** argv) {
     Options options;
     if (!parseOptions(argc, argv, options)) {
         return argc == 2 && std::string(argv[1]) == "--help" ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
+
+    // 选项落全局（线程不传参，直接读全局，与 web_port 同一模式）。
+    forced_enemy_color = options.forced_color;
+    show_camera_window = options.show_camera;
+    if (forced_enemy_color == 1) {
+        std::cout << "敌方颜色: 强制红方（--red，忽略串口 status）\n";
+    } else if (forced_enemy_color == 2) {
+        std::cout << "敌方颜色: 强制蓝方（--blue，忽略串口 status）\n";
+    } else {
+        std::cout << "敌方颜色: 跟随串口 status\n";
     }
 
     std::string camera_error;
@@ -415,8 +463,9 @@ void *OperationFunction(void *arg) {
         }
 
         const auto frame_time = std::chrono::steady_clock::now();
+        double frame_seconds = 0.0;
         if (last_frame_time.time_since_epoch().count() != 0) {
-            const double frame_seconds =
+            frame_seconds =
                 std::chrono::duration<double>(frame_time - last_frame_time).count();
             if (frame_seconds > 0.0) {
                 WEB_LOG("camera_fps", 1.0 / frame_seconds);
@@ -425,8 +474,15 @@ void *OperationFunction(void *arg) {
         last_frame_time = frame_time;
 
         // 1. 装甲板检测。检测结果为空时不提前结束，继续向下传递空观测。
-        const std::vector<ArmorDetection> detections =
-            armor_detect(pic, enemyColorFromStatus(translator.message.status));
+        // 敌方颜色默认跟串口 status；--red/--blue 强制覆盖（调车时串口状态
+        // 可能没接对，颜色错了检测器就全程空转）。
+        TeamColor enemy_color = enemyColorFromStatus(translator.message.status);
+        if (forced_enemy_color == 1) {
+            enemy_color = TeamColor::Red;
+        } else if (forced_enemy_color == 2) {
+            enemy_color = TeamColor::Blue;
+        }
+        const std::vector<ArmorDetection> detections = armor_detect(pic, enemy_color);
         WEB_LOG("armor_count", static_cast<double>(detections.size()));
         if (!detections.empty()) {
             // 记录第一块候选装甲板，便于在网页中快速判断检测器是否工作。
@@ -448,6 +504,39 @@ void *OperationFunction(void *arg) {
             WEB_LOG("pnp_distance_m", cv::norm(observations.front().position_gimbal_m));
         } else {
             WEB_LOG("pnp_reprojection_error", -1.0);
+        }
+
+        // --show-camera：本地窗口显示相机画面 + 检测框（调车用，不开窗零开销）。
+        // 显示的是检测环节的原始输出，PnP/EKF 的问题一眼就能和检测区分开。
+        if (show_camera_window) {
+            cv::Mat display = pic.clone();
+            for (const ArmorDetection& detection : detections) {
+                const cv::Point2f* pts = detection.corners.data();
+                cv::polylines(display,
+                              std::vector<cv::Point2f>(pts, pts + 4), true,
+                              cv::Scalar(0, 255, 0), 2);
+                const cv::Point2f center =
+                    (detection.corners[0] + detection.corners[1] +
+                     detection.corners[2] + detection.corners[3]) * 0.25F;
+                cv::putText(display,
+                            cv::format("id=%d %.2f", detection.target_id,
+                                       static_cast<double>(detection.confidence)),
+                            center + cv::Point2f(0.0F, -12.0F),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.5,
+                            cv::Scalar(0, 255, 0), 1);
+            }
+            cv::putText(display,
+                        cv::format("enemy=%s fps=%.1f",
+                                   enemy_color == TeamColor::Red ? "RED" : "BLUE",
+                                   1.0 / std::max(frame_seconds, 1.0e-6)),
+                        cv::Point(10, 24), cv::FONT_HERSHEY_SIMPLEX, 0.7,
+                        cv::Scalar(255, 255, 255), 2);
+            cv::imshow("camera (--show-camera)", display);
+            // waitKey 必须调用一次，窗口才会刷新；按 q 或 ESC 请求退出。
+            const int key = cv::waitKey(1);
+            if (key == 'q' || key == 27) {
+                shutdown_requested.store(true, std::memory_order_relaxed);
+            }
         }
 
         // 3. 计算帧间隔和通信延迟，再调用 EKF。即使 observations 为空也必须调用。
