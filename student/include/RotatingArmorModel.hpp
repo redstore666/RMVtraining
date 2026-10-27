@@ -18,17 +18,11 @@ namespace rotating_armor {
 constexpr int kStateDim = 11;
 constexpr int kMeasurementDim = 3;
 
-// 球坐标量测量 (yaw, pitch, distance) + 板面法向角，共 4 维。
-// 与位置量测并存：位置量测给上层做几何/显示，球坐标量测供 update() 使用。
-constexpr int kSphericalMeasurementDim = 4;
-
 using State = Eigen::Matrix<double, kStateDim, 1>;
 using StateJacobian = Eigen::Matrix<double, kStateDim, kStateDim>;
 using Covariance = Eigen::Matrix<double, kStateDim, kStateDim>;
 using Measurement = Eigen::Matrix<double, kMeasurementDim, 1>;
 using MeasurementJacobian = Eigen::Matrix<double, kMeasurementDim, kStateDim>;
-using SphericalMeasurement = Eigen::Matrix<double, kSphericalMeasurementDim, 1>;
-using SphericalJacobian = Eigen::Matrix<double, kSphericalMeasurementDim, kStateDim>;
 
 // Continuous-time white-noise spectral densities.
 //
@@ -63,6 +57,12 @@ struct ProcessNoiseConfig {
 // Wrap radians into [-pi, pi).
 double wrapAngle(double angle);
 
+// 把角度折到一个周期内 [-period/2, period/2)。四板对称下 period = pi/2：
+// 换到相邻那块板差一个整周期，折叠后残差为 0，这正是"板面法向能直接约束
+// 车体 yaw"的数学形式。（2026-10-27 起这是唯一定义；tracker / ekf 各自的
+// 匿名命名空间副本已并入这里。）
+double foldPeriod(double value, double period);
+
 // Constant-velocity translation + constant angular velocity model.
 State transition(const State& x, double dt);
 StateJacobian transitionJacobian(double dt);
@@ -72,21 +72,6 @@ StateJacobian transitionJacobian(double dt);
 Measurement measurement(const State& x, int plate_slot, int plate_count);
 MeasurementJacobian measurementJacobian(
     const State& x, int plate_slot, int plate_count);
-
-// 同一块板在同样的槽位约定下的球坐标量测 (yaw, pitch, distance, 板法向角)。
-//
-// 为什么用球坐标而不是直接量板心 xyz（借鉴 sp_vision_25 target.cpp:192-222）：
-//   * 板心 xyz 的深度误差会沿着视线方向线性污染横向，误差结构不对；
-//   * yaw/pitch 只和像素方向有关，深度误差基本不进这两维；
-//   * distance 单独一维，可以把"测距不准"用一个大方差表达，而不是让它
-//     同时污染 x、y、z 三个残差。
-// 第 4 维是板面法向角（世界系 yaw）。四块板法向相差 90°，单看它是折叠的，
-// 但配合槽位就唯一确定"这一帧看到的是哪块板"，正是关联与相位需要的量。
-// has_yaw == false 时第 4 维整行置零（调用方负责把该维方差放大到几乎无穷）。
-SphericalMeasurement sphericalMeasurement(const State& x, int plate_slot, int plate_count,
-                                           bool has_yaw);
-SphericalJacobian sphericalJacobian(const State& x, int plate_slot, int plate_count,
-                                    bool has_yaw);
 
 // Process covariance for white-acceleration noise on the (position, velocity)
 // pairs and a random-walk model for the armor radius.

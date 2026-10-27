@@ -155,41 +155,21 @@ namespace
         bool centered_switch{true};
         double sigma_floor{0.06};
         bool pair_center{true};
-        bool aim_obs_horizon{false};
         bool phase_yaw_static{false};
         bool no_aim_extrapolate{false};
         double realign_m{0.25};
         double gate_m{0.0}; // >0 时覆盖 position_gate_m，用来扫门限
-        int slot_phase{-1};
         int antianchor{-1};
         double normal_tiebreak{-1.0};
         int joint_pair{-1};
         int id_posterior{-1};
-        int circle_phase{-1};
-        int batch_fit{-1};
-        int tracklet{-1};
-        // 0 = 关掉全部旧转速通道（rate_update/tracklet/chord/raw_normal/window），
-        // 只留"窗口相位斜率"这一条；1 = 旧通道全开（与历史行为一致）。
-        // -1 = 不动，用 TrackerConfig 的默认值。A/B 用。
+        // 0 = 关掉全部旧转速通道（rate_update/tracklet/chord/raw_normal）；
+        // 1 = 旧通道全开（与历史行为一致）；-1 = 不动，用 TrackerConfig 默认值。
         int rate_legacy{-1};
-        // 窗口相位斜率通道（rate_phase_window_enabled）单开关。A/B 用。
-        int rate_phase{-1};
-        double continuity_gate{-1.0};
         int pair_static{-1};
-        int body_circle{-1};
         int pair_lh{-1};
         int assoc_angle{-1};
-        int normal_meas{-1};
-        double normal_sign{1.0};
-        int spherical{-1};
-        double body_circle_window{-1.0};
-        double batch_window{0.0};
-        int batch_every{0};
-        int normal_phase{-1};  // 1 开 0 关 -1 用默认：用板法向直接量测相位
-        int body_fit{-1};  // 1 开 0 关 -1 用默认：滑窗整车重拟合（校准车心+半径）
-        int pair_body{-1};  // 1 开 0 关 -1 用默认，控制双板整车求解  // 1 开 0 关 -1 用默认，控制按槽位一致的相位更新
         bool pair_radius{false};
-        bool phase_anchor{true};
         double aim_obs{0.012};
         double aim_alpha{0.0};
         int aim_fit{0};
@@ -201,17 +181,12 @@ namespace
         double nis_gate{14.86};
         int max_updates{2};
         bool nis_gate_given{false};
-        bool smooth{false};
-        int smooth_window{4};
         bool trace{false};
-    bool phase_yaw{false};
     // 默认多目标：实拍里常常同时有两台车，用户要"两个车分别建模"。
     // 想回到单目标（旧行为）用 --single。
     bool multi{true};
     int multi_primary{0};
     double sigma_pos{0.03};
-    double handoff_scale{2.5};
-    double phase_sigma{0.12};
     std::string dump_csv;
     bool topdown{false};
     // 本轮：只做"实测板 -> 整车"，隐藏 EKF 的四块模型板（蓝），保留 aim 点。
@@ -279,26 +254,16 @@ namespace
                 args.trace = true;
             else if (arg == "--sigma-pos")
                 args.sigma_pos = std::stod(next("--sigma-pos"));
-            else if (arg == "--handoff-scale")
-                args.handoff_scale = std::stod(next("--handoff-scale"));
-            else if (arg == "--phase-yaw")
-                args.phase_yaw = true;
-            else if (arg == "--phase-sigma")
-                args.phase_sigma = std::stod(next("--phase-sigma"));
             else if (arg == "--dump")
                 args.dump_csv = next("--dump");
             else if (arg == "--only-id")
                 args.only_id = std::atoi(next("--only-id").c_str());
-            else if (arg == "--smooth")
-                args.smooth = true;
             else if (arg == "--refine-corners")
                 args.refine_corners = true;
             else if (arg == "--max-updates" && i + 1 < argc)
                 args.max_updates = std::atoi(argv[++i]);
             else if (arg == "--nis-gate" && i + 1 < argc)
                 args.nis_gate = std::atof(argv[++i]), args.nis_gate_given = true;
-            else if (arg == "--smooth-window")
-                args.smooth_window = std::max(1, std::atoi(next("--smooth-window").c_str()));
             else if (arg == "--radius")
             {
                 args.radius_prior = std::atof(next("--radius").c_str());
@@ -316,8 +281,6 @@ namespace
             {
                 args.aim_obs = std::atof(next("--aim-obs").c_str());
             }
-            else if (arg == "--no-phase-anchor")
-                args.phase_anchor = false;
             else if (arg == "--sigma-floor")
                 args.sigma_floor = std::atof(next("--sigma-floor").c_str());
             else if (arg == "--pair-radius")
@@ -332,81 +295,21 @@ namespace
             {
                 args.gate_m = std::atof(next("--gate").c_str());
             }
-            else if (arg == "--body-circle")
-            {
-                args.body_circle = std::atoi(next("--body-circle").c_str());
-            }
             else if (arg == "--pair-lh")
             {
                 args.pair_lh = std::atoi(next("--pair-lh").c_str());
-            }
-            else if (arg == "--spherical")
-            {
-                args.spherical = std::atoi(next("--spherical").c_str());
-            }
-            else if (arg == "--normal-meas")
-            {
-                args.normal_meas = std::atoi(next("--normal-meas").c_str());
-            }
-            else if (arg == "--normal-sign")
-            {
-                args.normal_sign = std::atof(next("--normal-sign").c_str());
             }
             else if (arg == "--assoc-angle")
             {
                 args.assoc_angle = std::atoi(next("--assoc-angle").c_str());
             }
-            else if (arg == "--circle-window")
-            {
-                args.body_circle_window = std::atof(next("--circle-window").c_str());
-            }
             else if (arg == "--pair-static")
             {
                 args.pair_static = std::atoi(next("--pair-static").c_str());
             }
-            else if (arg == "--continuity-gate")
-            {
-                args.continuity_gate = std::atof(next("--continuity-gate").c_str());
-            }
-            else if (arg == "--tracklet")
-            {
-                args.tracklet = std::atoi(next("--tracklet").c_str());
-            }
-            else if (arg == "--rate-phase")
-            {
-                args.rate_phase = std::atoi(next("--rate-phase").c_str());
-            }
             else if (arg == "--rate-legacy")
             {
                 args.rate_legacy = std::atoi(next("--rate-legacy").c_str());
-            }
-            else if (arg == "--batch-fit")
-            {
-                args.batch_fit = std::atoi(next("--batch-fit").c_str());
-            }
-            else if (arg == "--batch-window")
-            {
-                args.batch_window = std::atof(next("--batch-window").c_str());
-            }
-            else if (arg == "--batch-every")
-            {
-                args.batch_every = std::max(1, std::atoi(next("--batch-every").c_str()));
-            }
-            else if (arg == "--circle-phase")
-            {
-                args.circle_phase = std::atoi(next("--circle-phase").c_str());
-            }
-            else if (arg == "--normal-phase")
-            {
-                args.normal_phase = std::atoi(next("--normal-phase").c_str());
-            }
-            else if (arg == "--body-fit")
-            {
-                args.body_fit = std::atoi(next("--body-fit").c_str());
-            }
-            else if (arg == "--pair-body")
-            {
-                args.pair_body = std::atoi(next("--pair-body").c_str());
             }
             else if (arg == "--joint-pair")
             {
@@ -426,10 +329,6 @@ namespace
             {
                 args.antianchor = 0;
             }
-            else if (arg == "--slot-phase")
-            {
-                args.slot_phase = std::atoi(next("--slot-phase").c_str());
-            }
             else if (arg == "--no-aim-extrapolate")
             {
                 args.no_aim_extrapolate = true;
@@ -437,10 +336,6 @@ namespace
             else if (arg == "--phase-yaw-static")
             {
                 args.phase_yaw_static = true;
-            }
-            else if (arg == "--aim-obs-horizon")
-            {
-                args.aim_obs_horizon = true;
             }
             else if (arg == "--pair-center")
                 args.pair_center = true;
@@ -969,7 +864,6 @@ int main(int argc, char **argv)
     // EKF 侧统计。
     rotating_armor::TrackerConfig tracker_config;
     tracker_config.position_sigma_m = args.sigma_pos;
-    tracker_config.handoff_sigma_scale = args.handoff_scale;
     tracker_config.radius_prior_m = args.radius_prior;
     if (args.score_given)
     {
@@ -992,23 +886,14 @@ int main(int argc, char **argv)
         tracker_config.nis_gate = args.nis_gate;
     tracker_config.lock_min_span_s = args.lock_span;
     tracker_config.lock_max_age_s = args.lock_age;
-    tracker_config.observation_smoothing_enabled = args.smooth;
-    tracker_config.smoothing_window = args.smooth_window;
     // 显式 --radius 时以它为准（关掉按板型自动选），方便做 A/B。
     if (args.radius_given)
     {
         tracker_config.radius_prior_from_size = false;
     }
-    if (args.phase_yaw)
-    {
-        tracker_config.phase_update_enabled = true;
-        tracker_config.phase_anti_anchor = args.phase_anchor;
-        tracker_config.phase_update_sigma_rad = args.phase_sigma;
-    }
     tracker_config.aim_observation_hold_s = args.aim_obs;
     tracker_config.aim_smoothing_alpha = args.aim_alpha;
     tracker_config.aim_fit_samples = args.aim_fit;
-    tracker_config.aim_observation_any_horizon = args.aim_obs_horizon;
     tracker_config.phase_update_when_static = args.phase_yaw_static;
     tracker_config.aim_observation_extrapolate = !args.no_aim_extrapolate;
     tracker_config.single_plate_realign_m = args.realign_m;
@@ -1046,85 +931,22 @@ int main(int argc, char **argv)
         tracker_config.rate_from_tracklet_enabled = on;
         tracker_config.rate_from_chord_enabled = on;
         tracker_config.rate_from_raw_normal_enabled = on;
-        tracker_config.rate_window_enabled = on;
-    }
-    if (args.rate_phase >= 0)
-    {
-        tracker_config.rate_phase_window_enabled = args.rate_phase != 0;
     }
     if (args.antianchor >= 0)
     {
         tracker_config.phase_anti_anchor = args.antianchor != 0;
     }
-    if (args.slot_phase >= 0)
-    {
-        tracker_config.slot_phase_update_enabled = args.slot_phase != 0;
-    }
-    if (args.body_circle >= 0)
-    {
-        tracker_config.body_circle_enabled = args.body_circle != 0;
-    }
     if (args.pair_lh >= 0)
     {
         tracker_config.ekf.pair_offset_enabled = args.pair_lh != 0;
-    }
-    if (args.spherical >= 0)
-    {
-        tracker_config.ekf.spherical_measurement_enabled = args.spherical != 0;
-    }
-    if (args.normal_meas >= 0)
-    {
-        tracker_config.plate_normal_measurement_enabled = args.normal_meas != 0;
-        tracker_config.plate_normal_sign = args.normal_sign;
     }
     if (args.assoc_angle >= 0)
     {
         tracker_config.association_by_angle_enabled = args.assoc_angle != 0;
     }
-    if (args.body_circle_window > 0.0)
-    {
-        tracker_config.body_circle_window_s = args.body_circle_window;
-    }
     if (args.pair_static >= 0)
     {
         tracker_config.pair_center_min_static_frames = args.pair_static;
-    }
-    if (args.continuity_gate > 0.0)
-    {
-        tracker_config.obs_continuity_gate_enabled = true;
-        tracker_config.obs_continuity_gate_m = args.continuity_gate;
-    }
-    if (args.tracklet >= 0)
-    {
-        tracker_config.tracklet_rate_enabled = args.tracklet != 0;
-    }
-    if (args.batch_fit >= 0)
-    {
-        tracker_config.batch_fit_enabled = args.batch_fit != 0;
-    }
-    if (args.batch_every > 0)
-    {
-        tracker_config.batch_fit_every = args.batch_every;
-    }
-    if (args.batch_window > 0.0)
-    {
-        tracker_config.batch_fit_window_s = args.batch_window;
-    }
-    if (args.circle_phase >= 0)
-    {
-        tracker_config.circle_phase_enabled = args.circle_phase != 0;
-    }
-    if (args.normal_phase >= 0)
-    {
-        tracker_config.normal_phase_enabled = args.normal_phase != 0;
-    }
-    if (args.body_fit >= 0)
-    {
-        tracker_config.body_refit_enabled = args.body_fit != 0;
-    }
-    if (args.pair_body >= 0)
-    {
-        tracker_config.pair_body_solve_enabled = args.pair_body != 0;
     }
     if (args.pair_radius)
     {

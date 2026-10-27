@@ -1,5 +1,7 @@
 #include "AimGeometry.hpp"
 
+#include "RotatingArmorModel.hpp" // wrapAngle（wrapToPi 的唯一实现）
+
 #include <Eigen/Geometry>
 
 #include <cmath>
@@ -46,19 +48,11 @@ double vectorPitch(const Eigen::Vector3d &v)
     return std::atan2(v.z(), std::hypot(v.x(), v.y()));
 }
 
+// 与 RotatingArmorModel::wrapAngle 是同一个数学运算（2026-10-27 起直接委托，
+// 消掉第二份实现；保留本名是因为 AimGeometry/StudentTasks 的调用点都用它）。
 double wrapToPi(double angle)
 {
-    if (!std::isfinite(angle))
-    {
-        return angle;
-    }
-    constexpr double kTwoPi = 6.283185307179586476925286766559;
-    double wrapped = std::fmod(angle + 3.14159265358979323846, kTwoPi);
-    if (wrapped < 0.0)
-    {
-        wrapped += kTwoPi;
-    }
-    return wrapped - 3.14159265358979323846;
+    return wrapAngle(angle);
 }
 
 bool isFiniteVector(const Eigen::Vector3d &v)

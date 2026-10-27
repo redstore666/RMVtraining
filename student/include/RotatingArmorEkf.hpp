@@ -106,10 +106,6 @@ struct EkfConfig {
     int plate_count{4};
     // 是否允许 radius_diff / height_diff 参与更新（消融开关）。
     bool pair_offset_enabled{true};
-    // 球坐标量测（借鉴 sp_vision_25 target.cpp:187-222）。默认关：见 docs/借鉴sp_vision25.md
-    // 的回归表——打开后 v4 从 90.0 降到 86.1 px，但合成 F/G 与首帧契约的
-    // 静态半径会退化（瞄准点在高速自转下落到相邻板）。
-    bool spherical_measurement_enabled{false};
     // 机动自适应过程噪声：用新息(NIS)当"机动探测器"。快速平移/自转时 NIS 抬高，
     // 就把速度/角速度的过程噪声放大（跟得上瞬时变化）；平稳时收回 1.0
     // （半径和静态中心靠量测平均，不抖）。这是"平均性 vs 瞬时性"的折中。
@@ -135,11 +131,6 @@ public:
     // 回到"未初始化"：状态与协方差清零，需要重新 initialize()。
     void reset();
 
-    // 掉线快照续接：把掉线前一刻的状态/协方差原样装回去（跳过重新收集样本）。
-    // 只用于"同一编号、间隔很短又出现"的情形，由上层判定是否该续接。
-    bool restore(const State &state, const Covariance &covariance, bool phase_resolved,
-                 bool spin_pinned);
-
     bool initialized() const { return initialized_; }
 
     // true 表示初相由板面法向确定，此后 yaw 的含义立即可以解释；
@@ -164,8 +155,6 @@ public:
     // 输入非法、未初始化、或内部出现非有限值时返回 false；后者会同时 reset()，
     // 让调用方重新锁定，而不是继续把 NaN 传播出去。
     bool update(const ArmorObservation& observation, int plate_slot);
-    // 旧的笛卡尔 3 维量测（球坐标版本的对照实现）。
-    bool updateCartesian(const ArmorObservation& observation, int plate_slot);
     // 用新息驱动机动自适应过程噪声（见 EkfConfig::adaptive_process_noise）。
     void noteInnovation(double nis);
 
@@ -176,19 +165,6 @@ public:
     // 好处：不依赖"这一帧看到的是哪一块板"——换板时折叠加起来永远是 0，
     // 所以位置关联出错也不会把相位带歪。sigma_rad 取值见上层配置。
     bool updatePhase(double measured_world_yaw, double sigma_rad);
-
-    // 按槽位一致的相位更新：调用方已经知道这块板被分到了哪个槽位。
-    //
-    // 与上面折叠版的关键区别：目标相位是 measured_world_yaw + slot * 2pi/N，
-    // **不做 2pi/N 折叠**。折叠版只能修 45° 以内的抖动，永远改不了"哪块板是
-    // slot 0"；而位置更新没有折叠、能把 yaw 推过 45° 边界，于是两者在槽位分配
-    // 上互相拉扯——实拍 tmp/v4.avi 上表现为 yaw 单帧跳 140°~215°
-    // （f=199 -1.62 -> f=200 +2.13），也就是"转一部分就卡回去"。
-    //
-    // 这里是"按槽位一致"的那个写法：位置更新用 best_slot，相位更新也用同一个
-    // best_slot，两者说的是同一件事，不再打架。残差仍做 wrapToPi 折叠到
-    // ±pi（cos/sin 的固有周期），但 90° 的四板歧义由 slot 明确消除。
-    bool updatePhaseForSlot(double measured_world_yaw, double sigma_rad, int plate_slot);
 
     // 参考实现移植（sp_vision_25 target.cpp:202-222）：朝向角直接量测。
     // face_world_yaw = 观测到的板外法向 world yaw（= 槽位相位 + pi）；
@@ -247,15 +223,6 @@ public:
     void rotatePhase(double delta) { state_(6) = wrapAngle(state_(6) + delta); }
     // 由多秒窗口批处理直接给定转速：窗口拟合的 ω 比逐帧差分稳得多。
     void setRate(double omega) { state_(7) = omega; }
-
-    // 外部强量测注入前的协方差地板：长序列的衰减伪量测/窗口弱证据会把
-    // omega 的方差压得过小（滤波器过度自信，新量测吃不进去——实测注入
-    // 增益只剩 0.05，5 次 -8 rad/s 只把 ω 挪了 -0.95）。注入通道用它把
-    // P(7,7) 抬到量测信息量的量级再做量测更新。
-    void inflateOmegaCovariance(double variance_floor)
-    {
-        covariance_(7, 7) = std::max(covariance_(7, 7), variance_floor);
-    }
 
     // 角速度量测（EKF 的第 5 维量测）：只有 yaw_rate 这一维参与，H = e7。
     // 与 updatePhase 同样用 Joseph 形式，保证协方差仍然半正定。

@@ -67,6 +67,10 @@ double wrapAngle(double angle) {
     return angle - kPi;
 }
 
+double foldPeriod(double value, double period) {
+    return std::remainder(value, period);
+}
+
 State transition(const State& x, double dt) {
     validateDt(dt);
     State next = x;
@@ -100,26 +104,6 @@ Measurement measurement(const State& x, int plate_slot, int plate_count) {
     return z;
 }
 
-SphericalMeasurement sphericalMeasurement(const State& x, int plate_slot, int plate_count,
-                                           bool has_yaw) {
-    validateSlot(plate_slot, plate_count);
-    const double phase = platePhase(x, plate_slot, plate_count);
-    const double radius = plateRadius(x, plate_slot, plate_count);
-
-    const double px = x(0) - radius * std::cos(phase);
-    const double py = x(2) - radius * std::sin(phase);
-    const double pz = plateHeight(x, plate_slot, plate_count);
-    const double rho = std::hypot(px, py);
-
-    SphericalMeasurement z;
-    z(0) = std::atan2(py, px);
-    z(1) = std::atan2(pz, rho);
-    z(2) = std::sqrt(rho * rho + pz * pz);
-    // 板面外法向角：measurement() 把板放在 center - r*[cos, sin]，径向朝外即法向。
-    z(3) = has_yaw ? platePhaseToWorldYaw(phase) : 0.0;
-    return z;
-}
-
 double platePhaseToWorldYaw(double phase) {
     return wrapAngle(phase + kPi);
 }
@@ -150,52 +134,6 @@ MeasurementJacobian measurementJacobian(
 
     H(2, 4) = 1.0;
     H(2, 10) = pair;
-    return H;
-}
-
-SphericalJacobian sphericalJacobian(const State& x, int plate_slot, int plate_count,
-                                    bool has_yaw) {
-    validateSlot(plate_slot, plate_count);
-    const double phase = platePhase(x, plate_slot, plate_count);
-    const double radius = plateRadius(x, plate_slot, plate_count);
-    const double pair = usesPairOffset(plate_slot, plate_count) ? 1.0 : 0.0;
-    const double c = std::cos(phase);
-    const double s = std::sin(phase);
-
-    const double px = x(0) - radius * c;
-    const double py = x(2) - radius * s;
-    const double pz = plateHeight(x, plate_slot, plate_count);
-    const double rho2 = px * px + py * py;
-    const double rho = std::sqrt(rho2);
-    const double dist2 = rho2 + pz * pz;
-    const double dist = std::sqrt(dist2);
-    if (!(rho2 > 1e-12) || !(dist2 > 1e-12)) {
-        return SphericalJacobian::Zero();
-    }
-
-    // dp/dx：板心对状态的雅可比（与 measurementJacobian 同源）。
-    Eigen::Matrix<double, 3, kStateDim> dp = Eigen::Matrix<double, 3, kStateDim>::Zero();
-    dp(0, 0) = 1.0;
-    dp(0, 6) = radius * s;
-    dp(0, 8) = -c;
-    dp(0, 9) = -c * pair;
-    dp(1, 2) = 1.0;
-    dp(1, 6) = -radius * c;
-    dp(1, 8) = -s;
-    dp(1, 9) = -s * pair;
-    dp(2, 4) = 1.0;
-    dp(2, 10) = pair;
-
-    SphericalJacobian H = SphericalJacobian::Zero();
-    // yaw = atan2(py, px)
-    H.row(0) = (-py / rho2) * dp.row(0) + (px / rho2) * dp.row(1);
-    // pitch = atan2(pz, rho)
-    H.row(1) = (-pz * px / (rho * dist2)) * dp.row(0) +
-               (-pz * py / (rho * dist2)) * dp.row(1) + (rho / dist2) * dp.row(2);
-    // distance = |p|
-    H.row(2) = (px / dist) * dp.row(0) + (py / dist) * dp.row(1) + (pz / dist) * dp.row(2);
-    // 板面法向角 = phase + pi，只依赖车体 yaw。
-    H(3, 6) = has_yaw ? 1.0 : 0.0;
     return H;
 }
 

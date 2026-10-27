@@ -50,8 +50,6 @@ struct TrackerConfig
     // 过程噪声缩放：默认 1.0 = ProcessNoiseConfig 的原值。自转目标的板心每帧能走
     // 30-50 mm，滤波器 P 收得太紧时会"拒跟"观测（实测状态离刚更新的观测 87 mm）。
     double process_accel_scale{1.0};
-    // 板面法向 yaw 的噪声（弧度）。IPPE 孪生解会让 yaw 差 10~30°，取 0.35。
-    double normal_sigma_rad{0.35};
 
     // === 转速窗口估计（"到底转不转"由数据决定，而不是由调用方声明）===
     //
@@ -67,8 +65,6 @@ struct TrackerConfig
     double rate_min_span_s{0.18};      // 窗口至少要覆盖这么久
     int rate_min_samples{12};          // 至少要这么多帧
     double rate_max_gap_s{0.05};       // 相邻样本间隔超过它就清空窗口（掉帧/换目标）
-    double rate_max_residual_rad{0.60};// 拟合残差超过它就认为法向序列不可信
-    double rate_gate_m{0.60};
     // 转速窗口的关联门限：比位置门严得多。同一台车/相邻车的同编号板可能只差
     // 0.2~0.4 m（实拍 v4 的斜置副板），混进窗口会把相位序列扯成假高速旋转。
     double rate_associate_gate_m{0.15};          // 观测离预测板超过它就不算"自己这台车"
@@ -165,7 +161,6 @@ struct TrackerConfig
     // chi2(4) 的 99.5% 分位是 14.86；没有板法向时第 4 维方差为 1e9、
     // 贡献为 0，等价于 chi2(3)，所以取 14.86 是"最多 4 维"的保守上限。
     double nis_gate{14.86};
-    double handoff_sigma_scale{2.5}; // 已废弃（仅保留字段）：换板不再放大 sigma
     // 观测标准差的地板：单板预测的误差里有一块是"模型误差"（半径/相位/中心
     // 的系统性偏差），不体现在 P 里。地板太小 → NIS 门把有信息的帧全拒了
     // （实拍 v4 旋转目标 466/466 帧被拒）；地板太大 → 更新变钝。
@@ -184,15 +179,6 @@ struct TrackerConfig
     double pair_center_sigma_m{0.05};
     double pair_center_gate_m{0.45};
     int pair_center_min_static_frames{10};
-
-    // 观测平滑：同一槽位连续命中时，对世界系位置做指数平均后再喂滤波器。
-    // 单帧检测抖动（实测 v4 旋转目标相邻帧位移中位 52 mm、静止 3.8 mm）是
-    // 白噪声，平均 N 帧能压到 1/sqrt(N)；换板/换 id/超时立即重置，避免把
-    // 不同板的点混在一起（那会引入 0.4 m 假跳变）。
-    bool observation_smoothing_enabled{false};
-    int smoothing_window{4};            // 参与平均的最大帧数
-    double smoothing_max_spread_m{0.12}; // 新观测离均值超过它 -> 重置而不是并入
-    double smoothing_max_gap_s{0.10};    // 与上次命中的间隔超过它 -> 重置
 
     // 同帧两块板同时可见时，弦长能直接量出半径：R = chord / |n_i - n_j|
     // （相邻两板 |Δn| = √2）。静止目标只露一块板时 R 不可辨识，这条观测是
@@ -234,10 +220,6 @@ struct TrackerConfig
     // 加距离项是刻意的偏离：sp_vision 是"距离筛完再纯按角度挑"，我们没有两趟
     // 筛选，所以用距离项兜住"角度碰巧对上但隔了半米"的错配。
     // 权重单位是 m/rad：0.30 表示 1 rad 的角度差等价于 0.30 m 的位置差。
-    // 板面法向进量测（借鉴 sp_vision_25）。默认关：PnP 法向噪声实测 ±35°，
-    // 直接当量测喂进去在 v4 上反而变差（84.3 -> 86.7~88.8 px，见 docs）。
-    bool plate_normal_measurement_enabled{false};
-    double plate_normal_sign{1.0};
     bool association_by_angle_enabled{true};
     double association_angle_weight_m_per_rad{0.30};
     double normal_tiebreak_weight{0.0};
@@ -255,16 +237,7 @@ struct TrackerConfig
     // 详见 docs/架构重构-板身份多假设方案_2026-10-25.md 与
     // docs/身份后验-从环序假设到精确枚举_2026-10-25.md。
     bool identity_posterior_enabled{true};
-    bool pair_body_solve_enabled{false};
-    // 只在慢转/平移时用双板闭式解：高速自转（>=3 rad/s）时同一帧两块板的
-    // 曝光不是同一瞬间，弦长和法向差都会被拖尾污染，闭式解反而会把相位推歪。
-    double pair_body_max_rate_rad_s{3.0};
-    double pair_body_max_phase_error_rad{0.35};
-    double pair_body_center_gain{0.35};
-    double pair_body_yaw_gain{0.5};
-    double pair_body_radius_gain{0.0};
     bool pair_radius_update_enabled{true};
-    double radius_update_sigma_m{0.06};
     double radius_update_alpha{0.25}; // freeze_radius 时的低通系数（每帧最多靠拢 1/4）
     double radius_update_min_chord_m{0.08}; // 太近的两块板（法向几乎平行）弦长除噪会爆
     // 半径更新只认两种构型：法向差 ~90°（相邻，弦 = √2·R）或 ~180°（对置，弦 = 2R）。
@@ -288,57 +261,11 @@ struct TrackerConfig
     double radius_freeze_residual_ratio{0.01};
     int radius_freeze_confirm{5};
 
-    // 板面法向当"相位观测"塞进滤波器（折叠掉 2pi/N）。实拍小目标法向抖 0.05~0.15
-    // rad，取 0.12；关掉它就退回"yaw 只靠位置间接约束"。
-    // 默认关闭：合成 A 场景实测"打开后 yaw 抖动、半径被压到 0.18（真值 0.25）"，
-    // 因为位置更新与相位更新在"哪个槽位"这件事上互相拉扯。能力保留、单测覆盖
-    // RotatingArmorEkf::updatePhase 本身；等有"按槽位一致"的写法再默认打开。
-    bool phase_update_enabled{false};
     // 静止目标（|omega| < static_rate_rad_s）且同一块板连续可见时，用板面法向
     // 约束车体 yaw。静止时法向没有旋转模糊，是干净量测；单板+钉死半径时
     // (center, yaw) 是规范自由度，不用法向相位就会自由漂移（实拍 v4 静止车
     // 1400 帧时相位偏 1.08 rad，另外三块模型板飞到车外）。
     bool phase_update_when_static{true};
-    // 旋转目标上的"按槽位一致"相位更新：位置更新已经把这块观测分给了
-    // best_slot，相位更新用同一个槽位（updatePhaseForSlot，不做 2pi/N 折叠），
-    // 两者不再打架。折叠版只能修 45 度以内、永远改不了槽位分配，而位置更新
-    // 能推过 45 度边界——实测 tmp/v4.avi 上 yaw 因此单帧跳 140~215 度，
-    // 画面上就是"蓝板转一部分然后卡回去"。
-    // 默认关闭：合成 A/G/H 全部回归（见 git log），只在"按槽位一致 + 双板
-    // 共同约束"完整实现后才能打开。
-        bool slot_from_normal_enabled{false};
-    // 由板法向反推车心：c = p − R·n（true = 用，默认开）。
-    bool center_from_normal_enabled{false};
-    // 相位用板法向直接量测（default 关，--normal-phase 1 打开）
-    // 本轮（2026-10-21）：深度次序硬约束 —— 由板法向直接定"车心在板的后面"。
-    // 模型 plate = centre − R·u(phase)、外法向 = u(phase+π)，所以观测给出
-    //   phase_slot = atan2(n) + π  =>  yaw = phase_slot − slot·(2π/N)
-    //   centre     = p − R·n
-    // 两者是同一个约束的两种写法，同时落地才能保证"蓝板就画在被看见的那块板上、
-    // 且车心比它更远离相机"（用户反馈：蓝板/aim 一直落在远离 gimbal 的一端）。
-    bool normal_anchor_enabled{false};
-    double normal_anchor_gate_m{0.60};
-    double normal_anchor_center_gain{1.0};
-    bool circle_phase_enabled{false};
-    double circle_phase_sigma_rad{0.12};
-    // 多秒窗口联合批处理（default 关，--batch-fit 1 打开）
-    bool batch_fit_enabled{false};
-    double batch_fit_window_s{1.5};
-    int batch_fit_every{2};
-    int batch_fit_min_samples{12};
-    double batch_fit_max_circle_residual_m{0.05};
-    double batch_fit_max_phase_residual_rad{0.50};
-    double batch_fit_min_phase_residual_rad{0.15};
-    // 双板弦方向的相位量测（不吃 ω，见 docs）
-    bool pair_phase_update_enabled{false};
-    double pair_phase_sigma_rad{0.15};
-    double batch_fit_min_coverage_rad{1.20};
-    // 下面两个开关在理论上更正确，但在 v4 上实测更差（见 docs/任务进度备份.md）：
-    // 打开后合成 A/G/H 的 ω 才能估准，所以保留给合成调试用。
-    bool batch_fit_fold_phase{false};
-    bool batch_fit_alias_gate{false};
-    // 只施加"不足一块板"的相位差，保持槽位标号不跳（合成 G 需要）。
-    bool batch_fit_slot_phase{false};
     // 用相邻两帧观测的切向位移直接估 ω：自转目标每帧沿切向走 |Δp|，
     // ω = (Δp · v̂)/R，v̂ 只依赖当前观测相对车心的角度，不依赖槽位。
     // EKF 自己的 ω 在单板自转时会衰减到 ~0（位置更新不断把相位拉回），
@@ -351,45 +278,12 @@ struct TrackerConfig
     // 它们之间来回跳（实测 61% 的相邻帧框中心跳 >25 px）。30 fps 下同一块板
     // 一秒内不可能跳 0.15 m，所以用"与上一次被接受的观测的距离"做硬门，
     // 把另一块道具永久排除，而不是靠预测门（预测本身就偏，收紧预测门反而更差）。
-    // 每帧用最近窗口的板心圆 (c, R) 直接覆盖状态，相位/ω 不动。
-    // 依据：v4 上把模型整体转任意 δ 都救不回来（残差恒 9cm），说明错的是圆不是相位；
-    // 而同一段数据的窗口圆拟合残差只有 0.011-0.014 m。
-    bool body_circle_enabled{false};
-    double body_circle_window_s{1.2};
-    int body_circle_min_samples{24};
-    double body_circle_max_residual_m{0.05};
-    bool obs_continuity_gate_enabled{false};
-    double obs_continuity_gate_m{0.15};
-    bool tracklet_rate_enabled{false};
-    double tracklet_max_step_m{0.15};
-    int tracklet_min_samples{12};
-    double tracklet_min_duration_s{0.25};
-    double tracklet_min_arc_rad{1.00};
-    double tracklet_max_residual_m{0.03};
-    bool tangent_rate_enabled{false};
-    double tangent_rate_alpha{0.25};
-    double tangent_rate_max_step_m{0.15};
-    bool normal_phase_enabled{false};
-    double normal_phase_sigma_rad{0.35};
-    double normal_phase_min_facing{0.30};
-    // 整车"原地自转"假设：车心当准静态量，更新后低通拉回去（默认开）。
-    // 整车重拟合：用滑动窗口里的板心圆拟合，定期校准车心与半径。
-    bool body_refit_enabled{false};
-    int body_refit_every{25};
-    int body_refit_min_samples{60};
-    double body_refit_max_residual{0.05};
-    double body_refit_window_s{2.0};
-    double center_from_normal_sigma_m{0.05};
-    double center_from_normal_gate_m{0.15};
-    double center_from_normal_max_rate_rad_s{2.5};
-    bool slot_phase_update_enabled{false};
     // ===== 参考实现移植（sp_vision_25 target.cpp:187-222，2026-10-25）=====
     // 朝向角直接量测进默认路径：每次位置更新用同一个 best_slot 做角度更新
     // （updateFaceYawForSlot，残差折叠 ±pi）。σ 按斜视角对数放大
     // （sqrt(log(|Δ|+1)+1)，Δ=板外法向与"板→相机"方向夹角，正对 ~1.0 rad）——
     // 角度量测天生弱，与位置更新不打架（round-17 的回归用的是 σ=0.12 强锁）；
     // w 由 Q 的 (a,w) 交叉协方差被连续拉拽（angular_accel 已对齐 400）。
-    // 环境变量 EKF_NO_ANGLE_UPDATE 可整体关闭。
     bool reference_angle_update_enabled{true};
     // σ 取 2.5 的依据（G 组扫参 2026-10-25）：1.0/1.55 在 ω=6/8 rad/s 上把相位
     // 抖出 3cm 门（命中率 33~74%），2.5/4.0 全过（96~98%）。参考实现能扛 1.55
@@ -409,10 +303,6 @@ struct TrackerConfig
     // ≈0.30 rad——它本来就是"角度量测天生弱"的弱化通道，不是真的想把 σ 拉大。
     bool angle_state_obliquity_sigma{true};
     double angle_state_sigma_rad{0.31};
-    // 槽位相位更新的触发下界。用 static_rate_rad_s(1.2) 会让静止车上的 omega
-    // 抖动也偶尔触发（实测 id=1 的 PIX 样本数 516 -> 279）。但取 3.0 会让转子
-    // 低速段失去槽位锁定（id=3 82.2 -> 91.2），所以仍用 1.2。
-    double slot_phase_min_rate_rad_s{1.2};
     // 单板重锚：更新后状态里的板离观测还超过这个距离（相位漂了一整块板 / NIS
     // 门锁死）时，直接用这块板把相位+中心对齐。0 表示关闭。
     //
@@ -435,18 +325,10 @@ struct TrackerConfig
     // 相位修正变成中心漂移。两种做法都保留，A/B 用。
     bool phase_anti_anchor{true};
     int bootstrap_updates{10};   // 锁定期头几次更新先放宽 NIS 门（初值靠单帧法向，偏差可比预想大）
-    // 声明反驳检查：法向历史里混入相邻板样本时斜率会失真，实拍里会误杀，
-    // 默认关闭；需要时打开（合成夹具与 v4 的静止车都不需要它）。
-    bool contradiction_check{false};
     // 同帧每块匹配上的板都做一次完整 EKF 更新（sp_vision_25 tracker.cpp:286-293
     // 就是 for-each-armor 依次 update）。四板车体同帧最多可能看到 2~3 块，
     // 上限设 4 等于不设限，仍保留一个上限防止病态输入。
     int max_updates_per_frame{4}; // 同一帧最多用几块板更新（防止病态约束）
-    // 每个槽位是否各自学"半径/角度/高度"偏移（只影响显示用的模型板位置）。
-    // 打开时四块模型板各有圆心，单块板能贴得很紧，代价是它们不再是一个刚体：
-    // 槽位分配在两块同号板之间跳时偏移量跟着跳，画出来就是"转一半又卡回"。
-    // 关掉后四块板严格共享 (cx, cy, R, phase)，同速度同方向同圆心。
-    bool slot_offsets_enabled{false};
     // 允许"锁定号消失、画面里出现别的号"时换目标（单目标模式用）。
     // 多目标模式必须关：一辆车的 EKF 不许自己改板号。
     bool target_switch_enabled{true};
@@ -471,13 +353,6 @@ struct TrackerConfig
     // 局部预测：连续 N 帧无观测后，每帧把角速度乘以 decay（避免无依据地继续转）
     int coast_decay_after_frames{3};
     double coast_omega_decay{0.90};
-    // 角速度修正（PLL）：相位残差的斜率就是角速度误差，直接补到 omega 上。
-    // PLL 版（相位残差斜率）：残差里混着槽位归属误差，实测会飙到 ±12 饱和，
-    // 默认关，只作诊断开关保留。
-    bool rate_from_residual_enabled{false};
-    double rate_residual_window_s{0.6};
-    int rate_residual_min_samples{5};
-    double rate_residual_gain{0.8};
     // 同板角速度量测：连续两帧确认是"同一块板"时，板心绕车心的转角差就是 ω。
     // 直接写 omega 会让合成 F/G/H 回归（预测延迟、高速自转、转速自判）失准：
     // 噪声量测把角速度的协方差信息绕过去了。默认关，用 --rate-tracklet 1 打开。
@@ -492,22 +367,12 @@ struct TrackerConfig
     double rate_tracklet_min_rate_rad_s{3.0};
     // 先攒够更新再动 omega；每次最多改这么多，避免一两帧噪声把转速带飞。
     int rate_tracklet_min_updates{12};
-    // 绿色窗口圆（仅显示）：窗口长度与最小样本数。
-    // 窗口转速估计：切段跳变阈值、最小转速、拟合不确定度下限。
-    // （窗口长度复用上面的 rate_window_s，拟合器用同一个窗口。）
-    // 窗口转速量测：实测能给出 |ω|≈3.9 但拟合残差 0.19 rad/0.22 s（σ≈0.85），
-    // 滤波器正确地不太相信它；默认关，留作诊断。
-    bool rate_window_enabled{false};
-    double rate_segment_jump_m{0.12};
-    double rate_window_min_rate_rad_s{0.5};
-    double rate_window_sigma_floor_rad_s{0.25};
+    // 绿色窗口圆（仅显示，不写回状态）：窗口长度与最小样本数。
     double detected_circle_window_s{1.0};
     int detected_circle_min_samples{8};
     // 角速度量测的噪声：板心角度差的 1-sigma，以及下限（rad/s）。
     double rate_tracklet_sigma_theta_rad{0.06};
     double rate_tracklet_sigma_floor_rad_s{0.35};
-    // 用量测而不是硬写之后，这个开关可以默认打开（合成 F/G/H 仍然要绿）。
-    bool rate_measurement_enabled{true};
     // 角加速度过程噪声（连续白噪声谱密度 q，Q_ω = q · dt）。
     //
     // 【2026-10-25 参考对齐】原来的"按 tracklet |ω| EMA 分档的线性软门"
@@ -528,77 +393,10 @@ struct TrackerConfig
     double process_angular_accel{4.0};
     // 仅 tracklet 路径使用的有符号 EMA 系数（真自转同向、抖动正负抵消）。
     double adaptive_spin_alpha{0.25};
-    double rate_tracklet_max_step_rad_s{0.4};
-
-    // ===== 唯一量测通道：窗口相位斜率（2026-10-25）=====
-    //
-    // 依据 docs/转速架构-唯一量测通道方案_2026-10-25.md：单帧转速信噪比只有
-    // **0.08**（1.1 rad/s、R=0.17 m、dt=6 ms 下每帧旋转位移 1.13 mm，而单帧
-    // 位置噪声 σ=13.8 mm）。所以任何"逐帧差分"（角度差/切向投影/PLL 残差）
-    // 在数学上都不可能工作——这不是调参问题。窗口最小二乘能把不确定性压到
-    // σ_ω = σ_α/√Sxx：σ_α=0.081 rad 时，60 帧（0.36 s）给出 σ_ω≈0.10 rad/s，
-    // 对 1.1 rad/s 是 9% 精度，够用。
-    //
-    // 三段职责，缺一不可：
-    //   ① 观测量 = 窗口内"同一块板"板心绕**固定**车心的方位角斜率。
-    //      车心取 EKF 当前 state(0),state(2)，半径取 state(8) 且**不参与拟合**。
-    //      R 自由时短弧上 (R,ω) 病态——batch_fit 实测解出 R=0.008~0.019 m
-    //      （真值 0.17），ω 一路撞 ±12 饱和，一开 v4 ≤5cm 73.2→48.7。
-    //   ② 融合 = ekf_.updateRate(ω, σ_ω)。**不许** setRate/rotatePhase/
-    //      shiftCenter 硬写：硬写抹掉协方差，量测对了滤波器照样崩。
-    //   ③ 门控 = 显著性检验 |ω| > 3σ_ω，不是 |ω| > 0.5 或 3.0 这种绝对阈值。
-    //      静止时斜率≈0 而 σ 覆盖 0，自动不更新——H 组契约不需要靠
-    //      "1.5/3.0 rad/s"这类场景相关门限来保护。
-    //
-    // Q 保持常量（见 process_angular_accel）：φ 由 ω 传播（F(6,7)=dt），
-    // 不再靠角度残差硬拽，所以"Q 大→φ 漂、Q 小→ω 冻"这个矛盾从根上消失。
-    bool rate_phase_window_enabled{false};
-    int rate_phase_window_n{60};        // 窗口样本数（166 fps ≈ 0.36 s）
-    int rate_phase_min_samples{40};     // 少于它不估（σ_ω 还压不下来）
-    int rate_phase_stride_frames{8};    // 每隔几帧估一次：相邻窗共享样本，太密等于重复用同一份证据
-    double rate_phase_sigma_floor_rad_s{0.05}; // σ_ω 下界
-    double rate_phase_significance{5.0};       // |ω| > k·σ_ω 才更新
-    // 切段阈值（米）。**不**按"换板"切段：四块板相隔 90°，fold90 展开时换板的
-    // 90° 跳变正好被折掉，弧长本来就该连续。按 0.10 m 切会把每次换板都开一段，
-    // 合成夹具里 chosen 频繁换板 → 窗口永远攒不满 40 个样本 → 通道完全不触发
-    // （G 组 ω 估计掉到 0）。所以阈值放到 0.45 m（R=0.25 时相邻板相距 0.35 m），
-    // 只切"跳到别的车/别的目标"这种真正的不连续；斜置副板那种非圆轨迹由
-    // rate_phase_max_radius_rms_m 兜住。
-    double rate_phase_jump_m{0.45};
-    double rate_phase_max_abs_rad_s{12.0};     // 物理上限（四板车实测最快 8）
-    // 半径一致性门（RMS，米）：窗口内样本到车心的距离必须恒定（=R）。
-    // 这条是 2026-10-25 实测补出来的：v4 有一段窗口切向斜率读出 -3.5 rad/s
-    // （真值 ~1.1），离线查出来是样本半径在 0.19~0.33 m 之间散开（RMS 4.0 cm）。
-    // 车心在动、或续到别的板上时，"绕车心的方位角"已经不再是转角，斜率就没意义。
-    // 好窗口的 RMS ≈1.4~2 cm（就是 PnP 位置噪声），所以 2.8 cm 能把两者分开。
-    double rate_phase_max_radius_rms_m{0.028};
-    // ===== 两路交叉校验（2026-10-25 第二轮）=====
-    //
-    // 单路的实验数据（§四十八）说明"必须收敛成一条"这个判断只对了一半：
-    // 单条通道各有自己的致命盲区，而它们的**误差来源正交**——
-    //   · 相位斜率（板心绕车心的方位角）：不需要板面法向，对 PnP 法向噪声免疫；
-    //     但车心漂 4 cm 就能把斜率污染成 −3.46 rad/s（真值 ~1.1）。
-    //   · 法向斜率（板面 yaw）：**完全不需要车心**，对中心漂移免疫；
-    //     但 PnP 法向噪声实测 ±35°，单帧不可用。
-    // 所以两条都算、只在互相印证时才用，且不新增任何场景相关门限：
-    // 判据是"两个独立估计在各自的不确定度内一致"，不是"速度超过某个阈值"。
-    //
-    // 法向的 90°（换板）与 180°（法向翻转）跳变都会被 fold ±45° 折掉，
-    // 因为两者都是 90° 的整数倍——这一点和相位斜率完全同源。
-    bool rate_phase_require_normal{true};
-    // 两路一致判据：|ω_p − ω_n| ≤ k·√(σ_p²+σ_n²)。k 取 2.5 是"两个估计都
-    // 落在 2.5σ 内"，对单个野值不敏感，又不至于把真实的一致判成不一致。
-    double rate_phase_agreement_sigma{2.5};
-    // 段末端允许落后多久（秒）：太旧的段不能用来描述"现在"转多快。
-    double rate_phase_max_tail_gap_s{0.15};
-    // 同一段至少要覆盖的时间跨度（秒）。0.12 s 是 60 帧窗口在 8 帧节流下的
-    // 最坏情况；跨度再短时 Sxx 太小，σ_ω 会自己炸大，门会自然拒掉。
-    double rate_phase_min_span_s{0.12};
 
     // === 状态机 ===
     int stable_updates{12};
     double stable_min_lock_s{0.60}; // 上锁后至少这么久才允许报 Stable          // 连续接受多少帧才允许报 Stable
-    int unstable_after_missed{2};    // 仅供诊断：Stable 的降级判据已改为按秒（见 stale_after_s）
     double stale_after_s{0.10};      // 距上次被接收更新超过此秒数即判 Unstable（上限）
     // 自适应过期窗口：窗口 = min(stale_after_s, max(stale_min_s, stale_min_frames*dt))。
     // 166fps 下 0.10s 等于 17 帧，旋转目标早转过 90°；30fps 下又刚好 3 帧。
@@ -606,20 +404,8 @@ struct TrackerConfig
     double stale_min_frames{5.0};
     double stale_min_s{0.05};
     double timeout_s{0.60};          // 超过多久没有任何有效观测 -> 注销
-    // 掉线快照续接：注销时把状态留一份，同一编号在 relock_reuse_s 内又出现，
-    // 直接把旧状态装回去，省掉 10 个样本的重新收集。
-    // 默认关闭：实测（v4 --only-id 3 / v1）续接能多救回 10% 的帧、把 Collecting
-    // 从 319 帧压到 233 帧、p99 从 0.99 m 降到 0.58 m，但**中位残差变差**
-    // （99 -> 115 mm），因为救回来的那批帧本身就是"拿 0.25 s 前的状态外推"，
-    // 旋转目标在空窗里已经转过几十度。空窗越短越糟（0.10 s 时中位 1.35 m），
-    // 说明这类帧不是"续一下就好"，而是必须重新锁定。
-    bool relock_reuse_enabled{false};
-    double relock_reuse_s{0.25};
-
     // === 声明校验（Static/Spinning 被数据反驳时重锁）===
     int relock_frames{6};
-    double relock_omega_diff_rad_s{1.0};
-    double relock_min_span_s{0.18};
 
     // === 输出 ===
     double max_bias_s{0.80};
@@ -634,7 +420,6 @@ struct TrackerConfig
     double fire_max_age_s{0.20};    // 最近一次有效观测距今多久内允许开火
     double min_distance_m{0.40};
     double max_distance_m{12.0};
-    double switch_margin_rad{0.06}; // 换板迟滞：别的板要明显更好才换
     // 瞄准点只允许落在"最近真的被看见过"的板上：四块板里总有一两块朝向车体
     // 背面（几何上真实存在、但检测不到），按角度挑会挑到它们身上（实拍 v4 静止
     // 1384 帧全aim=3、看见的是 slot 0，瞄准点画到板外 0.35 m）。这个时间窗内
@@ -645,9 +430,6 @@ struct TrackerConfig
     double forced_omega_rad_s{std::numeric_limits<double>::quiet_NaN()};
     // 瞄准点直接用"最近一次观测到的板心"的时间窗（秒）。0 = 关闭，退回 EKF。
     double aim_observation_hold_s{0.012};
-    // 允许"新鲜观测外推"在任意预测时域下使用（默认只在零时域时用 EKF 四板模型）。
-    // 实拍 v4 末段状态落后 0.19 m、而观测是 0~6 ms 前的真值，外推量只有 omega*30 ms。
-    bool aim_observation_any_horizon{false};
     // 观测外推时是否按 omega 转动：omega 不可靠时（旋转模糊/换板）外推会把
     // 瞄准点推得比"原地不动"更远，关掉更稳。
     bool aim_observation_extrapolate{true};
@@ -714,10 +496,6 @@ inline const char *motionModeName(MotionMode mode)
 struct TrackerDiagnostics
 {
     LockPhase phase{LockPhase::Idle};
-    std::uint64_t batch_fits{0};
-    std::uint64_t tracklet_rates{0};
-    std::uint64_t continuity_rejects{0}; // 观测连续性门拒掉的候选数
-    std::uint64_t body_circles{0};       // 每帧板心圆覆盖次数
     // 绿色（实测反推车体）显示用的窗口圆：窗口内板心的最小二乘圆。
     // 逐帧单板解会被 PnP 噪声带得抖 2-6 cm；窗口圆残差只有 ~1 cm。
     // 只用于显示，不写回状态。
@@ -741,17 +519,11 @@ struct TrackerDiagnostics
     bool radius_from_data{false};
     bool phase_flipped{false};
     std::uint64_t accepted_updates{0};
-    // 双板整车求解（两块相邻板精确解出 c/R/yaw）生效的帧数。
-    std::uint64_t pair_body_solves{0};
     // 单板重锚（rotatePhase+shiftCenter 硬对齐）触发次数。每次触发都会让
     // 状态瞬间跳到观测上，观感就是"转一部分又卡回去"；这个计数用来区分
     // "滤波器在跟踪"和"滤波器被硬覆盖"。
     std::uint64_t single_plate_realigns{0};
     std::uint64_t rate_measurements{0};
-    std::uint64_t normal_anchors{0};
-    std::uint64_t pair_phase_updates{0};
-    std::uint64_t center_from_normal_updates{0};
-    std::uint64_t body_refits{0};
     int consecutive_updates{0};
     int missed_frames{0};
     double observation_noise_m{0.0}; // 本帧使用的观测噪声 sigma（m）
@@ -809,12 +581,6 @@ public:
     // 独立相位量测（LED 灯条给出的板面法向）。内部按 phase_anti_anchor 决定
     // 是否把中心反锚、让瞄准板保持原位。
     bool applyPhaseMeasurement(double world_yaw_rad, double sigma_rad);
-
-    // 图像域转速量测注入（系统视图层用）：亮斑图案频率通道等"不经过
-    // WorldObservation"的转速证据走这里。与窗口证据同一套记账（成功后
-    // 盖章，衰减块让路）。检测只出正对板框时（v4 实拍：位置/法向/弦向
-    // 全部读 ≈0，真实 8 rad/s 自转不可观测），这是唯一能立起 omega 的路。
-    bool injectRateObservation(double omega_rad_s, double sigma_rad_s, double timestamp_s);
 
 
     // 与 ekf_predict 同签名：喂进本帧的全部装甲板位姿，返回本帧应该发出去的结果。
@@ -881,12 +647,6 @@ private:
         double sigma_position_m{0.03};
     };
 
-    struct RateResidual
-    {
-        double timestamp_s{0.0};
-        double residual_rad{0.0};
-    };
-
     struct LockSample
     {
         double timestamp_s{0.0};
@@ -908,32 +668,6 @@ private:
     };
     static CircleFit fitArmorCircle(const std::deque<LockSample>& samples);
 
-    // 沿一段"同一块板"的轨迹：中心固定后，各样本相对中心的角度连续可展开，
-    // 对 (t, theta) 做最小二乘斜率即得 ω；arc 为展开后的总转角，
-    // resid 为样本到圆心的径向残差 rms。
-    static bool estimateRateAlongTracklet(const std::deque<LockSample>& samples, const CircleFit& centre,
-                                          double* rate_rad_s, double* arc_rad, double* residual_m);
-
-    // 多秒窗口联合批处理：一次性解 (cx, cy, R, ω, φ)。
-    // 动机：单帧单板只有 2 个方程，相位不可观测；而 1 s 窗口里板心本来就
-    // 落在同一个圆上（实测同窗口圆拟合残差 1.1 cm），数据是自洽的，
-    // 是逐帧滤波器在浪费它。离线验证：窗口拟合预测下一帧的误差 0.086 m
-    //（≈37 px），而逐帧 EKF 的 PIX 中位数是 90 px。
-    struct BodyBatchFit
-    {
-        bool ok{false};
-        Eigen::Vector2d center{Eigen::Vector2d::Zero()};
-        double radius{0.0};
-        double rate_rad_s{0.0};
-        double phase_rad{0.0};        // 窗口起点时刻的相位
-        double circle_residual_m{0.0};
-        double phase_residual_rad{0.0};
-        double coverage_rad{0.0};
-        int used{0};
-    };
-    static BodyBatchFit fitBodyBatch(const std::deque<LockSample>& samples, int plate_count,
-                                    double omega_hint, double config_coverage_min,
-                                    bool fold_phase, bool alias_gate);
     // 半径的"慢"通道：所有想改半径的地方都走这里，先过一阶滤波再写进 EKF。
     // 直接 setRadius(fit.radius) 会让半径在重拟合时整段跳变（v4 实测 0.28->0.15）。
     void applySlowRadius(double candidate_radius);
@@ -968,19 +702,6 @@ private:
     // 返回 false 表示本帧不该走这条路径（单板帧 / 未锁定 / 数值异常）。
     bool identityPosteriorAssignment(const std::vector<WorldObservation>& world, double timestamp_s,
                                      std::vector<int>& slot_of);
-    // 观测平滑（见 TrackerConfig::observation_smoothing_enabled）：返回 true 时
-    // out 是平滑后的观测，否则调用方用原始观测。
-    bool smoothObservation(const WorldObservation& observation, int slot,
-                           double timestamp_s, ArmorObservation& out);
-    struct ObservationSmoother
-    {
-        Eigen::Vector3d mean{Eigen::Vector3d::Zero()};
-        int slot{-1};
-        int target_id{-1};
-        int count{0};
-        double timestamp_s{0.0};
-    };
-    ObservationSmoother smoother_;
     // 观测噪声估计用的历史（只放被接受的观测，按时间升序）。
     struct NoiseSample { Eigen::Vector3d position; double timestamp_s; };
     std::deque<NoiseSample> noise_samples_;
@@ -1003,14 +724,6 @@ private:
     bool aim_smoothed_valid_{false};
     // 同帧双板弦长 -> 半径观测（见 .cpp 里的推导）。
     void updateRadiusFromPairs(const std::vector<WorldObservation> &world);
-    // 两块相邻板闭式解 (车心, 半径, 相位) 并软更新到状态上。返回是否生效。
-    bool updateBodyFromPair(const std::vector<WorldObservation> &world);
-    // 掉线快照续接（见 config_.relock_reuse_enabled）。
-    bool tryRestoreSnapshot(const std::vector<WorldObservation> &world, double timestamp_seconds);
-
-    // 声明是否被观测反驳（Static/Spinning 判错、或目标转速突变）。
-    bool declarationContradicted(const std::vector<WorldObservation>& world,
-                                 double timestamp_s);
 
     // 填写输出（含瞄准板选择、开火许可、数值合法性检查）。
     PredictionResult buildResult(const GimbalState& gimbal, double timestamp_s);
@@ -1018,14 +731,9 @@ private:
     // 丢掉当前目标并转入重新收集（保留会话级计数与诊断）。
     void dropTarget(const char* reason);
 
-    // 转速窗口估计：见 TrackerConfig 里 rate_* 的说明。
     // 上一帧真正被接受的更新数；重锚要求"连续更新不进去"，单帧离群不行。
     int last_updates_{0};
     double last_rate_update_s_{-1.0e9};
-    // 图像域注入的有效期：注入是强证据（σ 小），窗口路在这种场景下读出的
-    // ≈0 是"看不见"不是"没转"（v4 实拍 8 rad/s 不可观测），两路不能对打——
-    // 注入后这短时间内窗口证据让路（样本照常收集）。
-    double injected_rate_until_s_{-1.0e9};
     struct RateSample
     {
         double timestamp_s{0.0};
@@ -1043,13 +751,6 @@ private:
     std::deque<RateSample> rate_samples_{};
     void updateYawRateFromWindow(const std::vector<WorldObservation>& world,
                                  double timestamp_s);
-    // 唯一量测通道（见 TrackerConfig::rate_phase_window_enabled 的注释）。
-    void updateRateFromPhaseWindow(double timestamp_s);
-    void resetPhaseWindow()
-    {
-        phase_window_samples_.clear();
-        phase_window_stride_ = 0;
-    }
     void resetRateWindow()
     {
         rate_samples_.clear();
@@ -1075,9 +776,6 @@ private:
     };
     std::deque<RawNormalSample> raw_normal_samples_;
 
-    // 把某个 slot 的法向 yaw 记入历史（用于检查"转/不转"的声明是否被数据反驳）。
-    void pushNormalHistory(int plate_slot, double timestamp_s, double world_yaw_rad);
-
     TrackerConfig config_{};
     RotatingArmorEkf ekf_{config_.ekf};
     TrackerDiagnostics diagnostics_{};
@@ -1096,17 +794,8 @@ private:
     // 太早报 Stable 会让瞄准点在收敛过程中乱跳（合成 G：ω=4 时前 ~60 帧
     // ω 还停在 1.2，瞄准误差 6-8 cm）。
     double lock_start_s_{-1.0};
-    // 掉线快照（注销时留一份，短间隔内同编号再现就直接续上）。
-    bool has_snapshot_{false};
-    State snapshot_state_{State::Zero()};
-    Covariance snapshot_covariance_{Covariance::Zero()};
-    double snapshot_s_{0.0};
-    int snapshot_id_{0};
-    bool snapshot_phase_resolved_{false};
-    bool snapshot_spin_pinned_{false};
     int consecutive_updates_{0};
     int missed_frames_{0};
-    std::deque<RateResidual> rate_residual_samples_;
     Eigen::Vector2d rate_last_position_{0.0, 0.0};
     double rate_last_time_s_{-1.0};
     double rate_signed_ema_{0.0};
@@ -1119,12 +808,6 @@ private:
     int last_updated_slot_{-1};
     // 半径的慢估计（见 radius_track_smooth_alpha）。跨锁定保留，故意不在 reset() 里清。
     double radius_track_m_{-1.0};
-    Eigen::Vector3d last_accepted_position_{0.0, 0.0, 0.0};
-    bool has_last_accepted_position_{false};
-    // 相邻两帧观测的位移 → 切向速度 → ω（不依赖相位/槽位，见 docs）
-    Eigen::Vector2d tangent_last_position_{0.0, 0.0};
-    double tangent_last_time_s_{-1.0};
-    bool tangent_has_last_{false};
     int radius_updates_{0};   // 本次锁定后已用弦长修正过几次半径
     // 半径冻结（见 TrackerConfig::radius_freeze_residual_ratio）。冻结后 applySlowRadius
     // 一律直接返回：弦长、圆拟合、批拟合三条写入路径全走它，一处闸门就够。
@@ -1136,34 +819,17 @@ private:
     int static_streak_{0};    // 连续判为 static 的帧数（半径学习只信它）
 
     std::deque<LockSample> lock_samples_{};
-    // 每个 slot 一份：(timestamp, 解缠后的法向 yaw)，用于估计观测到的角速度。
-    // 必须按 slot 分开：同一辆车不同装甲板的法向相差 2*pi*k/N，
-    // 混在一起会让斜率完全失真。
-    std::vector<std::deque<std::pair<double, double>>> normal_history_per_slot_{};
     // 最近若干帧的间隔，只用来做"帧 <-> 秒"的换算（自适应过期窗口）。
     std::deque<double> recent_dt_{};
-    int contradiction_streak_{0};
     int relock_count_{0};
 
-    // 最近一次成功锁定用到的量（诊断/测试用）
-    double locked_radius_m_{0.0};
+    // 最近一次成功锁定时的转速快照（diagnostics_.locked_spin_rad_s 的来源）
     double locked_spin_rad_s_{0.0};
-    int body_refit_countdown_{0};
-    int batch_fit_countdown_{0};
-    Eigen::Vector2d refit_center_{Eigen::Vector2d::Zero()};
-    bool refit_center_valid_{false};
+    // 板心滑窗样本（绿色窗口圆显示用；故意不在 reset() 里清，跨锁保留轨迹）。
     std::deque<LockSample> body_samples_;
-    std::deque<LockSample> tracklet_samples_;
-    // 窗口相位斜率通道的样本缓冲（与 body_samples_ 分开）：
-    // body_samples_ 故意不在 reset() 里清（body_refit 要跨锁保留轨迹），
-    // 但转速窗口绝不能跨锁——上一台车的板心轨迹算出来的斜率是垃圾。
-    std::deque<LockSample> phase_window_samples_;
-    int phase_window_stride_{0};
     bool has_pair_relock_{false};
     double last_pair_relock_s_{0.0};
     double timestamp_s_{0.0};
-    bool lock_radius_from_data_{false};
-    bool lock_phase_flipped_{false};
 };
 
 } // namespace rotating_armor
