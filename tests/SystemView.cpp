@@ -461,10 +461,25 @@ cv::Mat renderMiniTopDown(const MiniTopDownFrame &frame, const MiniTopDownOption
 
     // 画布坐标：右 = +x，上 = +y（与俯视图 HUD 的 +x/+y 一致）。
     //
-    // 缩放口径：**以车为准**（4 块板 + 车心 + 瞄准点），按包围盒自动定尺度。
-    // 相机在 2 m 外，若把它也算进包围盒，车就只有几十像素、板看不清——所以
-    // 默认只用车定尺度，相机落在画面外时贴边画一个箭头 + 距离，"往哪边、多远"
-    // 照样一眼看到。options.fit_camera=true 才是"相机与车一起装进画面"的字面口径。
+    // 【2026-10-27 相机贴边取景】相机被压到画布的一条边上（默认左边），画布只
+    // 覆盖相机**前方** fixed_view_distance_m 米。相机后方的世界永远没有观测，
+    // 把半张画布留给它是纯浪费；贴边之后同样的 480×360 能多看约 1.5 倍距离。
+    //
+    // ppm 的算法也要跟着换：原来相机在正中，ppm 由"半幅 = extent"定，距离等于
+    // 画布半宽；现在距离是"相机边 → 对边"的整个像素跨度，ppm 必须按这个跨度
+    // 算，视野才真的变大（否则只是把相机挪走了、车反而更早贴边）。
+    //
+    // 代价：车跑出前方 fixed_view_distance_m 会贴边（下面用 clamped 分支交代
+    // 方向与距离），这是固定视角的必然取舍。
+    const double fixed_distance = options.fixed_view_distance_m;
+    const bool use_fixed_frame = std::isfinite(fixed_distance) && fixed_distance > 1.0e-3;
+    const int cam_edge = std::clamp(options.fixed_camera_edge, 0, 3);
+    const int inset = std::max(4, options.camera_icon_inset);
+    // 相机所在边 → 前进方向的画布像素单位（x 右为正、y 下为正）。
+    const double fx = (cam_edge == 0) ? 1.0 : (cam_edge == 1) ? -1.0 : 0.0;
+    const double fy = (cam_edge == 2) ? -1.0 : (cam_edge == 3) ? 1.0 : 0.0;
+
+    // 内容包围盒（只在非固定取景时才用得上）。
     std::vector<Eigen::Vector2d> vehicle;
     if (frame.has_body)
         vehicle.emplace_back(frame.body_centre.x(), frame.body_centre.y());
@@ -511,10 +526,44 @@ cv::Mat renderMiniTopDown(const MiniTopDownFrame &frame, const MiniTopDownOption
         half_y = 0.5 * (max_y - min_y);
     }
 
-    // 视野半径 = 内容半宽 + 外扩；再兜一个下限，避免"全在原点"时放大到无穷。
-    double half_extent = std::max(half_x, half_y) + options.margin_m;
-    half_extent = std::max(half_extent, options.min_half_extent_m);
-    const double ppm = 0.5 * static_cast<double>(std::min(width, height)) / half_extent;
+    double half_extent = 0.0;
+    double ppm = 0.0;
+    cv::Point2d cam_px; // 相机在画布上的像素位置（固定取景时恒在图示边缘）
+    if (use_fixed_frame)
+    {
+        const double cam_wx = frame.camera_position.x();
+        const double cam_wy = frame.camera_position.y();
+
+        // 相机钉在选定边的中点（inset 像素内缩）。"到对边的跨度"就是这张图
+        // 能覆盖的多远——这正是 fixed_view_distance_m 的口径。
+        const double cam_px_x = (cam_edge == 0) ? inset
+                                : (cam_edge == 1) ? (width - inset)
+                                                  : 0.5 * width;
+        const double cam_px_y = (cam_edge == 3) ? inset
+                                : (cam_edge == 2) ? (height - inset)
+                                                  : 0.5 * height;
+        cam_px = cv::Point2d(cam_px_x, cam_px_y);
+
+        // 跨度 = 相机边到对边（扣掉两侧 inset），换算成像素/米。
+        const double span_px = (cam_edge <= 1) ? static_cast<double>(width - 2 * inset)
+                                               : static_cast<double>(height - 2 * inset);
+        ppm = span_px / fixed_distance;
+
+        // 由"相机像素位置 + ppm"反解世界系中心，交给下面统一的 to_px 用。
+        // to_px: px_x = 0.5w + (x - cx)·ppm  ⇒  cx = x_cam - (px_cam - 0.5w)/ppm
+        centre_x = cam_wx - (cam_px_x - 0.5 * width) / ppm;
+        centre_y = cam_wy + (cam_px_y - 0.5 * height) / ppm; // y 轴反向
+        half_extent = fixed_distance;
+    }
+    else
+    {
+        // 视野半径 = 内容半宽 + 外扩；再兜一个下限，避免"全在原点"时放大到无穷。
+        half_extent = std::max(half_x, half_y) + options.margin_m;
+        half_extent = std::max(half_extent, options.min_half_extent_m);
+        ppm = 0.5 * static_cast<double>(std::min(width, height)) / half_extent;
+        cam_px = cv::Point2d(0.5 * width + (frame.camera_position.x() - centre_x) * ppm,
+                             0.5 * height - (frame.camera_position.y() - centre_y) * ppm);
+    }
 
     const auto to_px = [&](double x, double y)
     {
@@ -585,49 +634,113 @@ cv::Mat renderMiniTopDown(const MiniTopDownFrame &frame, const MiniTopDownOption
     if (canvas_rect.contains(origin_px))
         cv::circle(canvas, origin_px, 4, cv::Scalar(120, 120, 120), 1, cv::LINE_AA);
 
-    // 相机位置：白色小方块 + 朝 +x 的短线。落在画面外时贴边画，指着真实方向，
-    // 并把距离写出来——"车往哪边走、离相机多远"不用再回头看数字。
-    const cv::Point cam_raw = to_px(frame.camera_position.x(), frame.camera_position.y());
+    // 相机位置：白色小方块 + 朝视野内侧的短线。固定取景时相机钉在边缘，
+    // 直接画；只有自动缩放路径下相机才可能跑到画面外，那时贴边画三角指方向。
+    const cv::Point cam_raw(cvRound(cam_px.x), cvRound(cam_px.y));
     const int edge = 12;
-    const bool cam_visible = cam_raw.x >= edge && cam_raw.x < width - edge &&
-                             cam_raw.y >= edge && cam_raw.y < height - edge;
     cv::Point cam = cam_raw;
-    if (!cam_visible)
+    if (use_fixed_frame)
     {
-        const cv::Point2d mid(0.5 * width, 0.5 * height);
-        cv::Point2d dir(cam_raw.x - mid.x, cam_raw.y - mid.y);
-        const double len = std::hypot(dir.x, dir.y);
-        if (len < 1e-6)
-            dir = cv::Point2d(-1.0, 0.0), dir = dir / cv::norm(dir);
-        else
-            dir = dir / len;
-        const double limit_x = (0.5 * width - edge) / std::max(std::fabs(dir.x), 1e-6);
-        const double limit_y = (0.5 * height - edge) / std::max(std::fabs(dir.y), 1e-6);
-        const double t = std::min(limit_x, limit_y);
-        cam = cv::Point(cvRound(mid.x + dir.x * t), cvRound(mid.y + dir.y * t));
-        // 指外的小三角：说明"相机在这个方向的画面外"。
-        const cv::Point tip(cvRound(cam.x - dir.x * 8), cvRound(cam.y - dir.y * 8));
-        const cv::Point side(dir.y * 5, -dir.x * 5);
-        const std::vector<cv::Point> arrow = {tip, cv::Point(cvRound(cam.x + side.x),
-                                                             cvRound(cam.y + side.y)),
-                                              cv::Point(cvRound(cam.x - side.x),
-                                                        cvRound(cam.y - side.y))};
-        cv::fillConvexPoly(canvas, arrow, cv::Scalar(255, 255, 255), cv::LINE_AA);
+        // 贴边相机：小方块 + 一条指向画面内侧的短线（= 视野方向）。
+        cv::rectangle(canvas, cv::Rect(cam.x - 5, cam.y - 5, 10, 10),
+                      cv::Scalar(255, 255, 255), cv::FILLED);
+        // 内侧方向：与 fx/fy 相反（fx/fy 指"从边缘往对边"的方向，即视野方向）。
+        const int arm = 14;
+        const cv::Point inward(cam.x + cvRound(fx * arm) + 0,
+                               cam.y + cvRound(-fy * arm));
+        // fy 的画布 y 方向：fy=+1（底边）时视野朝上 → y 减小，所以取负号。
+        cv::line(canvas, cam, inward, cv::Scalar(255, 255, 255), 1, cv::LINE_AA);
     }
     else
     {
-        cv::rectangle(canvas, cv::Rect(cam.x - 4, cam.y - 4, 8, 8), cv::Scalar(255, 255, 255),
-                      cv::FILLED);
-        cv::line(canvas, cam, cam + cv::Point(16, 0), cv::Scalar(255, 255, 255), 1,
-                 cv::LINE_AA);
+        const bool cam_visible = cam_raw.x >= edge && cam_raw.x < width - edge &&
+                                 cam_raw.y >= edge && cam_raw.y < height - edge;
+        if (!cam_visible)
+        {
+            const cv::Point2d mid(0.5 * width, 0.5 * height);
+            cv::Point2d dir(cam_raw.x - mid.x, cam_raw.y - mid.y);
+            const double len = std::hypot(dir.x, dir.y);
+            if (len < 1e-6)
+                dir = cv::Point2d(-1.0, 0.0), dir = dir / cv::norm(dir);
+            else
+                dir = dir / len;
+            const double limit_x = (0.5 * width - edge) / std::max(std::fabs(dir.x), 1e-6);
+            const double limit_y = (0.5 * height - edge) / std::max(std::fabs(dir.y), 1e-6);
+            const double t = std::min(limit_x, limit_y);
+            cam = cv::Point(cvRound(mid.x + dir.x * t), cvRound(mid.y + dir.y * t));
+            // 指外的小三角：说明"相机在这个方向的画面外"。
+            const cv::Point tip(cvRound(cam.x - dir.x * 8), cvRound(cam.y - dir.y * 8));
+            const cv::Point side(dir.y * 5, -dir.x * 5);
+            const std::vector<cv::Point> arrow = {tip, cv::Point(cvRound(cam.x + side.x),
+                                                                 cam.y + side.y),
+                                                  cv::Point(cvRound(cam.x - side.x),
+                                                            cam.y - side.y)};
+            cv::fillConvexPoly(canvas, arrow, cv::Scalar(255, 255, 255), cv::LINE_AA);
+        }
+        else
+        {
+            cv::rectangle(canvas, cv::Rect(cam.x - 4, cam.y - 4, 8, 8), cv::Scalar(255, 255, 255),
+                          cv::FILLED);
+            cv::line(canvas, cam, cam + cv::Point(16, 0), cv::Scalar(255, 255, 255), 1,
+                     cv::LINE_AA);
+        }
     }
 
-    // 车心：红色实心圆 + 十字。
+    // 车心：红色实心圆 + 十字。落在画面外（固定视角下车走出 ±extent 时会这样）
+    // 时改为贴边画三角 + 距离，至少还能看出"车往哪个方向去了、离多远"。
     if (frame.has_body)
     {
         const cv::Point body = to_px3(frame.body_centre);
-        cv::circle(canvas, body, 5, cv::Scalar(0, 0, 255), cv::FILLED, cv::LINE_AA);
-        cv::drawMarker(canvas, body, cv::Scalar(0, 0, 255), cv::MARKER_CROSS, 14, 1);
+        const int margin = 6;
+        const bool body_visible = body.x >= margin && body.x < width - margin &&
+                                  body.y >= margin && body.y < height - margin;
+        if (body_visible)
+        {
+            cv::circle(canvas, body, 5, cv::Scalar(0, 0, 255), cv::FILLED, cv::LINE_AA);
+            cv::drawMarker(canvas, body, cv::Scalar(0, 0, 255), cv::MARKER_CROSS, 14, 1);
+        }
+        else
+        {
+            // 贴边：从**相机**指向车心的方向，按画布边界截断——相机是这张图的
+            // 观测原点，用画面中心做基准在贴边取景下会把三角画到背后去。
+            cv::Point2d dir(body.x - cam_px.x, body.y - cam_px.y);
+            const double len = std::hypot(dir.x, dir.y);
+            if (len > 1.0e-6)
+            {
+                dir = dir / len;
+                // 从相机点沿 dir 走到画布边界为止（以相机为起点，不再是中心）。
+                double t = std::numeric_limits<double>::max();
+                if (dir.x > 1e-6)
+                    t = std::min(t, (width - margin - cam_px.x) / dir.x);
+                else if (dir.x < -1e-6)
+                    t = std::min(t, (margin - cam_px.x) / dir.x);
+                if (dir.y > 1e-6)
+                    t = std::min(t, (height - margin - cam_px.y) / dir.y);
+                else if (dir.y < -1e-6)
+                    t = std::min(t, (margin - cam_px.y) / dir.y);
+                if (!std::isfinite(t) || t == std::numeric_limits<double>::max())
+                    t = 0.0;
+                const cv::Point edge_pt(cvRound(cam_px.x + dir.x * t),
+                                        cvRound(cam_px.y + dir.y * t));
+                // 朝外三角 = 车在画面外的这个方向。
+                const cv::Point2d back(-dir.x, -dir.y);
+                const cv::Point side(-dir.y * 6.0, dir.x * 6.0);
+                const std::vector<cv::Point> tri = {
+                    edge_pt,
+                    cv::Point(cvRound(edge_pt.x + back.x * 14.0 + side.x),
+                              cvRound(edge_pt.y + back.y * 14.0 + side.y)),
+                    cv::Point(cvRound(edge_pt.x + back.x * 14.0 - side.x),
+                              cvRound(edge_pt.y + back.y * 14.0 - side.y))};
+                cv::fillConvexPoly(canvas, tri, cv::Scalar(0, 0, 255), cv::LINE_AA);
+                const double dist =
+                    std::hypot(frame.body_centre.x(), frame.body_centre.y());
+                cv::putText(canvas,
+                            cv::format("%.1fm", dist),
+                            cv::Point(std::clamp(edge_pt.x - 16, 2, width - 46),
+                                      std::clamp(edge_pt.y + 28, 14, height - 4)),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.42, cv::Scalar(0, 0, 255), 1);
+            }
+        }
     }
 
     // 车体速度箭头（橙）：从车心指向"velocity_arrow_s 秒后的位置"，尖端标 |v|。

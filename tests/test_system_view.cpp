@@ -67,6 +67,32 @@ bool hasColour(const cv::Mat &canvas, const cv::Scalar &target, int tolerance = 
     return false;
 }
 
+// 车心红点（BGR 0,0,255）的质心。相机固定取景的位移映射断言要用它反算米数。
+// 阈值收紧到 200/60/60，避免把灰板、瞄准点（青/黄）算进来。
+bool findRedCentroid(const cv::Mat &canvas, cv::Point &centroid)
+{
+    long sum_x = 0;
+    long sum_y = 0;
+    long count = 0;
+    for (int y = 0; y < canvas.rows; ++y)
+    {
+        const cv::Vec3b *row = canvas.ptr<cv::Vec3b>(y);
+        for (int x = 0; x < canvas.cols; ++x)
+        {
+            if (row[x][2] > 200 && row[x][1] < 60 && row[x][0] < 60)
+            {
+                sum_x += x;
+                sum_y += y;
+                ++count;
+            }
+        }
+    }
+    if (count == 0)
+        return false;
+    centroid = cv::Point(static_cast<int>(sum_x / count), static_cast<int>(sum_y / count));
+    return true;
+}
+
 // 灰板像素数（模型板画的是 BGR 150,150,150、粗 3）。容差压到 8，避免把
 // 云台原点的 120 灰、相机白、车心红一起数进来。
 int greyPixelCount(const cv::Mat &canvas)
@@ -263,12 +289,56 @@ int main()
         expect(near.at<cv::Vec3b>(2, 2) == cv::Vec3b(0, 0, 0), "迷你俯视图是黑底");
         expect(nonBlackPixelCount(near) > 200, "迷你俯视图画了东西（不是全黑）");
 
-        // 自动缩放：目标从 2 m 挪到 6 m，画面里的占比应当接近（都铺满），
-        // 而不是"远处变成一个小点"。
-        const int near_px = nonBlackPixelCount(near);
-        const int far_px = nonBlackPixelCount(far);
-        expect(std::abs(near_px - far_px) < 0.35 * std::max(near_px, far_px),
-               "迷你俯视图按内容自动缩放（2 m 与 6 m 的占比接近）");
+        // 【2026-10-27 相机贴边】默认改成"相机钉在画布左边、覆盖前方 4 m"，
+        // 车按真实米数移动。这里验证位移映射：2 m 与 4 m 的车心像素差应当
+        // 正好等于 2 m × ppm，而不是"都铺满画面"。
+        //
+        // ppm 口径：相机边 → 对边的跨度 = width - 2*inset = 480 - 28 = 452 px，
+        // 对应 4 m ⇒ 113 px/m（旧的"相机在正中"是 45 px/m，视野大了 2.5 倍）。
+        {
+            const cv::Mat at2 = rotating_armor::renderMiniTopDown(makeVehicle(2.0, false));
+            const cv::Mat at4 = rotating_armor::renderMiniTopDown(makeVehicle(4.0, false));
+            cv::Point c2, c4;
+            const bool got2 = findRedCentroid(at2, c2);
+            const bool got4 = findRedCentroid(at4, c4);
+            expect(got2 && got4, "贴边取景：2 m 与 4 m 都能找到车心红点");
+            if (got2 && got4)
+            {
+                // 默认 fixed_view_distance_m=4.0、inset=14、画布 480x360。
+                const double ppm_expected = (480.0 - 2.0 * 14.0) / 4.0;
+                const double dx = static_cast<double>(c4.x - c2.x);
+                expect(std::abs(dx - 2.0 * ppm_expected) <= 3.0,
+                       "贴边取景：车从 2 m 到 4 m 位移按真实米数映射（Δx 应 = 2 m × 113 px/m）");
+                std::printf("      2m→(%d,%d)  4m→(%d,%d)  Δx=%.0fpx（应为 %.0fpx）\n", c2.x,
+                            c2.y, c4.x, c4.y, dx, 2.0 * ppm_expected);
+                // 相机贴左边 → 车沿 +x 往右走，纵坐标不漂；且 2 m 处 x 应约等于
+                // 14 + 2×113 = 240（正好画面中间，纯属巧合，但可以锁住绝对位置）。
+                const int x_at_2m = cvRound(14.0 + 2.0 * ppm_expected);
+                expect(c4.x > c2.x && std::abs(c2.y - 180) <= 2 && std::abs(c4.y - 180) <= 2,
+                       "贴边取景：车沿 +x 移动时只改变横坐标、纵坐标不漂");
+                expect(std::abs(c2.x - x_at_2m) <= 3,
+                       "贴边取景：2 m 处的绝对横坐标 = inset + 2 m × ppm");
+                std::printf("      2m.x=%d（应为 %d）\n", c2.x, x_at_2m);
+            }
+        }
+
+        // 相机图标必须贴在左边（白方块中心 x ≈ inset），不能跑到画面中间。
+        {
+            const cv::Mat at2 = rotating_armor::renderMiniTopDown(makeVehicle(2.0, false));
+            int white_min_x = 480;
+            for (int y = 0; y < at2.rows; ++y)
+            {
+                const cv::Vec3b *row = at2.ptr<cv::Vec3b>(y);
+                for (int x = 0; x < at2.cols; ++x)
+                {
+                    if (row[x][0] > 240 && row[x][1] > 240 && row[x][2] > 240)
+                        white_min_x = std::min(white_min_x, x);
+                }
+            }
+            expect(white_min_x >= 6 && white_min_x <= 14,
+                   "贴边取景：相机白方块贴在画布左边（x ≈ inset）");
+            std::printf("      白色最小 x = %d\n", white_min_x);
+        }
 
         // 两个瞄准点颜色不同：有效 = 青（BGR 255,255,0），预测 = 黄（0,200,255）。
         expect(hasColour(near, cv::Scalar(255, 255, 0), 10), "有效瞄准点是青色");
