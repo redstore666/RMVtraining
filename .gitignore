@@ -51,3 +51,15 @@ data/replay/
 
 # 实拍回放素材（134 MB 六段 avi，回放工具按路径读；不入库，本地各放各的）
 tests/resources/
+
+# 实车导出的 Web Debug CSV 与作图脚本（每趟测试几百 MB，只放本地）
+webdebugs/
+
+# 打包产物（上车包 zip 与解包中间目录，用完即弃）
+/RMVtraining-*.zip
+/RMVtraining-*/
+.pkgstage/
+.pkgbuild/
+
+# 相机 SDK 运行日志
+MvSdkLog/
