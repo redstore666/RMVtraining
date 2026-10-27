@@ -137,10 +137,13 @@ if(ENABLE_WEB_DEBUG)
     target_link_libraries(rmv_training PRIVATE web_debug)
 endif()
 
-# 上车程序的迷你俯视图网页（main.cpp 的 RMV_SYSTEM_WEB 块）：渲染/推流纯被动，
-# 与生产 webdebug 的 web_port 错开（实际端口 = web_port+1，默认 8081）。
-if(ENABLE_WEB_SYSTEM)
-    target_link_libraries(rmv_training PRIVATE system_web system_view ${OpenCV_LIBS})
+# 上车程序的迷你俯视图（main.cpp 的 RMV_SYSTEM_WEB 块）：渲染/推流纯被动。
+# 2026-10-27 起不再单开 8081 端口：俯视图 JPEG 并入 webdebug（8080）的
+# WEB_TOPDOWN_FRAME 通道，网页右下角显示。system_view 只提供 renderMiniTopDown
+# 绘制函数；system_web（tests/web_system）只剩回放工具 test_camera_system 在用。
+# RMV_SYSTEM_WEB 依赖 WEB_DEBUG（推帧宏在 web_debug 里），两者必须同时开。
+if(ENABLE_WEB_SYSTEM AND ENABLE_WEB_DEBUG)
+    target_link_libraries(rmv_training PRIVATE system_view ${OpenCV_LIBS})
     target_include_directories(rmv_training PRIVATE ${CMAKE_SOURCE_DIR}/tests)
     target_compile_definitions(rmv_training PRIVATE RMV_SYSTEM_WEB=1)
 endif()

@@ -255,6 +255,56 @@
             .chart-wrap { height: 220px; }
         }
     </style>
+    <style>
+        /* 右下角迷你俯视图（/frame.jpg，与上车程序 RMV_SYSTEM_WEB 块同一条通道）：
+           黑底、四块板 + 车心 + 相机 + 瞄准点，占画面约 1/5（22vw），不挡卡片。 */
+        #mini-topdown {
+            position: fixed;
+            right: 12px;
+            bottom: 12px;
+            width: 22vw;
+            min-width: 280px;
+            aspect-ratio: 4 / 3;
+            background: #000;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 8px 22px rgba(0, 0, 0, 0.5);
+            z-index: 50;
+            display: flex;
+            flex-direction: column;
+        }
+
+        #mini-topdown .td-head {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 8px;
+            background: #0b0e10;
+            border-bottom: 1px solid var(--line);
+            font-size: 11px;
+            color: var(--muted);
+            flex: 0 0 auto;
+        }
+
+        #mini-topdown .td-state {
+            margin-left: auto;
+            font-variant-numeric: tabular-nums;
+        }
+
+        #mini-topdown .td-state.lost {
+            color: var(--danger);
+        }
+
+        #mini-topdown img {
+            flex: 1 1 auto;
+            min-height: 0;
+            width: 100%;
+            display: block;
+            object-fit: contain;
+            image-rendering: auto;
+        }
+    </style>
 </head>
 <body>
     <header class="topbar">
@@ -633,6 +683,56 @@
             updateEmptyState();
             connect();
             window.setInterval(() => renderAll(false), 100);
+        })();
+    </script>
+    <!-- 迷你俯视图（/frame.jpg）：黑底、四块板 + 车心 + 相机 + 瞄准点。
+         渲染逻辑与原 8081 SystemView 完全一致（renderMiniTopDown），
+         只是推帧通道并入了本页（WEB_TOPDOWN_FRAME），不再单开端口。 -->
+    <div id="mini-topdown">
+        <div class="td-head">
+            <span>top-down</span>
+            <span id="td-state" class="td-state">waiting</span>
+        </div>
+        <img id="mini-frame" alt="top-down view">
+    </div>
+
+    <script>
+        // /frame.jpg 是"最近一帧"通道：隐藏 Image 预加载，加载完再换到可见 <img>，
+        // 切帧不闪白。33 ms 一跳 ≈ 30 Hz。服务端没帧时返回 503，这里静默重试并把
+        // 状态标成 lost；拿到帧就恢复。
+        (function () {
+            const shown = document.getElementById("mini-frame");
+            const stateEl = document.getElementById("td-state");
+            const loader = new Image();
+            let busy = false;
+            let lastUrl = "";
+            let gotFrame = false;
+
+            loader.addEventListener("load", () => {
+                shown.src = lastUrl;
+                busy = false;
+                if (!gotFrame) {
+                    gotFrame = true;
+                    stateEl.textContent = "live";
+                    stateEl.classList.remove("lost");
+                }
+            });
+            loader.addEventListener("error", () => {
+                busy = false;
+                if (gotFrame) {
+                    gotFrame = false;
+                    stateEl.textContent = "lost";
+                    stateEl.classList.add("lost");
+                }
+            });
+
+            window.setInterval(() => {
+                if (busy || document.hidden) return;
+                busy = true;
+                // 时间戳参数保证每次都真的去取（服务端也设了 no-store）。
+                lastUrl = "/frame.jpg?t=" + Date.now();
+                loader.src = lastUrl;
+            }, 33);
         })();
     </script>
 </body>

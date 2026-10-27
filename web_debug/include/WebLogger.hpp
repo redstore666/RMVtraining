@@ -13,7 +13,9 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
+#include <vector>
 
 #include "json.hpp"
 
@@ -36,6 +38,13 @@ public:
     // 向有容量上限的广播缓冲区加入一个数值样本。记录日志不会等待网页读取样本，
     // 内存占用始终受到限制。
     void log(const std::string& key, double value);
+
+    // ---- 迷你俯视图通道（与 tests/web_system 的 SystemWebLogger 同一套约定）----
+    // 发布一帧 JPEG（覆盖上一帧）。服务没启动时直接丢弃，不占内存。
+    void publishFrame(const std::vector<unsigned char>& jpeg);
+
+    // 取最近一帧 JPEG 与其序号（序号用于网页侧判断"是不是同一帧"）。
+    std::vector<unsigned char> latestFrame(std::uint64_t* sequence = nullptr) const;
 
     bool isRunning() const noexcept;
 
@@ -70,11 +79,19 @@ private:
     std::condition_variable data_cv_;
     std::deque<LogData> buffer_;
     std::uint64_t next_sequence_{1};
+
+    // ---- 迷你俯视图通道 ----
+    // 只在服务启动后才覆盖写；网页取到的是"最近一帧"，不做历史。
+    mutable std::mutex frame_mutex_;
+    std::vector<unsigned char> frame_jpeg_;
+    std::uint64_t frame_sequence_{0};
 };
 
 #define START_WEB_SERVER(port) WebLogger::getInstance().start(port)
 #define STOP_WEB_SERVER() WebLogger::getInstance().stop()
 #define WEB_LOG(key, value) WebLogger::getInstance().log((key), (value))
+// 迷你俯视图推帧（main.cpp 的 RMV_SYSTEM_WEB 块用；网页 GET /frame.jpg 取最近一帧）。
+#define WEB_TOPDOWN_FRAME(jpeg) WebLogger::getInstance().publishFrame((jpeg))
 
 #else
 
@@ -83,5 +100,6 @@ private:
 #define START_WEB_SERVER(port) ((void)0)
 #define STOP_WEB_SERVER() ((void)0)
 #define WEB_LOG(key, value) ((void)0)
+#define WEB_TOPDOWN_FRAME(jpeg) ((void)0)
 
 #endif // WEB_DEBUG

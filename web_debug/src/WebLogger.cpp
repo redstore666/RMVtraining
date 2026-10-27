@@ -136,6 +136,24 @@ bool WebLogger::isRunning() const noexcept {
     return running_.load(std::memory_order_acquire);
 }
 
+// ---- 迷你俯视图通道：与 SystemWebLogger 相同的"最近一帧覆盖写"约定 ----
+void WebLogger::publishFrame(const std::vector<unsigned char>& jpeg) {
+    if (!running_.load(std::memory_order_acquire) || jpeg.empty()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    frame_jpeg_ = jpeg;
+    ++frame_sequence_;
+}
+
+std::vector<unsigned char> WebLogger::latestFrame(std::uint64_t* sequence) const {
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    if (sequence != nullptr) {
+        *sequence = frame_sequence_;
+    }
+    return frame_jpeg_;
+}
+
 nlohmann::json WebLogger::getBufferJSON() const {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
     auto result = nlohmann::json::array();
@@ -150,6 +168,24 @@ void WebLogger::configureServer(httplib::Server& server) {
         response.set_header("Cache-Control", "no-store");
         response.set_content(
             running_.load(std::memory_order_acquire) ? "OK" : "STOPPING", "text/plain");
+    });
+
+    // 迷你俯视图：返回最近一帧 JPEG。网页用隐藏 Image 每 33 ms 预加载后换 src，
+    // no-store 让浏览器真的重新取（否则会拿缓存里的旧帧）。没有帧时返回 503，
+    // 网页侧静默重试，不刷错误。
+    server.Get("/frame.jpg", [this](const httplib::Request&, httplib::Response& response) {
+        std::uint64_t sequence = 0;
+        const std::vector<unsigned char> jpeg = latestFrame(&sequence);
+        if (jpeg.empty()) {
+            response.status = 503;
+            response.set_content("No frame published yet.", "text/plain");
+            return;
+        }
+        response.set_header("Cache-Control", "no-store, max-age=0");
+        response.set_header("X-Frame-Sequence", std::to_string(sequence));
+        response.set_content(
+            reinterpret_cast<const char*>(jpeg.data()),
+            static_cast<size_t>(jpeg.size()), "image/jpeg");
     });
 
     server.Get("/data", [this](const httplib::Request& request, httplib::Response& response) {

@@ -5,9 +5,11 @@
 
 #ifdef RMV_SYSTEM_WEB
 // 迷你俯视图（上车调试显示）：渲染/推流全部被动，串口控制路径零改动。
+// 2026-10-27 起不再单开 8081 端口：俯视图 JPEG 直接并入 webdebug（8080）的
+// WEB_TOPDOWN_FRAME 通道，网页右下角 <img src="/frame.jpg"> 显示——上车实测
+// 独立的 SystemWebLogger(8081) 拿不到数据，而 8080 是确认可达的，只保一条通道。
 #include "AimGeometry.hpp"
 #include "SystemView.hpp"
-#include "SystemWebLogger.hpp"
 
 #include <opencv2/imgcodecs.hpp>
 #endif
@@ -348,12 +350,6 @@ void *OperationFunction(void *arg) {
     // Web 服务和相机 SDK 都属于操作线程的资源，生命周期与原工程一致。
     START_WEB_SERVER(web_port);
 
-#ifdef RMV_SYSTEM_WEB
-    // 迷你俯视图网页通道（system_web），与生产 webdebug 的 web_port 错开。
-    SystemWebLogger::getInstance().start(web_port + 1);
-    std::cout << "mini top-down web: http://127.0.0.1:" << (web_port + 1) << "/\n";
-#endif
-
     double dt = 0.0;
     double last_time_stamp = 0.0;
     auto last_frame_time = std::chrono::steady_clock::time_point{};
@@ -486,7 +482,11 @@ void *OperationFunction(void *arg) {
 
 #ifdef RMV_SYSTEM_WEB
         // ===== 迷你俯视图（纯被动显示：渲染/推流在串口写出之后，零控制延迟）=====
-        // 几何与 test_camera_system 的刚体版一致：座位由 ekf_topdown_snapshot()
+        // 渲染推帧并入 webdebug 的 8080 通道（WEB_TOPDOWN_FRAME / WEB_LOG），
+        // 网页右下角显示。几何与 test_camera_system 的刚体版一致：座位由
+        // ekf_topdown_snapshot() 提供（EKF 刚体 + 每槽位显示偏移），绿色实测板 =
+        // 本帧 PnP 观测（gimbal->world + 180° 消歧，与 collectWorldObservations
+        // 同一变换）。
         // 提供（EKF 刚体 + 每槽位显示偏移），绿色实测板 = 本帧 PnP 观测
         // （gimbal->world + 180° 消歧，与 collectWorldObservations 同一变换）。
         {
@@ -571,17 +571,14 @@ void *OperationFunction(void *arg) {
                 std::vector<unsigned char> jpeg;
                 const std::vector<int> jpeg_params = {cv::IMWRITE_JPEG_QUALITY, 80};
                 if (cv::imencode(".jpg", mini_canvas, jpeg, jpeg_params))
-                    SYSTEM_FRAME(jpeg);
-                SYSTEM_LOG("omega", static_cast<double>(prediction.body_yaw_velocity));
-                SYSTEM_LOG("distance_m", static_cast<double>(prediction.distance_m));
+                    WEB_TOPDOWN_FRAME(jpeg);
+                WEB_LOG("topdown_omega", static_cast<double>(prediction.body_yaw_velocity));
+                WEB_LOG("topdown_distance_m", static_cast<double>(prediction.distance_m));
             }
         }
 #endif
     }
 
     STOP_WEB_SERVER();
-#ifdef RMV_SYSTEM_WEB
-    SystemWebLogger::getInstance().stop();
-#endif
     return nullptr;
 }
