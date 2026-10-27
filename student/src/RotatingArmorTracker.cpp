@@ -1557,7 +1557,14 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
     //     只占少数，Theil-Sen 中位数免疫。折叠周期 π 限死配对时距上限
     //     |ω·Δt| < π/2，按物理闸门上限反推 Δt ≤ 0.8·(π/2)/rate_max_abs_rad_s。
     //     整合策略：一致时逆方差加权（瘦 sigma）；分歧时取弦向——分歧的另一路
-    //     多半站在伪极点上。
+    //     多半站在伪极点上。**但只允许弦向改幅度、不允许改符号**（2026-10-27）：
+    //     弦方向的符号错误全部来自"配对时距超出折叠周期"——fold(Δdir, π) 在
+    //     |ω·Δt| 落到 (π/2, π) 区间时给出反号斜率。sintestnew 的 22~23 s 就是
+    //     这种情形：同一窗口 yaw 斜率 +4.84、方位角 +5.0，弦向读 -2.25，老代码
+    //     "分歧取弦向"直接把 EKF 的 ω 从 +0.85 拖到 -2.02。同协议下 bluemove
+    //     （真静止）弦向 -0.09 vs 方位角 +3.95，老代码也采纳了 -0.09，等于给
+    //     静止目标送"在转"的错证据。现在异号时取 |·| 的均值、符号沿用已接受
+    //     那一路，sigma 放大到两者较大者。
     double chord_mad = 0.0;
     double chord_slope = std::numeric_limits<double>::quiet_NaN();
     if (config_.rate_from_chord_enabled && chord_samples_.size() >= 8)
@@ -1605,12 +1612,31 @@ void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObserv
             std::isfinite(used_slope) &&
             std::fabs(used_slope - chord_slope) <=
                 std::max(config_.rate_agreement_rad_s, 0.5 * std::fabs(chord_slope));
+        // 【2026-10-27 弦向的符号不可信，只允许它改幅度】弦方向本身是干净的
+        // （法向 +90°，随车体严格同转），符号错误全部来自"配对时距超出折叠
+        // 周期"：fold(Δdir, π) 在 |ω·Δt| 落在 (π/2, π) 时给出反号的斜率。这正是
+        // sintestnew 的 22~23 s 窗口 —— 同一个窗口里 yaw 斜率 +4.8、方位角斜率
+        // +5.0，唯独弦向读出 -2.2，而代码"分歧时取弦向"，于是 EKF 的 ω 被
+        // 直接从 +0.85 拖到 -2.02（用户看到的"sin 出现 -omega"就是这一段）。
+        // 同协议下 bluemove（静止）弦向 -0.09、方位角 +3.95 也该被判为分歧而
+        // 采纳 -0.09 —— 它给静止目标送了一个错误的"在转"证据。
+        // 现在：同号 → 照旧逆方差加权；异号 → 只吸收 magnitude（sign 取
+        // 已接受的那一路），sigma 按两者最大 MAD 放大，表达"幅度在但方向存疑"。
         if (agree && used_sigma > 0.0)
         {
             const double w_u = 1.0 / (used_sigma * used_sigma);
             const double w_c = 1.0 / (chord_sigma * chord_sigma);
             used_slope = (w_u * used_slope + w_c * chord_slope) / (w_u + w_c);
             used_sigma = std::sqrt(1.0 / (w_u + w_c));
+        }
+        else if (std::isfinite(used_slope) && used_sigma > 0.0 && used_slope * chord_slope < 0.0)
+        {
+            const double magnitude = 0.5 * (std::fabs(used_slope) + std::fabs(chord_slope));
+            used_slope = std::copysign(magnitude, used_slope);
+            used_sigma = std::max(used_sigma, chord_sigma);
+            if (trackDebugEnabled())
+                std::fprintf(stderr, "[chord-sign] 异号，只取幅度 %.2f（弦 +%.2f vs 已用 +%.2f）\n",
+                             magnitude, chord_slope, used_slope);
         }
         else
         {
