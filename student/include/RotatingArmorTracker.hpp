@@ -484,7 +484,7 @@ struct TrackerConfig
     // 抖动，意义完全变了：它会把"识别器偶尔读错数字"当成"旁边有另一台车更靠近
     // 准星"，进而丢目标重锁。sin.csv 那 15.8 秒串板就是这套逻辑在起作用。
     // 单道具场景没有"该瞄哪台车"的选择问题，关掉它。
-    bool prefer_centered_target{true};
+    bool prefer_centered_target{false};
     double target_switch_margin_rad{0.30};
 };
 
