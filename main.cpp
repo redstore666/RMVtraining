@@ -517,34 +517,44 @@ void *OperationFunction(void *arg) {
 
         // --show-camera：本地窗口显示相机画面 + 检测框（调车用，不开窗零开销）。
         // 显示的是检测环节的原始输出，PnP/EKF 的问题一眼就能和检测区分开。
+        // 显示失败绝不能拖垮控制程序：任何异常都打印一次并永久禁用窗口。
+        // （已知失败模式：SSH 会话无 DISPLAY；OpenCV 为 Qt 后端时非主线程
+        // imshow 可能 abort；无 GUI 支持的 headless OpenCV 抛 not implemented。）
         if (show_camera_window) {
-            cv::Mat display = pic.clone();
-            for (const ArmorDetection& detection : detections) {
-                const cv::Point2f* pts = detection.corners.data();
-                cv::polylines(display,
-                              std::vector<cv::Point2f>(pts, pts + 4), true,
-                              cv::Scalar(0, 255, 0), 2);
-                const cv::Point2f center =
-                    (detection.corners[0] + detection.corners[1] +
-                     detection.corners[2] + detection.corners[3]) * 0.25F;
+            try {
+                cv::Mat display = pic.clone();
+                for (const ArmorDetection& detection : detections) {
+                    const cv::Point2f* pts = detection.corners.data();
+                    cv::polylines(display,
+                                  std::vector<cv::Point2f>(pts, pts + 4), true,
+                                  cv::Scalar(0, 255, 0), 2);
+                    const cv::Point2f center =
+                        (detection.corners[0] + detection.corners[1] +
+                         detection.corners[2] + detection.corners[3]) * 0.25F;
+                    cv::putText(display,
+                                cv::format("id=%d %.2f", detection.target_id,
+                                           static_cast<double>(detection.confidence)),
+                                center + cv::Point2f(0.0F, -12.0F),
+                                cv::FONT_HERSHEY_SIMPLEX, 0.5,
+                                cv::Scalar(0, 255, 0), 1);
+                }
                 cv::putText(display,
-                            cv::format("id=%d %.2f", detection.target_id,
-                                       static_cast<double>(detection.confidence)),
-                            center + cv::Point2f(0.0F, -12.0F),
-                            cv::FONT_HERSHEY_SIMPLEX, 0.5,
-                            cv::Scalar(0, 255, 0), 1);
-            }
-            cv::putText(display,
-                        cv::format("enemy=%s fps=%.1f",
-                                   enemy_color == TeamColor::Red ? "RED" : "BLUE",
-                                   1.0 / std::max(frame_seconds, 1.0e-6)),
-                        cv::Point(10, 24), cv::FONT_HERSHEY_SIMPLEX, 0.7,
-                        cv::Scalar(255, 255, 255), 2);
-            cv::imshow("camera (--show-camera)", display);
-            // waitKey 必须调用一次，窗口才会刷新；按 q 或 ESC 请求退出。
-            const int key = cv::waitKey(1);
-            if (key == 'q' || key == 27) {
-                shutdown_requested.store(true, std::memory_order_relaxed);
+                            cv::format("enemy=%s fps=%.1f",
+                                       enemy_color == TeamColor::Red ? "RED" : "BLUE",
+                                       1.0 / std::max(frame_seconds, 1.0e-6)),
+                            cv::Point(10, 24), cv::FONT_HERSHEY_SIMPLEX, 0.7,
+                            cv::Scalar(255, 255, 255), 2);
+                cv::imshow("camera (--show-camera)", display);
+                // waitKey 必须调用一次，窗口才会刷新；按 q 或 ESC 请求退出。
+                const int key = cv::waitKey(1);
+                if (key == 'q' || key == 27) {
+                    shutdown_requested.store(true, std::memory_order_relaxed);
+                }
+            } catch (const cv::Exception& e) {
+                std::cerr << "show-camera 显示失败，已自动禁用窗口: " << e.what()
+                          << '\n';
+                show_camera_window = false;
+                cv::destroyAllWindows();
             }
         }
 
