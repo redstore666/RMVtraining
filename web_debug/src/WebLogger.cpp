@@ -164,15 +164,18 @@ nlohmann::json WebLogger::getBufferJSON() const {
 }
 
 void WebLogger::configureServer(httplib::Server& server) {
+    // 全站 no-store：调试页面必须永远加载最新版（index.html 改了以后浏览器
+    // 拿缓存旧页会"看不到新功能"），帧通道也一样。各路由不再单独设置。
+    server.set_default_headers({{"Cache-Control", "no-store, max-age=0"}});
+
     server.Get("/health", [this](const httplib::Request&, httplib::Response& response) {
-        response.set_header("Cache-Control", "no-store");
         response.set_content(
             running_.load(std::memory_order_acquire) ? "OK" : "STOPPING", "text/plain");
     });
 
     // 迷你俯视图：返回最近一帧 JPEG。网页用隐藏 Image 每 33 ms 预加载后换 src，
-    // no-store 让浏览器真的重新取（否则会拿缓存里的旧帧）。没有帧时返回 503，
-    // 网页侧静默重试，不刷错误。
+    // no-store（默认头）让浏览器真的重新取（否则会拿缓存里的旧帧）。没有帧时
+    // 返回 503，网页侧静默重试，不刷错误。
     server.Get("/frame.jpg", [this](const httplib::Request&, httplib::Response& response) {
         std::uint64_t sequence = 0;
         const std::vector<unsigned char> jpeg = latestFrame(&sequence);
@@ -181,7 +184,6 @@ void WebLogger::configureServer(httplib::Server& server) {
             response.set_content("No frame published yet.", "text/plain");
             return;
         }
-        response.set_header("Cache-Control", "no-store, max-age=0");
         response.set_header("X-Frame-Sequence", std::to_string(sequence));
         response.set_content(
             reinterpret_cast<const char*>(jpeg.data()),

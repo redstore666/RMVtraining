@@ -487,8 +487,6 @@ void *OperationFunction(void *arg) {
         // ekf_topdown_snapshot() 提供（EKF 刚体 + 每槽位显示偏移），绿色实测板 =
         // 本帧 PnP 观测（gimbal->world + 180° 消歧，与 collectWorldObservations
         // 同一变换）。
-        // 提供（EKF 刚体 + 每槽位显示偏移），绿色实测板 = 本帧 PnP 观测
-        // （gimbal->world + 180° 消歧，与 collectWorldObservations 同一变换）。
         {
             const int64_t now_tick = cv::getTickCount();
             if (now_tick - last_mini_tick >= mini_interval_ticks)
