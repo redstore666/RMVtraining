@@ -94,6 +94,11 @@ struct PredictionResult
     float body_yaw_velocity{0.0F};
     float radius_1_m{0.0F};
     float radius_2_m{0.0F};
+    // 两个装甲板高度（米）：height_1 = EKF 的 z（偶数槽板面），height_2 =
+    // z + height_diff（奇数槽板面）。四块板不共高时两者不同；单板可见时
+    // height_diff 不可观测（更新里自动冻结），height_2 会跟着 height_1 走。
+    float height_1_m{0.0F};
+    float height_2_m{0.0F};
     // 最终云台指令：距离单位为米，角度单位为弧度，角速度单位为弧度每秒。
     float distance_m{0.0F};
     float target_yaw{0.0F};

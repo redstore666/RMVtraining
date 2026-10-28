@@ -50,8 +50,16 @@ struct ProcessNoiseConfig {
     // ekf_model_convergence 断言。w 的拉拽强度需要与观测质量匹配，见
     // docs/spvision25转速跟随机制报告_2026-10-25.md §四的照抄陷阱。）
     double radius_random_walk{1e-6}; // m^2/s
-    double pair_radius_random_walk{1e-6}; // (m^2/s) radius_diff 的随机游走
-    double pair_height_random_walk{1e-6}; // (m^2/s) height_diff 的随机游走
+    // 【2026-10-28 从 1e-6 放开】l/h 的信息只在双板帧进来（单板帧 H 的 9/10 列
+    // 为零，见 Ekf::update 的 plates_visible 分支），redrotate 这类旋转素材双板
+    // 帧占比低，1e-6 的随机游走（1 s 累计 σ=1 mm）等于把 l/h 永久钉在 0。
+    // 代价是实打实的：真实车体前后对与左右对的半径差 1~3 cm，l=0 时这部分的
+    // 位置残差（实测 5~9 cm）没有 l 这个出口，只能被 yaw/center 吸收——双板帧
+    // 的第一帧 yaw 单帧跳 0.17~0.19 rad，就是"尖峰"的来源。
+    // 1e-4 对应 1 s σ=1 cm、10 s σ=3.2 cm，够在几秒内跟上装配量级的 l/h，
+    // 又不会在长单板段里漂没谱（EKF update 侧另有 ±kPairOffsetMaxM 限幅）。
+    double pair_radius_random_walk{1e-4}; // (m^2/s) radius_diff 的随机游走
+    double pair_height_random_walk{1e-4}; // (m^2/s) height_diff 的随机游走
 };
 
 // Wrap radians into [-pi, pi).

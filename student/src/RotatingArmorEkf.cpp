@@ -246,6 +246,11 @@ bool RotatingArmorEkf::update(const ArmorObservation& observation, int plate_slo
         return false;
     }
     candidate(8) = std::clamp(candidate(8), kRadiusMinM, kRadiusMaxM);
+    // l/h 同样夹在物理量级内：真实整车前后对与左右对的半径差/高度差只有
+    // 1~3 cm，超过 kPairOffsetMaxM(5 cm) 的解只可能是"槽位关联错了"或
+    // "观测离群"，放任它会把奇数槽的板位拉到错误的位置上。
+    candidate(9) = std::clamp(candidate(9), -kPairOffsetMaxM, kPairOffsetMaxM);
+    candidate(10) = std::clamp(candidate(10), -kPairOffsetMaxM, kPairOffsetMaxM);
     state_ = candidate;
     const Covariance i_kh = Covariance::Identity() - k * h_jacobian;
     covariance_ = i_kh * covariance_ * i_kh.transpose() + k * r * k.transpose();
@@ -285,7 +290,7 @@ bool RotatingArmorEkf::updatePhase(double measured_world_yaw, double sigma_rad) 
     // Joseph 形式（标量观测）：P = (I - k e6') P (I - k e6')' + k sigma^2 k'
     Eigen::Matrix<double, kStateDim, kStateDim> i_kh =
         Eigen::Matrix<double, kStateDim, kStateDim>::Identity();
-    i_kh.row(6) -= k.transpose();
+    i_kh.col(6) -= k;
     covariance_ = i_kh * covariance_ * i_kh.transpose() + sigma_rad * sigma_rad * (k * k.transpose());
 
     if (!state_.allFinite() || !covariance_.allFinite()) {
@@ -318,7 +323,7 @@ bool RotatingArmorEkf::updateRate(double measured_rad_s, double sigma_rad_s) {
     // Joseph 形式（标量观测）：P = (I - k e7') P (I - k e7')' + k sigma^2 k'
     Eigen::Matrix<double, kStateDim, kStateDim> i_kh =
         Eigen::Matrix<double, kStateDim, kStateDim>::Identity();
-    i_kh.row(7) -= k.transpose();
+    i_kh.col(7) -= k;
     covariance_ = i_kh * covariance_ * i_kh.transpose() +
                   sigma_rad_s * sigma_rad_s * (k * k.transpose());
 
@@ -369,7 +374,7 @@ bool RotatingArmorEkf::updateFaceYawForSlot(double face_world_yaw, double sigma_
     state_(6) = wrapAngle(state_(6));
     Eigen::Matrix<double, kStateDim, kStateDim> i_kh =
         Eigen::Matrix<double, kStateDim, kStateDim>::Identity();
-    i_kh.row(6) -= k.transpose();
+    i_kh.col(6) -= k;
     covariance_ =
         i_kh * covariance_ * i_kh.transpose() + sigma_rad * sigma_rad * (k * k.transpose());
 
@@ -451,7 +456,7 @@ bool RotatingArmorEkf::updateRadius(double measured_radius, double sigma_radius)
 
     Eigen::Matrix<double, kStateDim, kStateDim> i_kh =
         Eigen::Matrix<double, kStateDim, kStateDim>::Identity();
-    i_kh.row(8) -= k.transpose();
+    i_kh.col(8) -= k;
     covariance_ = i_kh * covariance_ * i_kh.transpose() +
                   sigma_radius * sigma_radius * (k * k.transpose());
 

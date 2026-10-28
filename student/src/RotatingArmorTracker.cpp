@@ -3048,7 +3048,16 @@ PredictionResult RotatingArmorTracker::buildResult(const GimbalState &gimbal,
     result.body_yaw = static_cast<float>(wrapToPi(state(6)));
     result.body_yaw_velocity = static_cast<float>(state(7));
     result.radius_1_m = static_cast<float>(state(8));
-    result.radius_2_m = static_cast<float>(state(8));
+    // 【2026-10-28】radius_2 是奇数槽（前后对）的真实半径 = R + radius_diff，
+    // 不再重复填 state(8)。四板车的前后对与左右对不共圆（差 1~3 cm），
+    // radius_diff 由 EKF 在双板帧更新（单板帧该维不可观测、自动冻结）。
+    // 没有分化时两者相等——这本身就是"该车四板共圆"的诊断信息。
+    result.radius_2_m = static_cast<float>(state(8) + state(9));
+    // 两个高度：偶数槽板面 = z，奇数槽板面 = z + height_diff。装甲板不共高
+    // （任务书 3.6 的"装甲板高度"按槽位各有各的值），webdebug 同时看这两条
+    // 曲线和 pnp_z_m 的观测，就知道高度模型在跟哪一层。
+    result.height_1_m = static_cast<float>(state(4));
+    result.height_2_m = static_cast<float>(state(4) + state(10));
 
     // 预测到"子弹该对准的时刻"：
     //   控制器下发的预测时间偏置（秒）+ 本帧实际测得的视觉处理延迟（秒）。

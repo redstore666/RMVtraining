@@ -979,6 +979,66 @@ int main(int argc, char **argv)
                 SYSTEM_LOG("phase_lag_deg", phase_lag_deg);
             SYSTEM_LOG("pinned_id", pinned);
             SYSTEM_LOG("state_code", state_code);
+
+            // ===== 生产 webdebug（8080）同名键（2026-10-28 同步）=====
+            // main.cpp 的 logPrediction / 检测段 / 俯视图段推什么键，这里就推
+            // 什么键，保证 8081 系统视图与 8080 webdebug 的数据显示一致，
+            // 离线看 testsystem 不会出现"缺曲线/口径对不上"。键序照抄 main.cpp。
+            SYSTEM_LOG("target_found",
+                       prediction.state == TrackingState::NoTarget ? 0.0 : 1.0);
+            SYSTEM_LOG("target_yaw", prediction.target_yaw);
+            SYSTEM_LOG("target_pitch", prediction.target_pitch);
+            SYSTEM_LOG("target_distance", prediction.distance_m);
+            SYSTEM_LOG("ekf_x_m", prediction.center_x_m);
+            SYSTEM_LOG("ekf_y_m", prediction.center_y_m);
+            SYSTEM_LOG("ekf_vx_m_s", prediction.center_velocity_x_m_s);
+            SYSTEM_LOG("ekf_vy_m_s", prediction.center_velocity_y_m_s);
+            SYSTEM_LOG("ekf_yaw_rad", prediction.body_yaw);
+            SYSTEM_LOG("ekf_yaw_rate_rad_s", prediction.body_yaw_velocity);
+            SYSTEM_LOG("ekf_radius_1_m", prediction.radius_1_m);
+            SYSTEM_LOG("ekf_radius_2_m", prediction.radius_2_m);
+            SYSTEM_LOG("ekf_radius_diff_m",
+                       static_cast<double>(prediction.radius_2_m) -
+                           static_cast<double>(prediction.radius_1_m));
+            SYSTEM_LOG("ekf_height_1_m", prediction.height_1_m);
+            SYSTEM_LOG("ekf_height_2_m", prediction.height_2_m);
+            SYSTEM_LOG("ekf_height_diff_m",
+                       static_cast<double>(prediction.height_2_m) -
+                           static_cast<double>(prediction.height_1_m));
+            SYSTEM_LOG("camera_fps", frame_dt_ms > 0.0 ? 1000.0 / frame_dt_ms : 0.0);
+            // 连续空帧计数（口径同 main.cpp：有目标归零，空帧累加）。
+            static double empty_frame_streak = 0.0;
+            empty_frame_streak = dets.empty() ? empty_frame_streak + 1.0 : 0.0;
+            SYSTEM_LOG("empty_frame", empty_frame_streak);
+            if (!dets.empty())
+            {
+                const ArmorDetection &first_detection = dets.front();
+                SYSTEM_LOG("detection_id",
+                           static_cast<double>(first_detection.target_id));
+                SYSTEM_LOG("detection_confidence",
+                           static_cast<double>(first_detection.confidence));
+                const cv::Point2f center_px =
+                    (first_detection.corners[0] + first_detection.corners[1] +
+                     first_detection.corners[2] + first_detection.corners[3]) * 0.25F;
+                SYSTEM_LOG("target_x_px", center_px.x);
+                SYSTEM_LOG("target_y_px", center_px.y);
+            }
+            SYSTEM_LOG("pnp_reprojection_error", reproj > 0.0 ? reproj : -1.0);
+            SYSTEM_LOG("pnp_distance_m",
+                       poses.empty()
+                           ? 0.0
+                           : cv::norm(poses.front().position_gimbal_m));
+            SYSTEM_LOG("pnp_z_m",
+                       poses.empty() ? 0.0
+                                     : static_cast<double>(poses.front().position_gimbal_m[2]));
+            // 俯视图段同名键（main.cpp:749-755；速度直接取 EKF 中心速度）。
+            SYSTEM_LOG("topdown_omega", prediction.body_yaw_velocity);
+            SYSTEM_LOG("topdown_distance_m", prediction.distance_m);
+            SYSTEM_LOG("topdown_vx_m_s", prediction.center_velocity_x_m_s);
+            SYSTEM_LOG("topdown_vy_m_s", prediction.center_velocity_y_m_s);
+            SYSTEM_LOG("topdown_speed_m_s",
+                       std::hypot(prediction.center_velocity_x_m_s,
+                                  prediction.center_velocity_y_m_s));
         }
 
         // ===== 把"可选 id"发给网页（10 Hz 足够，下拉菜单不用每帧重建）=====

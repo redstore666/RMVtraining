@@ -225,6 +225,15 @@ void logPrediction(const PredictionResult& result) {
     WEB_LOG("ekf_yaw_rate_rad_s", result.body_yaw_velocity);
     WEB_LOG("ekf_radius_1_m", result.radius_1_m);
     WEB_LOG("ekf_radius_2_m", result.radius_2_m);
+    // 两个装甲板高度（偶数槽 / 奇数槽）与两者的差。四块板不共高（前后对常比
+    // 左右对低/高 1~3 cm），单值 z 表达不了；height_2 − height_1 就是 EKF 学到的
+    // height_diff，长期为 0 说明还没见过足够的双板帧。
+    WEB_LOG("ekf_height_1_m", result.height_1_m);
+    WEB_LOG("ekf_height_2_m", result.height_2_m);
+    WEB_LOG("ekf_height_diff_m",
+            static_cast<double>(result.height_2_m) - static_cast<double>(result.height_1_m));
+    WEB_LOG("ekf_radius_diff_m",
+            static_cast<double>(result.radius_2_m) - static_cast<double>(result.radius_1_m));
 }
 
 // main 中启动线程前先同步读一帧，保持参考工程的初始化顺序。
@@ -556,8 +565,14 @@ void *OperationFunction(void *arg) {
         if (!observations.empty()) {
             WEB_LOG("pnp_reprojection_error", observations.front().reprojection_error);
             WEB_LOG("pnp_distance_m", cv::norm(observations.front().position_gimbal_m));
+            // 观测板心的云台系高度（z 分量）。注意与 EKF 的 height_1/2 对照时：
+            // position_gimbal_m 是**这块板**的高度，而 height_1/2 是两个槽位对
+            // 各自的板面高度——这块板属于哪一对，由它在画面里的槽位决定。
+            // 两条曲线的差 = PnP 噪声 + EKF 高度模型没学到的部分。
+            WEB_LOG("pnp_z_m", static_cast<double>(observations.front().position_gimbal_m[2]));
         } else {
             WEB_LOG("pnp_reprojection_error", -1.0);
+            WEB_LOG("pnp_z_m", 0.0);
         }
 
         // --show-camera：画好带检测框的画面放进共享缓冲，由主线程的显示泵
