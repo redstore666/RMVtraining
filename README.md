@@ -5,8 +5,13 @@ RoboMaster 自瞄视觉链路：相机取流 → 装甲板检测 → PnP 位姿�
 框架由教师提供，其余在 `student/` 实现。
 
 当前进度：取流、标定（内参）、检测、PnP、EKF 跟踪与预测均已实现并跑通实车；
-`ctest -E camera_grab` 11 项中 8 项通过，3 项失败均为测试侧未跟上状态维度扩展
-（详见 [实验报告 §10](docs/实验报告.md)）。剩余实机项：相机→云台外参旋转标定。
+`ctest -E camera_grab` **12 项全部通过**（`camera_grab` 需要真机相机，单独跑）。
+剩余实机项：相机→云台外参旋转标定。
+
+转速 ω 的估计换成了单一相位折叠拟合（[说明](docs/omega相位拟合说明.md)）：
+窗口内所有同目标板观测的板相位联合拟合 `θ(t)=φ0+ω(t-t̄)`，换板跳变由 `2π/N`
+折叠内建消除。实拍素材上 ω 的稳态标准差 redrotate 0.47→0.22、sinspeed
+2.06→1.79，无符号翻转、无掉零突刺。EKF 本体未改。
 
 ## 目录结构
 
@@ -16,7 +21,8 @@ RoboMaster 自瞄视觉链路：相机取流 → 装甲板检测 → PnP 位姿�
 │   ├── StudentTasks.cpp    get_pic / armor_detect / armor_solve / ekf_predict
 │   ├── ArmorDetectorNet.*  OpenVINO 推理 + YOLO 关键点解码（任务 2）
 │   ├── RotatingArmorModel.* 旋转车体运动模型（任务 4 的公式真源）
-│   ├── RotatingArmorEkf.*   9 维 EKF（初始化契约/预测/更新/NIS）
+│   ├── RotatingArmorEkf.*   11 维 EKF（初始化契约/预测/更新/NIS）
+│   ├── RotatingArmorSpinFit.* 转速 ω 的相位折叠拟合估计器（EKF 之前）
 │   ├── RotatingArmorTracker.* 观测关联/门限/状态机/瞄准板选择（任务 4）
 │   └── AimGeometry.*        云台系↔世界系换算与极角定义
 ├── armor/               教师提供的 EKF 与弹道模型（仅作参考，未接入主流程）
@@ -68,6 +74,7 @@ Web Debug 在 `http://127.0.0.1:8080`。相机→云台外参尚未标定，`cam
 | `test_ekf_viewer [--world] [--out DIR]` | EKF 俯视图（上帝视角）演示：红点车心 + 四块模型板 + 绿点实测板 + 瞄准射线；`--no-show --out DIR` 无显示环境导出 PNG |
 | `test_camera_playback v.avi --red --ekf --topdown` | 视频回放 + 俯视图窗口（`--topdown-world` 固定原点、`--topdown-out DIR` 逐帧落盘） |
 | `test_camera_playback v.avi --red --ekf --multi` | 多目标：同一帧里的板按几何分给多辆车，各自跑 EKF（`--multi-primary N` 指定主目标） |
+| `test_camera_playback v.avi --red --ekf --headless --dump out.csv` | 无窗口回放并逐帧落盘（含 `ekfw` 角速度列），配合 `tools/compare_omega.py before=a.csv after=b.csv --png cmp.png` 做 ω 曲线对拍 |
 | `calib_capture` / `calibrate_intrinsics` | 标定采集 / 内参解算 |
 
 常用环境变量（检测器）：`RMV_DET_MODEL=yolo11` 切备选模型；
@@ -89,7 +96,8 @@ Web Debug 在 `http://127.0.0.1:8080`。相机→云台外参尚未标定，`cam
 
 - [实验报告](docs/实验报告.md)——验收主文档，按评分表七项组织
 - [答辩提纲](docs/答辩提纲.md)——八个必验场景的演示命令与问答
-- [EKF 设计说明](docs/EKF设计说明.md)、[实车数据分析](docs/实车数据分析报告_2026-10-27.md)、
+- [EKF 设计说明](docs/EKF设计说明.md)、[omega 相位拟合说明](docs/omega相位拟合说明.md)、
+  [实车数据分析](docs/实车数据分析报告_2026-10-27.md)、
   [实车调参指南](docs/实车调参指南_2026-10-27.md)
 - [模型说明](models/README.md)（yolov5/yolov5_512/yolo11，解码格式，A/B 记录）
 - [测试与调试记录](tests/README.md)
@@ -113,3 +121,6 @@ Web Debug 在 `http://127.0.0.1:8080`。相机→云台外参尚未标定，`cam
 3. EKF 是单半径、等高模型；前哨站交替高度/半径的目标需按槽位扩展状态。
 4. 推理输入默认 `640x480`（与画面同比例，省掉 25% 无效卷积），`640` 与 `512` 模型都保留；合成素材 `synth_small_1` 的绝对距离与文档预期不符（宽高比不自洽），属素材问题。
 5. 实拍素材目前只有哨兵单目标，多目标场景待补素材回归。
+6. ω 的相位拟合窗口 0.45 s 对**快速变速**目标会削平峰谷：sinspeed 素材的 ω 谷底
+   停在 2.5~3（旧路径可到 0~1），中位数高约 1 rad/s。缩窗能改善变速响应但会抬高
+   匀速场景的噪声，取舍见 [omega 相位拟合说明 §7](docs/omega相位拟合说明.md)。

@@ -1,3 +1,11 @@
+<!--
+归档说明（2026-10-31）：本文原在 tmp/handoff/，用于交接当时的 omega 问题。
+tmp/ 已整体移出版本库，脚本迁到 tools/（analyze_sse.py、dump_mini.sh、gt_omega.py、
+parse_poses.py、run_tool.sh、summarize_ev.py），本文移到这里存档。
+文中出现的 tmp/handoff/ 路径、提交号、ctest 计数均为当时的快照，**不代表现状**；
+现状以 README.md 与 docs/omega相位拟合说明.md 为准。
+-->
+
 # tmp/handoff —— 交接包
 
 先看 **[HANDOFF.md](HANDOFF.md)**，那里是全部背景、已确证的结论、已证伪的方案、下一步建议和环境坑。

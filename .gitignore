@@ -6,21 +6,43 @@ cmake-build-*/
 *.a
 *.so
 
-# ===== 调试输出目录（buildEnemyMask / test_detect 的临时产物）=====
+# ===== 临时工作区（一律本地，不入库）=====
+# tmp/ 放回放视频、dump、交接包；.tmpbuild/ 是构建卡在 10 MB 的 /tmp 时的 TMPDIR 落点
 tmp/
 .tmp/
+.tmpbuild/
 
-# ===== SSH 密钥——绝对不能进版本库 =====
+# ===== 打包中间产物（上车包解包目录，用完即弃）=====
+.pkgstage/
+.pkgbuild/
+/RMVtraining-*/
+/RMVtraining-*.zip
+
+# ===== 可再生调试产物 =====
+# calib_debug 由标定工具对 calib_data 重新生成；calib_synth 由 gen_synth_calib.py 生成
+calib_debug/
+calib_synth/
+
+# ===== 相机 SDK 运行日志 =====
+MvSdkLog/
+
+# ===== 素材与实测数据（体积大，本地各放各的）=====
+# tests/resources 是六段实拍 avi（约 134 MB），回放工具按路径读
+tests/resources/
+# data/replay 是 tmp/ 的回放视频副本
+data/replay/
+# webdebugs 是实车导出的 Web Debug CSV 与作图脚本（每趟测试几百 MB）
+webdebugs/
+
+# ===== 本地备份（tar 快照）=====
+/backups/
+
+# ===== 私钥 —— 绝对不能进版本库 =====
 /a
 /a.pub
 id_ed25519*
 id_rsa*
 *.pem
-
-# ===== 标定/测试的可再生调试产物 =====
-# calib_debug 由标定工具对 calib_data 重新生成；calib_synth 由 gen_synth_calib.py 生成
-calib_debug/
-calib_synth/
 
 # ===== Python 运行时产物 =====
 __pycache__/
@@ -32,34 +54,12 @@ __pycache__/
 *.swp
 *~
 .DS_Store
+.Trash-0/
 
-# ===== 本地工具状态=====
+# ===== 本地 agent / 编辑器工具状态（各人机器各不相同）=====
+.workbuddy/
+.grill-me/
 .zcode/
 .zcodeignore
 
-# ===== 工作区 / 系统回收站=====
-.workbuddy/
-.Trash-0/
-
 # 注意：不要忽略 *.png / *.onnx —— calib_data、tests/data、models/ 是必须提交的材料
-
-# 本地备份（tar 快照，勿提交）
-/backups/
-
-# 回放视频备份（tmp/ 可能被清理，这里留一份；体积大不入库）
-data/replay/
-
-# 实拍回放素材（134 MB 六段 avi，回放工具按路径读；不入库，本地各放各的）
-tests/resources/
-
-# 实车导出的 Web Debug CSV 与作图脚本（每趟测试几百 MB，只放本地）
-webdebugs/
-
-# 打包产物（上车包 zip 与解包中间目录，用完即弃）
-/RMVtraining-*.zip
-/RMVtraining-*/
-.pkgstage/
-.pkgbuild/
-
-# 相机 SDK 运行日志
-MvSdkLog/

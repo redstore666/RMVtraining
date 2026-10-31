@@ -8,7 +8,7 @@
 | 文件 | 职责 |
 | --- | --- |
 | `student/include/RotatingArmorModel.hpp`、`student/src/RotatingArmorModel.cpp` | 旋转车体运动模型：状态、状态转移、观测方程、雅可比、过程噪声。**唯一的公式真源**。 |
-| `student/include/RotatingArmorEkf.hpp`、`student/src/RotatingArmorEkf.cpp` | 9 维 EKF 本体：初始化契约、预测、观测更新（Joseph 形式）、NIS 计算。 |
+| `student/include/RotatingArmorEkf.hpp`、`student/src/RotatingArmorEkf.cpp` | 11 维 EKF 本体：初始化契约、预测、观测更新（Joseph 形式）、NIS 计算。 |
 | `student/include/AimGeometry.hpp`、`student/src/AimGeometry.cpp` | 云台系/世界系换算、极角定义、角度归一化。 |
 | `student/include/RotatingArmorTracker.hpp`、`student/src/RotatingArmorTracker.cpp` | 粘合层：观测转换、首帧锁定、数据关联、门限、状态机、瞄准板选择、`PredictionResult` 填充。 |
 | `student/src/StudentTasks.cpp:743` | `ekf_predict()`，按任务书固定签名，内部只调跟踪器。 |
@@ -46,10 +46,10 @@ armor_solve (StudentTasks.cpp:606)
 * 输出 `PredictionResult::target_yaw/target_pitch` 采用**绝对角**（同一个世界系
   下的极角），与 `setSafeOutput()` 把 `target_yaw` 置成当前 `yaw` 的语义一致。
 
-### 2.2 状态向量（9 维）
+### 2.2 状态向量（11 维）
 
 ```text
-x = [ cx, vx, cy, vy, z, vz, yaw, yaw_rate, radius ]^T
+x = [ cx, vx, cy, vy, z, vz, yaw, yaw_rate, radius, radius_diff, height_diff ]^T
 ```
 
 | 分量 | 含义 | 单位 |
@@ -60,6 +60,14 @@ x = [ cx, vx, cy, vy, z, vz, yaw, yaw_rate, radius ]^T
 | `yaw` | 车体偏航 | rad |
 | `yaw_rate` | 车体自转角速度（小陀螺） | rad/s |
 | `radius` | 装甲板到旋转中心的半径 | m |
+| `radius_diff` | 奇数槽位相对偶数槽位的半径差（四板车的非对称刚体参数） | m |
+| `height_diff` | 奇数槽位相对偶数槽位的高度差 | m |
+
+后两维借鉴 sp_vision_25 的 `l`/`h`：四块板并不共圆、也未必共高，前后一对板比左右
+一对离车心更远。偶槽用 `radius`，奇槽用 `radius + radius_diff`。它们只在同帧双板
+可见时才有信息（单板帧对应雅可比列为零），默认开启、由滤波器自己决定跟不跟；
+不建模这部分时，1~3 cm 的装配偏差只能被 `yaw`/中心吸收，表现为双板帧第一帧的
+`yaw` 单帧跳 0.17~0.19 rad。板数不为 4 时不启用该修正。
 
 观测（3 维）：第 `slot` 块板的板心位置
 
@@ -128,8 +136,9 @@ radius_random_walk = 1e-6            (m^2/s)
   里（"占位外参按光学系->云台系重排坐标轴"）。
 * `normal_gimbal`、`armor_yaw`：板面法向（云台系）：先用 `Rodrigues(rvec)`
   取物体 `(0,0,1)` 轴，再乘 `R_cam_to_gimbal`，归一化后
-  `armor_yaw = atan2(n_y, n_x)`。**只保留法向；逐帧观测仍只用 3 维位置**，
-  法向只在首帧锁定与"转/不转"自检时使用。
+  `armor_yaw = atan2(n_y, n_x)`。**逐帧位置观测仍只用 3 维**；法向的用途有三处：
+  首帧锁定、"转/不转"自检、以及作为低权重（0.30）的相位观测参与 ω 的相位拟合
+  （只在它与同帧位置相位折叠后相差 <0.35 rad 时才用）。
 * `reprojection_error`：用于把观测噪声从 `position_sigma_m` 放大最多 3 倍
   （`1 + err/6`，`RotatingArmorTracker.cpp:155`）。
 
@@ -137,9 +146,14 @@ radius_random_walk = 1e-6            (m^2/s)
 `ekf_predict` 天然满足任务书"无观测时把空观测传进来做纯预测"的要求：空
 `std::vector` 只跳过观测更新，预测照常推进。
 
+**`yaw_rate` 这一维从哪来**：不是从位置观测里积分出来的，而是一条独立的标量
+观测通道（`updateYawRate`，H = e₇）。估计器是相位折叠拟合，数学与取舍见
+[omega 相位拟合说明](omega相位拟合说明.md)；为什么单帧位置更新推不出转速，
+见该文档 §1。EKF 本体没有为它做任何改动。
+
 ## 5. 初始化契约（两段式锁定）
 
-单槽 EKF 不能冷启动：3 维观测 + 9 维状态，若角速度先验为 0，滤波器会把
+单槽 EKF 不能冷启动：3 维观测 + 11 维状态，若角速度先验为 0，滤波器会把
 "相位在转"解释成"中心+半径偏了一点"，300 帧后中心仍可能差 0.3~0.43 m 而板
 残差只有 1.5~2 cm（"板对、车体全错"）。合成真值多噪声种子扫描：`omega=0`
 冷启动只有 5/8 个种子能锁进正确极小值；给到 `omega≈2` 的先验则 8/8。所以
