@@ -68,6 +68,7 @@ target_link_libraries(rotating_armor_model PUBLIC Eigen3::Eigen)
 add_library(rotating_armor_ekf STATIC
     student/src/RotatingArmorEkf.cpp
     student/src/RotatingArmorTracker.cpp
+    student/src/RotatingArmorSpinFit.cpp
     student/src/AimGeometry.cpp
     student/src/MultiTargetTracker.cpp
 )
@@ -205,6 +206,12 @@ if(BUILD_TESTING)
     add_executable(test_rotating_armor_ekf_init tests/test_rotating_armor_ekf_init.cpp)
     target_link_libraries(test_rotating_armor_ekf_init PRIVATE rotating_armor_ekf)
     add_test(NAME ekf_init_contract COMMAND test_rotating_armor_ekf_init)
+
+    # 单一相位拟合器（2026-10-31 取代四路证据融合）的数学回归：
+    # 匀速 / 静止 / 换板 / 变速（二次精化）/ 曲率显著性 / 浓度门限 / 样本不足。
+    add_executable(test_spin_fit tests/test_spin_fit.cpp)
+    target_link_libraries(test_spin_fit PRIVATE rotating_armor_ekf)
+    add_test(NAME spin_fit_unit COMMAND test_spin_fit)
 
     #   任务 4 粘合层与端到端管线。
     add_executable(test_aim_geometry tests/test_aim_geometry.cpp)

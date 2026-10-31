@@ -118,6 +118,42 @@ struct TrackerConfig
     // （当前 EKF 车心），平移是共模量，不受此限。
     double rate_bearing_max_centre_speed_m_s{0.30};
 
+    // === 单一相位拟合转速估计（2026-10-31）===
+    //
+    // 上面那四路证据（法向 Theil-Sen / 方位角 Theil-Sen / 弦向 Theil-Sen /
+    // 原始法向全配对）各自有自己的折叠周期和失效模式，融合规则只能靠特例堆；
+    // 而且两两斜率的中位数在滑窗移动时是**阶梯函数**，ω 曲线天然带锯齿。
+    // 现在换成一条：窗口内所有同目标板观测的相位一起拟合
+    //     θ(t) = φ0 + ω·(t - t̄)，残差按 2π/N 折叠，
+    // 换板跳变由折叠内建消除（不需要续接链），给定 ω 时 φ0 闭式、
+    // ω 一维全搜索 + 黄金分割精化。数学推导与取舍见 RotatingArmorSpinFit.hpp。
+    bool spin_fit_enabled{true};
+    // 拟合窗口。比旧的 0.35 s 略长：相位是全窗联合拟合，样本多一点只降方差、
+    // 不引入斜率阶梯；代价是换向/变速时的滞后（sinspeed 这类正弦变速素材要盯这个）。
+    double spin_fit_window_s{0.45};
+    // 相邻样本间隔超过它就清空窗口（掉帧/换目标/被遮挡）。
+    double spin_fit_max_gap_s{0.20};
+    int spin_fit_min_samples{8};
+    double spin_fit_min_span_s{0.20};
+    // 相位集中度门限（0~1）：数据说不清"这是个刚体在匀速转"时就别更新。
+    double spin_fit_min_concentration{0.55};
+    // 法向相位只在它与同一帧的位置相位（折叠后）差得不远时才入拟合，
+    // 且权重低——实拍板面法向有 ±20° 抖动和固定偏置（见 HANDOFF §6.5）。
+    double spin_fit_phase_gate_rad{0.35};
+    double spin_fit_normal_weight{0.30};
+    // σ 下限与放大系数：窗口逐帧重叠，估计高度相关，直接用拟合协方差会让
+    // EKF 过度自信（ω 追着噪声走）。
+    double spin_fit_sigma_floor_rad_s{0.10};
+    double spin_fit_sigma_scale{1.5};
+    // 选峰用的线性先验罚系数（C/(rad/s)）：score = C - penalty·|ω - 上一帧ω|。
+    // 二次罚会自锁（偏了就回不来，实测 8 rad/s 锁死在 1 rad/s）；线性罚代价有界，
+    // 既能压住"相邻别名峰逐帧轮流赢"的突刺，又让真峰随时能翻盘。
+    double spin_fit_prior_slope_penalty{0.03};
+
+    // 旧的四路证据融合（updateYawRateFromWindowLegacy）。默认关闭；
+    // 保留一版便于 A/B 对照，验收通过后单独提交删除。
+    bool legacy_rate_window_enabled{false};
+
     // === 锁定 ===
     int lock_min_samples{8};         // 至少攒到的帧数（只收带法向的观测）
     double lock_min_span_s{0.18};     // 至少覆盖的时间跨度（短了圆拟合与转速都不可辨）
@@ -779,13 +815,36 @@ private:
         bool continuous{true};
     };
     std::deque<RateSample> rate_samples_{};
+    // 转速估计入口：spin_fit_enabled 时走单一相位拟合，否则按
+    // legacy_rate_window_enabled 决定是否走旧的四路证据融合。
     void updateYawRateFromWindow(const std::vector<WorldObservation>& world,
                                  double timestamp_s);
+    // 单一相位拟合（推荐路径）：见 RotatingArmorSpinFit.hpp。
+    void updateYawRateFromPhaseFit(const std::vector<WorldObservation>& world,
+                                   double timestamp_s);
+    // 旧的四路证据融合（默认关闭，验后删除）。
+    void updateYawRateFromWindowLegacy(const std::vector<WorldObservation>& world,
+                                       double timestamp_s);
+    // 相位拟合的窗口样本：位置相位要用"采样时刻的车心"当极点，
+    // 所以车心和观测一起存。
+    struct SpinWindowSample
+    {
+        double timestamp_s{0.0};
+        Eigen::Vector2d position{Eigen::Vector2d::Zero()};
+        // 采集时刻的 EKF 车心快照。它不是直接拿来当相位参考点的：那会让参考点
+        // 在窗口内跟着车心的随机游走漂移，而 φ(t) 的斜率正是被测的 ω，漂移会被
+        // 原样读成转速。用法见 updateYawRateFromPhaseFit 里"参考点"那一段。
+        Eigen::Vector2d center{Eigen::Vector2d::Zero()};
+        double world_yaw{0.0};
+        bool has_yaw{false};
+    };
+    std::deque<SpinWindowSample> spin_window_samples_{};
     void resetRateWindow()
     {
         rate_samples_.clear();
         chord_samples_.clear();
         raw_normal_samples_.clear();
+        spin_window_samples_.clear();
     }
     // 同帧双板弦方向样本：dir 已按 π 周期解缠（板序无关）。
     struct ChordSample

@@ -1,4 +1,5 @@
 #include "RotatingArmorTracker.hpp"
+#include "RotatingArmorSpinFit.hpp"
 
 #include <Eigen/Dense>
 
@@ -1140,8 +1141,198 @@ bool RotatingArmorTracker::tryLock(const std::vector<WorldObservation> &world,
 // 真实转动绕回去，却能容忍换板（换板带来的整周期增量折叠后为 0）。
 // 拟合残差大 = 这一串法向根本不来自同一块/同一台车（同 id 异车、漏检跳变），
 // 此时宁可不给量测，也不要喂一条错误斜率——v1 的 10 rad/s 就是这么来的。
+// 转速估计的入口：单一相位拟合是默认路径；旧的四路证据融合默认关闭，
+// 只用于 A/B 对照（legacy_rate_window_enabled），验收通过后单独提交删除。
 void RotatingArmorTracker::updateYawRateFromWindow(const std::vector<WorldObservation> &world,
                                                    double timestamp_s)
+{
+    if (config_.spin_fit_enabled)
+    {
+        updateYawRateFromPhaseFit(world, timestamp_s);
+        return;
+    }
+    if (config_.legacy_rate_window_enabled)
+    {
+        updateYawRateFromWindowLegacy(world, timestamp_s);
+    }
+}
+
+// 单一相位拟合（推荐路径）。
+//
+// 与旧路径的差别不是"又加了一路证据"，而是**取消了证据融合**：
+//   * 窗口里收本帧所有同目标板（位置相位 + 可用的法向相位），不做最近邻续接；
+//   * 换板造成的 ±2π/N 跳变由折叠内建消除（旧路径靠"续接 + 解缠 + 清窗"三件套，
+//     每件都是一类伪值的来源）；
+//   * ω 是**全窗联合**解出来的一个数，不是两两斜率的中位数——滑窗移动时参数
+//     连续变化，不会像中位数那样阶梯跳变，这就是"ω 曲线抖"的机制性修复。
+void RotatingArmorTracker::updateYawRateFromPhaseFit(const std::vector<WorldObservation> &world,
+                                                     double timestamp_s)
+{
+    if (!ekf_.initialized() || target_id_ == 0 || config_.ekf.plate_count <= 0)
+    {
+        return;
+    }
+    const double radius = ekf_.state()(8);
+    // 半径/极点不可信时不要估转速：绕一个坏极点算出的相位本身就是噪声
+    // （R 崩到 clamp 下限 0.152 时旧路径的 bearing 斜率能冲到 ±10，全从这来）。
+    if (!std::isfinite(radius) || radius < std::min(config_.radius_plausible_min_m, config_.radius_prior_m) ||
+        radius > std::max(config_.radius_plausible_max_m, config_.radius_prior_m))
+    {
+        diagnostics_.rate_obs_used = false;
+        return;
+    }
+    const Eigen::Vector2d centre(ekf_.state()(0), ekf_.state()(2));
+
+    // 1) 收集本帧所有同目标板。**不挑最近邻**：折叠拟合一帧里可以有多块板，
+    //    也不怕换板——"续接链"正是旧路径伪转速的主要来源之一。
+    for (const WorldObservation &observation : world)
+    {
+        if (observation.target_id != target_id_ || !observation.position.allFinite())
+        {
+            continue;
+        }
+        const Eigen::Vector2d position(observation.position.x(), observation.position.y());
+        // 圆上一致性：不在半径圆上的观测（斜置副板、同号但属于别的车）不参与相位拟合。
+        if (std::fabs((position - centre).norm() - radius) > config_.rate_pole_residual_m)
+        {
+            continue;
+        }
+        const bool has_yaw = observation.has_yaw && std::isfinite(observation.yaw);
+        spin_window_samples_.push_back({timestamp_s, position, centre, observation.yaw, has_yaw});
+    }
+    while (!spin_window_samples_.empty() &&
+           timestamp_s - spin_window_samples_.front().timestamp_s > config_.spin_fit_window_s)
+    {
+        spin_window_samples_.pop_front();
+    }
+    if (spin_window_samples_.empty())
+    {
+        diagnostics_.rate_window_samples = 0;
+        diagnostics_.rate_obs_used = false;
+        return;
+    }
+    // 断流：最后一条样本已经太旧，说明中间掉帧/被挡/换了目标。旧相位与新相位
+    // 之间可能已经转过好几块板，接起来只会得到伪转速。
+    if (timestamp_s - spin_window_samples_.back().timestamp_s > config_.spin_fit_max_gap_s)
+    {
+        spin_window_samples_.clear();
+        diagnostics_.rate_window_samples = 0;
+        diagnostics_.rate_obs_used = false;
+        return;
+    }
+
+    // 2) 位置相位（重）与法向相位（轻）。板心 p 与车心 c 的关系是
+    //    p = c - R·[cos φ, sin φ]（RotatingArmorModel::measurement），
+    //    所以 φ = atan2(c.y - p.y, c.x - p.x)；板面法向 yaw = φ + π。
+    //
+    //    参考点怎么取是本模块最容易出错的一处，三种朴素做法都错：
+    //      * 每条样本各存"采集时刻的 EKF 车心"当参考 → 参考点在窗口内跟着车心
+    //        随机游走，而 φ(t) 的斜率正是被测的 ω，游走被原样读成转速（实测
+    //        静止目标 + 法向噪声 ±20° 时车心 0.45 s 漂 6 cm，折合 0.5 rad/s）；
+    //      * 全窗统一用当前车心 → 平移目标上板心在跑、参考点不动，φ 被拉出一
+    //        条假斜率（实测平移读出 2.8 rad/s）；
+    //      * 用 EKF 的速度把当前车心反推回各帧 → 这里的 v 本身不可信（实测真值
+    //        0.5 m/s 的场景里估计到 (-0.33,+0.42)），补偿反而放大误差。
+    //    而且"该用哪个"没法用工况硬判：平移场景里 EKF 车心自己就不动（实测
+    //    0.45 s 只走 0.13 m，真值 0.22 m），位移判据同样失灵。
+    //
+    //    所以交给数据自己选：两档参考点各拟一次 ——
+    //      A 固定参考点 = 窗口内车心快照的均值（车心的随机游走被整体抹平）；
+    //      B 逐帧参考点 = 每帧自己的车心快照（匀速平移的常值滞后自动抵消）。
+    //    谁的相位集中度 C 更高就用谁。这正是同一个似然的两套解释，不需要额外
+    //    阈值：静止/自转目标上 A 明显更好（参考点不漂），平移目标上 B 明显更好
+    //    （板心与参考点同步平移，δ = c - p 保持恒定）。
+    Eigen::Vector2d centre_mean = Eigen::Vector2d::Zero();
+    for (const SpinWindowSample &sample : spin_window_samples_)
+    {
+        centre_mean += sample.center;
+    }
+    centre_mean /= static_cast<double>(spin_window_samples_.size());
+    const double fold_period = 2.0 * kPi / static_cast<double>(config_.ekf.plate_count);
+
+    // follow=0 → 固定参考点（均值）；follow=1 → 逐帧参考点（快照）。
+    const auto buildSamples = [&](double follow) {
+        std::vector<SpinSample> out;
+        out.reserve(spin_window_samples_.size() * 2);
+        std::vector<double> phase(spin_window_samples_.size(), 0.0);
+        for (std::size_t i = 0; i < spin_window_samples_.size(); ++i)
+        {
+            const SpinWindowSample &sample = spin_window_samples_[i];
+            const Eigen::Vector2d reference = centre_mean + follow * (sample.center - centre_mean);
+            phase[i] = std::atan2(reference.y() - sample.position.y(),
+                                  reference.x() - sample.position.x());
+            out.push_back({sample.timestamp_s, phase[i], 1.0});
+        }
+        // 法向相位只在"与同一帧的位置相位折叠后一致"时才用：实拍板面法向有固定
+        // 偏置与 ±20° 抖动，单靠它会解缠出错；一致时它给出额外角度信息，权重给低。
+        for (std::size_t i = 0; i < spin_window_samples_.size(); ++i)
+        {
+            const SpinWindowSample &sample = spin_window_samples_[i];
+            if (!sample.has_yaw)
+            {
+                continue;
+            }
+            const double normal_phase = worldYawToPlatePhase(sample.world_yaw);
+            if (std::fabs(foldPeriod(normal_phase - phase[i], fold_period)) >
+                config_.spin_fit_phase_gate_rad)
+            {
+                continue;
+            }
+            out.push_back({sample.timestamp_s, normal_phase, config_.spin_fit_normal_weight});
+        }
+        return out;
+    };
+
+    // 3) 全窗联合拟合（两档参考点各一次）。
+    SpinFitConfig fit_config;
+    fit_config.plate_count = config_.ekf.plate_count;
+    fit_config.max_abs_rad_s = config_.rate_max_abs_rad_s > 0.0 ? config_.rate_max_abs_rad_s : 12.0;
+    fit_config.min_span_s = config_.spin_fit_min_span_s;
+    fit_config.min_samples = config_.spin_fit_min_samples;
+    fit_config.min_concentration = config_.spin_fit_min_concentration;
+    fit_config.use_prior = true;
+    fit_config.prior_rad_s = ekf_.state()(7);
+    fit_config.prior_slope_penalty = config_.spin_fit_prior_slope_penalty;
+    fit_config.sigma_floor_rad_s = config_.spin_fit_sigma_floor_rad_s;
+    fit_config.sigma_scale = config_.spin_fit_sigma_scale;
+    SpinFitReport report = fitSpinPhase(buildSamples(0.0), fit_config);
+    const SpinFitReport following_report = fitSpinPhase(buildSamples(1.0), fit_config);
+    if (following_report.fit.ok &&
+        (!report.fit.ok || following_report.fit.concentration > report.fit.concentration))
+    {
+        report = following_report;
+    }
+    diagnostics_.rate_window_samples = static_cast<int>(spin_window_samples_.size());
+    if (!report.fit.ok || report.fit.sigma_rad_s > config_.rate_max_sigma_rad_s)
+    {
+        // 这一帧没有可信证据：不盖章，交给 update() 里的衰减项把 ω 慢慢拉回 0。
+        diagnostics_.rate_obs_used = false;
+        if (trackDebugEnabled())
+            std::fprintf(stderr, "[spinfit] reject status=%d n=%d C=%.2f\n",
+                         static_cast<int>(report.status), diagnostics_.rate_window_samples,
+                         report.fit.concentration);
+        return;
+    }
+
+    // 4) 经典标量卡尔曼更新（H = e7，R = σ²），不再有"同号/异号/只取幅度"那套规则。
+    if (!ekf_.updateYawRate(report.fit.omega_rad_s, report.fit.sigma_rad_s))
+    {
+        return;
+    }
+    last_rate_update_s_ = timestamp_s;
+    diagnostics_.rate_obs_used = true;
+    diagnostics_.rate_obs_rad_s = report.fit.omega_rad_s;
+    diagnostics_.rate_obs_sigma_rad_s = report.fit.sigma_rad_s;
+    diagnostics_.rate_obs_samples = report.fit.samples;
+    if (trackDebugEnabled())
+        std::fprintf(stderr, "[spinfit] ts=%.3f n=%d C=%.2f w=%+.2f(%.2f) res=%.3f ekf_w=%+.2f\n",
+                     timestamp_s, report.fit.samples, report.fit.concentration,
+                     report.fit.omega_rad_s, report.fit.sigma_rad_s, report.fit.residual_rms_rad,
+                     ekf_.state()(7));
+}
+
+void RotatingArmorTracker::updateYawRateFromWindowLegacy(const std::vector<WorldObservation> &world,
+                                                         double timestamp_s)
 {
     if (!config_.rate_update_enabled || !ekf_.initialized() || target_id_ == 0)
     {
@@ -3569,7 +3760,7 @@ PredictionResult RotatingArmorTracker::step(const std::vector<ArmorPose> &observ
     // 窗口很弱（sigma 2.0），压不过一次真实的斜率量测（sigma 0.15 量级）。
     // 它同时阻止 ω 被位置更新经协方差耦合慢慢推走（实测能推到 ∓6 rad/s，
     // H 组静止+噪声法向契约靠它）。
-    if (config_.rate_update_enabled &&
+    if ((config_.rate_update_enabled || config_.spin_fit_enabled) &&
         timestamp_seconds - last_rate_update_s_ > config_.rate_decay_after_s &&
         std::fabs(ekf_.state()(7)) > 0.05)
     {
