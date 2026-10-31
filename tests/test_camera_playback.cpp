@@ -166,9 +166,6 @@ namespace
         double normal_tiebreak{-1.0};
         int joint_pair{-1};
         int id_posterior{-1};
-        // 0 = 关掉全部旧转速通道（rate_update/tracklet/chord/raw_normal）；
-        // 1 = 旧通道全开（与历史行为一致）；-1 = 不动，用 TrackerConfig 默认值。
-        int rate_legacy{-1};
         int pair_static{-1};
         int pair_lh{-1};
         int assoc_angle{-1};
@@ -309,10 +306,6 @@ namespace
             else if (arg == "--pair-static")
             {
                 args.pair_static = std::atoi(next("--pair-static").c_str());
-            }
-            else if (arg == "--rate-legacy")
-            {
-                args.rate_legacy = std::atoi(next("--rate-legacy").c_str());
             }
             else if (arg == "--joint-pair")
             {
@@ -928,17 +921,6 @@ int main(int argc, char **argv)
     if (args.normal_tiebreak >= 0.0)
     {
         tracker_config.normal_tiebreak_weight = args.normal_tiebreak;
-    }
-    if (args.rate_legacy >= 0)
-    {
-        // 旧转速通道全家桶：Theil-Sen 法向/方位角窗、逐帧 tracklet、弦向、
-        // 原始法向、以及 0.35 s 的 rate_window。A/B 只想知道"新通道独立能不能
-        // 站住"，所以这里是全开/全关，不做逐条开关。
-        const bool on = args.rate_legacy != 0;
-        tracker_config.rate_update_enabled = on;
-        tracker_config.rate_from_tracklet_enabled = on;
-        tracker_config.rate_from_chord_enabled = on;
-        tracker_config.rate_from_raw_normal_enabled = on;
     }
     if (args.antianchor >= 0)
     {

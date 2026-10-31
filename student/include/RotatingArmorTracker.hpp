@@ -51,108 +51,59 @@ struct TrackerConfig
     // 30-50 mm，滤波器 P 收得太紧时会"拒跟"观测（实测状态离刚更新的观测 87 mm）。
     double process_accel_scale{1.0};
 
-    // === 转速窗口估计（"到底转不转"由数据决定，而不是由调用方声明）===
+    // === 转速 ω 的相位拟合估计（"到底转不转"由数据决定，不由调用方声明）===
     //
     // 实拍 v1/v4 的核心教训：166 fps 下 omega 与观测噪声是混叠的。10 rad/s × R=0.3
     // 的切向位移只有 2 cm/帧，和 PnP 噪声同量级，所以"逐帧位置更新的自由积分"
     // 可以把静止目标推成 10 rad/s（NIS 依然只有 2，滤波器认为完全自洽）。
-    // 反过来，板面法向在 0.3 s 窗口上会累积 60° 的真实转角，远大于法向噪声。
-    // 因此这里维护一个窗口，用最小二乘斜率作为 omega 的伪量测送进 EKF：
-    //   * 窗口说"在转" -> omega 跟着数据走；
-    //   * 窗口说"没转"   -> omega 被拉回 0，不需要 Static 声明。
-    bool rate_update_enabled{true};
-    double rate_window_s{0.35};        // 拟合窗口（秒）
-    double rate_min_span_s{0.18};      // 窗口至少要覆盖这么久
-    int rate_min_samples{12};          // 至少要这么多帧
-    double rate_max_gap_s{0.05};       // 相邻样本间隔超过它就清空窗口（掉帧/换目标）
-    // 转速窗口的关联门限：比位置门严得多。同一台车/相邻车的同编号板可能只差
-    // 0.2~0.4 m（实拍 v4 的斜置副板），混进窗口会把相位序列扯成假高速旋转。
-    double rate_associate_gate_m{0.15};          // 观测离预测板超过它就不算"自己这台车"
-    double rate_sigma_floor_rad_s{0.15};
-    // 反证据：窗口超过这么久没给出有效斜率，就喂一个"没在转"的弱伪量测
-    // （omega -> 0，sigma 见下）。没有这一条时 omega 会被位置更新经由协方差
-    // 耦合慢慢推到 -6 rad/s（回放 v4 实测），模型整块板跟着自转——正是用户
-    // 看到的"圆心偏了"。数据支持不了旋转时，停在 0 才是安全解。
-    double rate_decay_after_s{0.60};
-    // 衰减项是一次"omega=0"的伪量测，sigma 取大一点：它只负责在长时间没有
-    // 任何斜率证据时把 omega 慢慢拉回 0，压不过一次真实量测（sigma 0.15 量级）。
-    double rate_decay_sigma_rad_s{2.00};
-    // 斜率标准误上限：超过这个值说明这一窗数据根本说明不了转速（v4 静态目标
-    // 上法向乱翻，MAD 给出 ±2-3 rad/s），宁可不用这一帧，让衰减项把 omega
-    // 留在 0，也不要把噪声当证据。
-    // 2026-10-23 接上这条闸门：先用 2.0，v4 左车 178/201 个窗口被拒（bearing
-    // 序列 MAD 常在 3~5 rad/s），omega 直接被衰减项压成 0，等于"车不转了"；
-    // 4.0 仍拒掉 174 窗口；6.0 只拦真正乱翻的窗口，剩下的交给 EKF 按 sigma 加权。
-    double rate_max_sigma_rad_s{6.00};
-    // 转速的物理闸门：四板车实测最快 8 rad/s（G 组），取 1.5 倍余量。
-    // 超过它的斜率只可能来自"续接跳到别的板 / 极点选错 / 折叠算术出错"，
-    // 以前这些伪转速（v4 实测 +19~+34 rad/s）会被原样喂进 EKF，把 omega
-    // 打成 ±10 的方波。0 表示关闭闸门。
-    double rate_max_abs_rad_s{12.00};
-    // 两路证据（法向斜率 vs 板相对车心的方位角斜率）允许的差；超过就当
-    // "这一窗说法向不可信"，直接不更新。
-    double rate_agreement_rad_s{1.50};
-    // 弦向转速证据：同帧两块同号板的"弦方向"随车体严格同转，不依赖极点/车心、
-    // 不受平移影响（v4 实拍 7.85 rad/s 自转车：209 个双板帧、弦长稳定 0.40m、
-    // 0.35s 窗内斜率干净）。它是打破自举死锁的钥匙：omega 卡在 0 时
-    // spinning_now=false，方位角路只能用逐帧抖动的伪极点，斜率是垃圾且被
-    // 物理闸门拒掉，omega 永远起不来。板序互换造成的 180° 翻转按 π 折叠消除。
-    bool rate_from_chord_enabled{true};
-    double rate_chord_min_m{0.15};
-    double rate_chord_max_m{0.65};
-    // 原始法向路线（3f）：全部同号板法向、跨帧全配对、逐对折叠（fold ±π）
-    // Theil-Sen。mod-90° 折叠把板间推进抹成 0、链式解缠被噪声随机游走——
-    // 逐对折叠没有这两类失效。前向区检测（位置/弦向/方位角全部读 ≈0）时
-    // 唯一稳定的转速来源。窗口比转速窗口长：法向噪声大，靠配对数量压方差。
-    bool rate_from_raw_normal_enabled{true};
-    double rate_raw_window_s{0.70};
-    // 转速自检：板心到极点的距离与当前半径 R 差超过它的样本过半，或 R 本身
-    // 掉出 [radius_plausible_min_m, radius_plausible_max_m] 时，这一窗的方位角
-    // 斜率必然是伪值（实测 R 崩到 0.152 时 bearing 斜率冲到 +8~+10，全靠物理
-    // 闸门兜底）——整窗放弃，宁可让衰减项慢慢接管，也不要拿坏几何估转速。
-    double rate_pole_residual_m{0.10};
-    // 非自转（|omega|<0.5）时方位角用"每帧当时车心"当极点：纯平移下真方位角
-    // 是常数，斜率只可能来自车心估计误差的漂移，而误差漂移与车速同源
-    // （H3 平移 0.5 m/s 实测 bear 斜率稳定 +0.4~+0.7，omega 被推到 +0.51）。
-    // 车心速度超过它就不信方位角路，退回法向斜率；自转时极点是同一个点
-    // （当前 EKF 车心），平移是共模量，不受此限。
-    double rate_bearing_max_centre_speed_m_s{0.30};
-
-    // === 单一相位拟合转速估计（2026-10-31）===
+    // 反过来，板相位在 0.3 s 窗口上会累积 60° 的真实转角，远大于相位噪声。
     //
-    // 上面那四路证据（法向 Theil-Sen / 方位角 Theil-Sen / 弦向 Theil-Sen /
-    // 原始法向全配对）各自有自己的折叠周期和失效模式，融合规则只能靠特例堆；
-    // 而且两两斜率的中位数在滑窗移动时是**阶梯函数**，ω 曲线天然带锯齿。
-    // 现在换成一条：窗口内所有同目标板观测的相位一起拟合
-    //     θ(t) = φ0 + ω·(t - t̄)，残差按 2π/N 折叠，
-    // 换板跳变由折叠内建消除（不需要续接链），给定 ω 时 φ0 闭式、
-    // ω 一维全搜索 + 黄金分割精化。数学推导与取舍见 RotatingArmorSpinFit.hpp。
-    bool spin_fit_enabled{true};
-    // 拟合窗口。比旧的 0.35 s 略长：相位是全窗联合拟合，样本多一点只降方差、
-    // 不引入斜率阶梯；代价是换向/变速时的滞后（sinspeed 这类正弦变速素材要盯这个）。
-    double spin_fit_window_s{0.45};
-    // 相邻样本间隔超过它就清空窗口（掉帧/换目标/被遮挡）。
-    double spin_fit_max_gap_s{0.20};
+    // 所以 ω 只从一条通道来：窗口内所有同目标板观测的相位一起拟合
+    //     θ(t) = φ0 + ω·(t − t̄)，残差按 2π/N 折叠，
+    // 换板跳变由折叠内建消除（不需要续接链），给定 ω 时 φ0 闭式、ω 一维全
+    // 搜索 + 黄金分割精化。推导与取舍见 docs/omega相位拟合说明.md。
+    //
+    // 旧的四路证据融合（法向/方位角/弦向 Theil-Sen + 原始法向全配对）已删除：
+    // 两两斜率的中位数在滑窗移动时是阶梯函数，ω 曲线天然带锯齿，那是结构问题，
+    // 调参治不好。
+    double spin_fit_window_s{0.45};   // 拟合窗口
+    double spin_fit_max_gap_s{0.20};  // 相邻样本间隔超过它就清窗（掉帧/换目标/遮挡）
     int spin_fit_min_samples{8};
     double spin_fit_min_span_s{0.20};
     // 相位集中度门限（0~1）：数据说不清"这是个刚体在匀速转"时就别更新。
     double spin_fit_min_concentration{0.55};
-    // 法向相位只在它与同一帧的位置相位（折叠后）差得不远时才入拟合，
-    // 且权重低——实拍板面法向有 ±20° 抖动和固定偏置（见 HANDOFF §6.5）。
+    // 法向相位只在它与同一帧的位置相位（折叠后）差得不远时才入拟合，且权重低
+    // ——实拍板面法向有 ±20° 抖动和固定偏置。
     double spin_fit_phase_gate_rad{0.35};
     double spin_fit_normal_weight{0.30};
     // σ 下限与放大系数：窗口逐帧重叠，估计高度相关，直接用拟合协方差会让
     // EKF 过度自信（ω 追着噪声走）。
     double spin_fit_sigma_floor_rad_s{0.10};
     double spin_fit_sigma_scale{1.5};
-    // 选峰用的线性先验罚系数（C/(rad/s)）：score = C - penalty·|ω - 上一帧ω|。
+    // 选峰用的线性先验罚系数（C/(rad/s)）：score = C − penalty·|ω − 上一帧ω|。
     // 二次罚会自锁（偏了就回不来，实测 8 rad/s 锁死在 1 rad/s）；线性罚代价有界，
     // 既能压住"相邻别名峰逐帧轮流赢"的突刺，又让真峰随时能翻盘。
     double spin_fit_prior_slope_penalty{0.03};
 
-    // 旧的四路证据融合（updateYawRateFromWindowLegacy）。默认关闭；
-    // 保留一版便于 A/B 对照，验收通过后单独提交删除。
-    bool legacy_rate_window_enabled{false};
+    // 转速的物理闸门：四板车实测最快 8 rad/s（G 组），取 1.5 倍余量。超过它的
+    // 解只可能来自"极点选错/折叠算术出错"，以前这些伪转速（v4 实测 +19~+34）
+    // 会被原样喂进 EKF，把 omega 打成 ±10 的方波。0 表示关闭。
+    double rate_max_abs_rad_s{12.00};
+    // 斜率标准误上限：超过它说明这一窗数据根本说明不了转速（静态目标上法向乱
+    // 翻时 MAD 给出 ±2~3 rad/s），宁可不用这一帧，让衰减项把 omega 留在 0。
+    double rate_max_sigma_rad_s{6.00};
+    // 板心到参考点的距离与当前半径 R 差超过它的样本不参与相位拟合：斜置副板、
+    // 同号但属于别的车的观测都会把相位序列扯成假高速旋转（实测 R 崩到 0.152
+    // 时 bearing 斜率能冲到 +8~+10）。
+    double rate_pole_residual_m{0.10};
+    // 反证据：超过这么久没给出有效证据，就喂一个"没在转"的弱伪量测（ω→0）。
+    // 没有这一条时 ω 会被位置更新经由协方差耦合慢慢推到 −6 rad/s（回放 v4
+    // 实测），模型整块板跟着自转——就是用户看到的"圆心偏了"。数据支持不了
+    // 旋转时，停在 0 才是安全解。
+    double rate_decay_after_s{0.60};
+    // 衰减项是一次"ω=0"的伪量测，σ 取大一点：它只负责在长时间没有证据时把 ω
+    // 慢慢拉回 0，压不过一次真实量测（σ 0.1 量级）。
+    double rate_decay_sigma_rad_s{2.00};
 
     // === 锁定 ===
     int lock_min_samples{8};         // 至少攒到的帧数（只收带法向的观测）
@@ -800,31 +751,12 @@ private:
     // 上一帧真正被接受的更新数；重锚要求"连续更新不进去"，单帧离群不行。
     int last_updates_{0};
     double last_rate_update_s_{-1.0e9};
-    struct RateSample
-    {
-        double timestamp_s{0.0};
-        double unwrapped_yaw{0.0};
-        Eigen::Vector3d position{Eigen::Vector3d::Zero()};
-        // 采样时刻的车心估计：用"板相对车心的方位角"做第二路转速证据时，
-        // 每个样本必须配它自己的车心，否则目标平移会被当成旋转。
-        Eigen::Vector2d center{Eigen::Vector2d::Zero()};
-        // true = 这一帧的观测是从上一帧那块板**位置连续**续接来的（最近邻 <
-        // rate_associate_gate_m）。换板续接（handoff）的样本位置会跳半块板，
-        // 方位角差近 90°，混进方位角序列会解缠出几十 rad/s 的假转速，所以
-        // 方位角证据只用连续样本；法向证据仍可用全部样本（折叠后连续）。
-        bool continuous{true};
-    };
-    std::deque<RateSample> rate_samples_{};
-    // 转速估计入口：spin_fit_enabled 时走单一相位拟合，否则按
-    // legacy_rate_window_enabled 决定是否走旧的四路证据融合。
+    // 转速估计入口：现在只有相位拟合一条路（旧的窗口融合已删除）。
     void updateYawRateFromWindow(const std::vector<WorldObservation>& world,
                                  double timestamp_s);
-    // 单一相位拟合（推荐路径）：见 RotatingArmorSpinFit.hpp。
+    // 单一相位拟合：见 RotatingArmorSpinFit.hpp 与 docs/omega相位拟合说明.md。
     void updateYawRateFromPhaseFit(const std::vector<WorldObservation>& world,
                                    double timestamp_s);
-    // 旧的四路证据融合（默认关闭，验后删除）。
-    void updateYawRateFromWindowLegacy(const std::vector<WorldObservation>& world,
-                                       double timestamp_s);
     // 相位拟合的窗口样本：位置相位要用"采样时刻的车心"当极点，
     // 所以车心和观测一起存。
     struct SpinWindowSample
@@ -841,29 +773,8 @@ private:
     std::deque<SpinWindowSample> spin_window_samples_{};
     void resetRateWindow()
     {
-        rate_samples_.clear();
-        chord_samples_.clear();
-        raw_normal_samples_.clear();
         spin_window_samples_.clear();
     }
-    // 同帧双板弦方向样本：dir 已按 π 周期解缠（板序无关）。
-    struct ChordSample
-    {
-        double timestamp_s{0.0};
-        double dir{0.0};
-        double chord{0.0};
-    };
-    std::deque<ChordSample> chord_samples_;
-    // 全部同号板的原始法向样本（每帧每板一条，不挑选）：四块板的法向都以 ω
-    // 推进，跨帧全配对后同板对给出 ≈ω 的斜率、换板对是 ±90°/dt 的离群对，
-    // Theil-Sen 中位数恰好落在信号上。只用 chosen 的话，chosen 链频繁换板，
-    // 同板对太少（v4 实测 median ≈0）。
-    struct RawNormalSample
-    {
-        double timestamp_s{0.0};
-        double yaw{0.0};
-    };
-    std::deque<RawNormalSample> raw_normal_samples_;
 
     TrackerConfig config_{};
     RotatingArmorEkf ekf_{config_.ekf};
