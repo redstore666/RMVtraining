@@ -29,7 +29,9 @@ constexpr int kFrames = 300; // >= 200 帧，且 yaw 累计转过 >= pi
 // 注：按 measurement() 的相位约定（板中心 = 中心 - R[cos, sin]），
 //     x(0)=cx 是车体中心初值，而不是任何时刻的板位置。
 inline State truthState() {
-    return (State() << 0.40, -0.25, 1.80, 0.10, 0.35, 0.0, 0.20, 2.50, 0.25).finished();
+    // 状态已从 9 维扩到 11 维（尾部补 pair_radius_diff / pair_height_diff），
+    // 这里必须填满 kStateDim 个数，否则 Eigen 的逗号初始化会断言 abort。
+    return (State() << 0.40, -0.25, 1.80, 0.10, 0.35, 0.0, 0.20, 2.50, 0.25, 0.0, 0.0).finished();
 }
 
 // 同一条平移轨迹，但目标不转：用来验证 Static 声明的路径。
